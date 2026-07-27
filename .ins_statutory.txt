@@ -1,0 +1,2 @@
+      <div class="two"><div><label>ESIC no. (if any)</label><input data-field="esic"></div>
+      <div><label>Category</label><select data-field="category"><option value="">Select</option><option>General</option><option>OBC</option><option>SC</option><option>ST</option><option>EWS</option></select></div></div>

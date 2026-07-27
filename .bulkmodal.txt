@@ -1,0 +1,8 @@
+<div class="mov" id="bulkMov"><div class="modal">
+  <h2>Bulk import existing staff</h2>
+  <p class="s">Upload a CSV of your workforce. Each row gets a Temp-EMP ID and is auto-matched to an existing employee (old code / PAN / email / mobile).</p>
+  <a class="btn ghost" href="{{ route('app.selfonboard.bulk.template') }}" style="display:inline-block;text-decoration:none;margin-bottom:10px">⬇ Download CSV template</a>
+  <label>CSV file</label><input type="file" id="bulkFile" accept=".csv,.txt">
+  <div id="bulkResult"></div>
+  <div style="display:flex;gap:10px;margin-top:14px"><button class="btn primary" id="bulkUpload">Upload &amp; match</button><button class="btn green" id="bulkCommit" style="display:none">Commit → create/link</button><button class="btn ghost" id="bulkCancel">Close</button></div>
+</div></div>

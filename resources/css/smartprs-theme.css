@@ -1,0 +1,36 @@
+/*
+ * SmartPRS design system — extracted from the FINAL prototype (SmartPRS.html).
+ * Locked tokens; do not redesign (see CONTEXT-HANDOFF.md). Import alongside Tailwind.
+ */
+:root {
+    /* Brand */
+    --navy: #0c1929;
+    --accent: #f97316;            /* orange */
+    --accent-soft: rgba(249, 115, 22, 0.10);
+
+    /* Surfaces */
+    --bg: #f0f4f8;
+    --card: #ffffff;
+    --border: #e2e8f0;
+
+    /* Status palette */
+    --green: #10b981;  --green-soft: rgba(16, 185, 129, 0.10);
+    --blue: #3b82f6;   --blue-soft: rgba(59, 130, 246, 0.10);
+    --amber: #f59e0b;  --amber-soft: rgba(245, 158, 11, 0.10);
+    --red: #ef4444;    --red-soft: rgba(239, 68, 68, 0.10);
+    --purple: #8b5cf6; --purple-soft: rgba(139, 92, 246, 0.10);
+
+    /* Typography */
+    --font: 'Plus Jakarta Sans', 'DM Sans', sans-serif;
+    --mono: 'DM Mono', monospace;
+
+    /* Layout */
+    --header-h: 62px;
+    --sidebar-w: 260px;
+}
+
+body {
+    background: var(--bg);
+    color: var(--navy);
+    font-family: var(--font);
+}

@@ -1,0 +1,18 @@
+
+        // EXISTING employee (mode=existing): patch the record in place, do not create a duplicate.
+        if ($rec->employee_id) {
+            $patch = ['email_verified' => (bool) $rec->email_verified, 'mobile_verified' => (bool) $rec->mobile_verified, 'wa_verified' => (bool) $rec->wa_verified, 'docs_status' => 'approved', 'docs_stored' => true, 'updated_at' => now()];
+            if (! empty($p['dob'])) { $patch['dob'] = $p['dob']; }
+            if (! empty($p['gender'])) { $patch['gender'] = $p['gender']; }
+            if (! empty($ct['current_address'])) { $patch['address'] = $ct['current_address']; }
+            if (! empty($st['pan'])) { $patch['pan'] = strtoupper($st['pan']); }
+            if (! empty($st['uan'])) { $patch['uan'] = $st['uan']; }
+            if (! empty($bk['bank_name'])) { $patch['bank_name'] = $bk['bank_name']; }
+            if (! empty($bk['acc_no'])) { $patch['bank_acc'] = $bk['acc_no']; }
+            if (! empty($bk['ifsc'])) { $patch['ifsc'] = strtoupper($bk['ifsc']); }
+            DB::table('employees')->where('id', $rec->employee_id)->update(ApprovalService::safeRow('employees', $patch));
+            DB::table('self_onboarding')->where('id', $id)->update(['status' => 'injected', 'approved_at' => now(), 'link_disabled_at' => now(), 'updated_at' => now()]);
+            $code = DB::table('employees')->where('id', $rec->employee_id)->value('emp_code');
+
+            return response()->json(['ok' => true, 'emp_code' => $code, 'employee_id' => $rec->employee_id, 'updated' => true]);
+        }

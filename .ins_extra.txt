@@ -1,0 +1,1 @@
+        $candExtra = array_filter(['blood_group' => $p['blood_group'] ?? null, 'marital_status' => $p['marital'] ?? null, 'category' => $st['category'] ?? null, 'esic_no' => $st['esic'] ?? null]);
