@@ -137,6 +137,7 @@
                                 This SmartPRS installation needs activation. Enter the License Code provided by Ametecs (WhatsApp 9000098877).
                             @endif
                         </p>
+                        <a href="{{ url('/activate') }}" style="display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--accent);font-family:var(--font2);margin:6px 2px 0;font-weight:600;"><i class="fas fa-file-arrow-up"></i> Have a .lic file? Activate / upload it here &rarr;</a>
                     </div>
                 @endif
                 <div class="form-group" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">

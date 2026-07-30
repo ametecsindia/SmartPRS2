@@ -37,7 +37,7 @@
         <p>Enter the licence key from your SmartPRS welcome email. One key activates one server — after this, your team simply logs in and works.</p>
     @endif
 
-    <form method="POST" action="{{ url('/app/activate') }}" enctype="multipart/form-data">
+    <form method="POST" action="{{ $formAction ?? url('/app/activate') }}" enctype="multipart/form-data">
         @csrf
         <label style="display:block;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">Licence key or .lic file</label>
         <input type="text" name="key" placeholder="Paste your licence code (SPRS-… or .lic)" autocomplete="off">
