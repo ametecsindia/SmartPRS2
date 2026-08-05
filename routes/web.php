@@ -507,6 +507,9 @@ Route::middleware(['auth', App\Http\Middleware\LicenseGate::class, App\Http\Midd
     Route::post('/app/biometric-config/{id}/delete', [App\Http\Controllers\BiometricConfigController::class, 'delete'])->whereNumber('id')->name('app.bioconfig.delete');   // F3
     Route::post('/app/biometric-config/test', [App\Http\Controllers\BiometricConfigController::class, 'test'])->name('app.bioconfig.test');
     Route::post('/app/biometric-config/sync', [App\Http\Controllers\BiometricConfigController::class, 'sync'])->name('app.bioconfig.sync');
+    Route::get('/app/biometric-config/mappings', [App\Http\Controllers\BiometricConfigController::class, 'mappings'])->name('app.bioconfig.mappings');   // Biometric Mapping (2026-08-05)
+    Route::post('/app/biometric-config/map', [App\Http\Controllers\BiometricConfigController::class, 'mapEmployee'])->name('app.bioconfig.map');
+    Route::post('/app/biometric-config/unmap', [App\Http\Controllers\BiometricConfigController::class, 'unmapEmployee'])->name('app.bioconfig.unmap');
     // rev161: Employee Document Tracker — real file uploads (list / upload / download / delete).
     Route::get('/app/documents-mgr', [App\Http\Controllers\DocumentController::class, 'index'])->name('app.docmgr');
     Route::post('/app/documents-mgr/upload', [App\Http\Controllers\DocumentController::class, 'upload'])->name('app.docmgr.upload');

@@ -169,19 +169,28 @@ class AttendanceBulkController extends Controller
                 return response()->json(['ok' => false, 'error' => 'Too many rows in one file (max 3,000). Split the file.'], 422);
             }
 
-            // Tenant employee map: by lowercase code AND lowercase name.
+            // Tenant employee map: by lowercase code AND lowercase name — and by the
+            // Biometric Mapping field (employees.device_user_id), so a file exported
+            // straight from the device (device user IDs, not SmartPRS codes) matches.
             $byCode = [];
             $byName = [];
+            $hasBio = \Illuminate\Support\Facades\Schema::hasColumn('employees', 'device_user_id');
+            $cols = $hasBio ? ['emp_code', 'name', 'device_user_id'] : ['emp_code', 'name'];
             foreach (DB::table('employees')->when($tid, fn ($q) => $q->where('tenant_id', $tid))
-                ->whereNull('deleted_at')->get(['emp_code', 'name']) as $e) {
+                ->whereNull('deleted_at')->get($cols) as $e) {
                 $byCode[strtolower(trim((string) $e->emp_code))] = $e;
                 $byName[strtolower(trim((string) $e->name))] = $e;
+                $bio = $hasBio ? strtolower(trim((string) ($e->device_user_id ?? ''))) : '';
+                if ($bio !== '' && ! isset($byCode[$bio])) {
+                    $byCode[$bio] = $e;   // emp_code wins on a clash; mapping fills the gaps
+                }
             }
 
             $batch = (string) Str::uuid();
             $ok = 0;
             $bad = 0;
             $ins = [];
+            $unm = [];   // Biometric Mapping — unknown codes for the mapping card
             foreach ($rows as $r) {
                 $r = (array) $r;
                 $code = strtolower(trim((string) ($r['code'] ?? '')));
@@ -212,10 +221,18 @@ class AttendanceBulkController extends Controller
                 if (! $err) {
                     if (! $emp) {
                         $err = 'Employee not found (code/name)';
+                        if ($code !== '') {
+                            $unm[$code] = ($unm[$code] ?? 0) + 1;   // offer it in the mapping card
+                        }
                     } elseif (! $date) {
                         $err = 'Invalid / missing date';
                     } elseif ($date > now()->toDateString()) {
                         $err = 'Future date not allowed';
+                    } elseif ($date === now()->toDateString()
+                        && (($in && $in > now()->format('H:i')) || ($out && $out > now()->format('H:i')))) {
+                        // 2026-08-05 — same-day punches beyond the current TIME are
+                        // also future entries; block them like future dates.
+                        $err = 'Punch time is in the future';
                     } elseif (! $in && ! $out) {
                         $err = 'No In or Out time';
                     } elseif ($in && $out && $out <= $in) {
@@ -236,6 +253,7 @@ class AttendanceBulkController extends Controller
             foreach (array_chunk($ins, 500) as $chunk) {
                 DB::table('attendance_pending')->insert($chunk);
             }
+            \App\Services\ETimeOfficeService::recordUnmapped($tid, $unm, 'upload');   // Biometric Mapping
 
             return response()->json(['ok' => true, 'batch' => $batch, 'total' => count($ins), 'valid' => $ok, 'errors' => $bad,
                 'message' => $ok.' row(s) ready for approval'.($bad ? ', '.$bad.' row(s) flagged with errors (they will be skipped)' : '').'.']);

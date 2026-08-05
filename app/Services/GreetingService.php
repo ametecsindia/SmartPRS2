@@ -47,7 +47,35 @@ class GreetingService
                 'subject' => 'Happy Work Anniversary, {{first_name}}!',
                 'message' => "Dear {{name}},\n\nCongratulations on completing {{years}} year(s) with {{company}}! Thank you for your dedication and contribution.\n\nWarm wishes,\n{{company}} HR Team",
             ],
+            // 2026-08-05 — Late-login email template. Used by LateArrivalService
+            // when "Email employees on late arrival" is ON (the sending itself is
+            // controlled by that toggle, NOT by the greetings master switch).
+            // Extra placeholders: {{arrival_time}} {{shift_start}} {{grace}} {{late_by}}.
+            'late' => [
+                'enabled' => true, 'email' => true, 'in_app' => false,
+                'subject' => 'Late arrival recorded — {{date}}',
+                'message' => "Dear {{name}},\n\nThis is an automated notification that your attendance for {{date}} was recorded as a LATE ARRIVAL.\n\n  First punch (arrival) : {{arrival_time}}\n  Shift start + grace   : {{shift_start}} (+{{grace}} min grace)\n  Late by               : {{late_by}}\n\nPlease ensure timely arrival as per the company's attendance policy. If this is due to approved duty, travel or an exception, kindly inform your reporting manager / HR.\n\n{{company}}\n(This is a system-generated email from SmartPRS. Please do not reply.)",
+            ],
         ];
+    }
+
+    /**
+     * 2026-08-05 — the tenant's primary company name (first company), used when
+     * an employee has no resolvable company_id and for previews/tests, so
+     * templates say the real company instead of the "Your Company" placeholder.
+     */
+    public static function tenantCompany(?int $tenantId): string
+    {
+        try {
+            if (Schema::hasTable('companies')) {
+                return (string) (DB::table('companies')
+                    ->when($tenantId, fn ($q) => $q->where('tenant_id', $tenantId))
+                    ->whereNull('deleted_at')->orderBy('id')->value('name') ?: '');
+            }
+        } catch (\Throwable $e) {
+        }
+
+        return '';
     }
 
     /** Read a tenant's greetings config merged over defaults. */
@@ -155,7 +183,9 @@ class GreetingService
         $any = false;
         $md = $day->format('m-d');
         $year = $day->format('Y');
-        $company = self::companyName($tid, $a['company_id'] ?? null);
+        // 2026-08-05 — when the employee's company_id doesn't resolve, fall back
+        // to the tenant's primary company so greetings never say "our company".
+        $company = self::companyName($tid, $a['company_id'] ?? null) ?: self::tenantCompany($tid);
         $userId = self::userIdFor($a);
 
         // Birthday

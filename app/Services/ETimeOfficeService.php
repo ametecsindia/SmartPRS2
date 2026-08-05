@@ -302,8 +302,86 @@ class ETimeOfficeService
     }
 
     /**
+     * Look up an employee for a device code: by emp_code first (with the
+     * configured prefix applied), then by the Biometric Mapping field
+     * (employees.device_user_id — set in the Directory profile / mapping card).
+     * Tries the prefixed code, then the raw device code, for both columns.
+     */
+    public static function matchEmployee(string $full, string $raw, ?int $tid = null)
+    {
+        $codes = array_values(array_unique(array_filter([strtolower($full), strtolower($raw)], fn ($c) => $c !== '')));
+        foreach (['emp_code', 'device_user_id'] as $col) {
+            if ($col === 'device_user_id' && ! Schema::hasColumn('employees', 'device_user_id')) {
+                continue;
+            }
+            foreach ($codes as $c) {
+                $q = DB::table('employees')
+                    ->whereRaw('LOWER('.$col.') = ?', [$c])
+                    ->whereNull('deleted_at');
+                if ($tid && Schema::hasColumn('employees', 'tenant_id')) {
+                    $q->where('tenant_id', $tid);
+                }
+                $emp = $q->first(['id', 'emp_code', 'name', 'tenant_id', 'company_id']);
+                if ($emp) {
+                    return $emp;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Biometric Mapping — remember device codes whose punches matched NOBODY, so
+     * the "Employee Mapping" card in Biometric Device Setup can list them for
+     * one-click linking (SmartEPT-style unmapped-ID picker). Fail-soft.
+     */
+    public static function recordUnmapped(?int $tid, array $unmatched, string $source): void
+    {
+        try {
+            if (! $unmatched) {
+                return;
+            }
+            if (! Schema::hasTable('biometric_unmapped')) {
+                Schema::create('biometric_unmapped', function ($t) {
+                    $t->id();
+                    $t->unsignedBigInteger('tenant_id')->nullable()->index();
+                    $t->string('device_code', 80);
+                    $t->string('source', 40)->nullable();
+                    $t->unsignedInteger('punches')->default(0);
+                    $t->timestamp('last_seen')->nullable();
+                    $t->timestamps();
+                    $t->unique(['tenant_id', 'device_code'], 'bio_unmapped_unique');
+                });
+            }
+            foreach ($unmatched as $code => $n) {
+                $row = DB::table('biometric_unmapped')
+                    ->where('device_code', (string) $code)
+                    ->when($tid, fn ($q) => $q->where('tenant_id', $tid), fn ($q) => $q->whereNull('tenant_id'))
+                    ->first();
+                if ($row) {
+                    DB::table('biometric_unmapped')->where('id', $row->id)->update([
+                        'punches' => (int) $row->punches + (int) $n,
+                        'source' => $source,
+                        'last_seen' => now(), 'updated_at' => now(),
+                    ]);
+                } else {
+                    DB::table('biometric_unmapped')->insert([
+                        'tenant_id' => $tid, 'device_code' => (string) $code, 'source' => $source,
+                        'punches' => (int) $n, 'last_seen' => now(),
+                        'created_at' => now(), 'updated_at' => now(),
+                    ]);
+                }
+            }
+        } catch (\Throwable $e) {
+            // mapping helper only — must never break an import
+        }
+    }
+
+    /**
      * Write parsed punches into attendance_logs, matching employees by
-     * (emp_prefix . device_code). Returns counts + unmatched device codes.
+     * (emp_prefix . device_code) and, failing that, by the Biometric Mapping
+     * field (employees.device_user_id). Returns counts + unmatched device codes.
      * @return array{imported:int,matched:int,unmatched:array<string,int>}
      */
     public static function import(array $punches, array $cfg): array
@@ -319,10 +397,8 @@ class ETimeOfficeService
         $touched = [];   // F4 — emp_code => [date => true] for late-arrival notification
         foreach ($punches as $p) {
             $full = $prefix.$p['emp_code'];
-            if (! isset($cache[$full])) {
-                $cache[$full] = DB::table('employees')
-                    ->whereRaw('LOWER(emp_code) = ?', [strtolower($full)])
-                    ->first(['id', 'emp_code', 'name', 'tenant_id', 'company_id']);
+            if (! array_key_exists($full, $cache)) {
+                $cache[$full] = self::matchEmployee($full, (string) $p['emp_code'], $cfg['tenant_id'] ?? null);
             }
             $emp = $cache[$full];
             if (! $emp) {
@@ -372,6 +448,9 @@ class ETimeOfficeService
         // F4 — immediate late-arrival notification for the punches just imported.
         // Fail-soft inside the service; never affects the import result.
         LateArrivalService::notifyTouched($cfg['tenant_id'] ?? null, $touched);
+
+        // Biometric Mapping — surface unknown device codes to the mapping card.
+        self::recordUnmapped($cfg['tenant_id'] ?? null, $unmatched, (string) ($cfg['source'] ?? ($cfg['provider'] ?? 'device')));
 
         return ['imported' => $imported, 'matched' => $matched, 'unmatched' => $unmatched];
     }

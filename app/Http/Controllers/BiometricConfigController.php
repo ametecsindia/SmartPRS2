@@ -424,4 +424,168 @@ class BiometricConfigController extends Controller
             'unmatchedCodes' => array_slice(array_keys($r['unmatched']), 0, 15),
         ]);
     }
+
+    // =====================================================================
+    // Biometric Mapping (2026-08-05) — SmartEPT-style device-ID ↔ employee
+    // linking, adapted to SmartPRS: the mapping lives ON the employee record
+    // (employees.device_user_id — also editable in the Directory profile and
+    // the employee CSV template's biometric_id column). These endpoints feed
+    // the "Employee Mapping" card in Biometric Device Setup.
+    // =====================================================================
+
+    /** GET /app/biometric-config/mappings — current links + unmapped device IDs. */
+    public function mappings(Request $request)
+    {
+        if ($deny = ApprovalService::denyUnlessRole($request, ['admin', 'hr_manager'])) {
+            return $deny;
+        }
+        $tid = self::tid($request);
+        $mappings = [];
+        $employees = [];
+        try {
+            $rows = DB::table('employees')
+                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                ->whereNull('deleted_at')
+                ->orderBy('name')
+                ->get(['id', 'emp_code', 'name', 'device_user_id']);
+            foreach ($rows as $e) {
+                $employees[] = ['code' => $e->emp_code, 'name' => $e->name];
+                if (trim((string) ($e->device_user_id ?? '')) !== '') {
+                    $mappings[] = ['code' => $e->emp_code, 'name' => $e->name, 'deviceId' => $e->device_user_id];
+                }
+            }
+        } catch (\Throwable $e) {
+        }
+
+        // Unmapped device IDs seen in punches (recorded by every import path),
+        // minus anything that has since been linked or now matches an emp_code.
+        $unmapped = [];
+        try {
+            if (Schema::hasTable('biometric_unmapped')) {
+                $known = [];
+                foreach ($mappings as $m) {
+                    $known[strtolower((string) $m['deviceId'])] = true;
+                }
+                foreach ($employees as $e) {
+                    $known[strtolower((string) $e['code'])] = true;
+                }
+                $rows = DB::table('biometric_unmapped')
+                    ->when($tid, fn ($q) => $q->where('tenant_id', $tid), fn ($q) => $q->whereNull('tenant_id'))
+                    ->orderByDesc('punches')->limit(500)->get();
+                foreach ($rows as $u) {
+                    if (isset($known[strtolower((string) $u->device_code)])) {
+                        continue;
+                    }
+                    $unmapped[] = [
+                        'deviceId' => $u->device_code,
+                        'punches' => (int) $u->punches,
+                        'lastSeen' => $u->last_seen ? substr((string) $u->last_seen, 0, 16) : '',
+                        'source' => (string) ($u->source ?? ''),
+                    ];
+                }
+            }
+        } catch (\Throwable $e) {
+        }
+
+        return response()->json(['ok' => true, 'mappings' => $mappings, 'unmapped' => $unmapped, 'employees' => $employees]);
+    }
+
+    /** POST /app/biometric-config/map — link a device ID to an employee. */
+    public function mapEmployee(Request $request)
+    {
+        if ($deny = ApprovalService::denyUnlessRole($request, ['admin', 'hr_manager'])) {
+            return $deny;
+        }
+        $tid = self::tid($request);
+        $deviceId = trim((string) $request->input('device_id', ''));
+        $empCode = trim((string) $request->input('emp_code', ''));
+        if ($deviceId === '' || $empCode === '') {
+            return response()->json(['ok' => false, 'error' => 'Pick a biometric ID and an employee.'], 422);
+        }
+
+        $emp = DB::table('employees')
+            ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+            ->whereRaw('LOWER(emp_code) = ?', [strtolower($empCode)])
+            ->whereNull('deleted_at')->first();
+        if (! $emp) {
+            return response()->json(['ok' => false, 'error' => 'Employee not found.'], 404);
+        }
+
+        // SmartEPT rule: one device ID belongs to ONE employee. If another
+        // employee already holds this ID, ask for an explicit confirmation
+        // (force) — then move it (the old employee loses the mapping).
+        $holder = DB::table('employees')
+            ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+            ->whereRaw('LOWER(device_user_id) = ?', [strtolower($deviceId)])
+            ->whereNull('deleted_at')->where('id', '!=', $emp->id)->first();
+        if ($holder && ! $request->boolean('force')) {
+            return response()->json([
+                'ok' => false, 'needForce' => true,
+                'error' => 'Biometric ID "'.$deviceId.'" is already mapped to '.$holder->name.' ('.$holder->emp_code.'). Save again to move it.',
+            ], 409);
+        }
+        if ($holder) {
+            DB::table('employees')->where('id', $holder->id)->update(['device_user_id' => null, 'updated_at' => now()]);
+        }
+
+        DB::table('employees')->where('id', $emp->id)->update(['device_user_id' => $deviceId, 'updated_at' => now()]);
+
+        // Backfill: punches that were stored under the raw device code (e.g. from
+        // a CSV upload) are re-keyed to the employee, so attendance/reports and
+        // the dashboard count them from today backwards. New device syncs match
+        // automatically via the mapping.
+        $backfilled = 0;
+        try {
+            if (Schema::hasTable('attendance_logs') && strcasecmp($deviceId, (string) $emp->emp_code) !== 0) {
+                $q = DB::table('attendance_logs')->whereRaw('LOWER(emp_code) = ?', [strtolower($deviceId)]);
+                if ($tid && Schema::hasColumn('attendance_logs', 'tenant_id')) {
+                    $q->where(fn ($w) => $w->where('tenant_id', $tid)->orWhereNull('tenant_id'));
+                }
+                $backfilled = $q->update([
+                    'emp_code' => $emp->emp_code,
+                    'emp_name' => $emp->name,
+                    'tenant_id' => $emp->tenant_id ?? $tid,
+                    'company_id' => $emp->company_id ?? null,
+                    'updated_at' => now(),
+                ]);
+            }
+        } catch (\Throwable $e) {
+        }
+
+        // The ID is mapped now — drop it from the unmapped list.
+        try {
+            if (Schema::hasTable('biometric_unmapped')) {
+                DB::table('biometric_unmapped')
+                    ->when($tid, fn ($q) => $q->where('tenant_id', $tid), fn ($q) => $q->whereNull('tenant_id'))
+                    ->whereRaw('LOWER(device_code) = ?', [strtolower($deviceId)])->delete();
+            }
+        } catch (\Throwable $e) {
+        }
+
+        return response()->json([
+            'ok' => true,
+            'message' => 'Mapped '.$deviceId.' → '.$emp->name.' ('.$emp->emp_code.').'
+                .($backfilled ? ' '.$backfilled.' earlier punch(es) re-linked.' : ''),
+        ]);
+    }
+
+    /** POST /app/biometric-config/unmap — remove an employee's device mapping. */
+    public function unmapEmployee(Request $request)
+    {
+        if ($deny = ApprovalService::denyUnlessRole($request, ['admin', 'hr_manager'])) {
+            return $deny;
+        }
+        $tid = self::tid($request);
+        $empCode = trim((string) $request->input('emp_code', ''));
+        if ($empCode === '') {
+            return response()->json(['ok' => false, 'error' => 'Employee code required.'], 422);
+        }
+        $n = DB::table('employees')
+            ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+            ->whereRaw('LOWER(emp_code) = ?', [strtolower($empCode)])
+            ->whereNull('deleted_at')
+            ->update(['device_user_id' => null, 'updated_at' => now()]);
+
+        return response()->json(['ok' => $n > 0, 'message' => $n > 0 ? 'Mapping removed. Punch history is kept; new punches for that ID stay unmapped until re-linked.' : 'Employee not found.']);
+    }
 }

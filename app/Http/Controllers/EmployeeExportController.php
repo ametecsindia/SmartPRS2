@@ -53,6 +53,7 @@ class EmployeeExportController extends Controller
         'DRA Expiry' => 'dra_expiry',
         'PCC Status' => 'pcc_status',
         'PCC Expiry' => 'pcc_expiry',
+        'Biometric ID' => 'device_user_id',
         'Bank Name' => 'bank_name',
         'Bank A/C' => 'bank_acc',
         'IFSC' => 'ifsc',

@@ -78,6 +78,44 @@ class AppDataController extends Controller
         return in_array($s, ['yes', 'y', 'true', '1'], true) ? 'Yes' : 'No';
     }
 
+    /**
+     * 2026-08-05 — tolerant date reader for uploads/forms → 'Y-m-d' or null.
+     * Understands ISO (2024-05-13, 2024/05/13), Indian d/m/Y with -, /, or .
+     * separators, 2-digit years (13/05/24 → 2024), textual months
+     * (13-May-2024, 13 May 24), Excel date serial numbers (e.g. 45425), and
+     * finally strtotime as a best effort. Returns NULL when unreadable so a
+     * DATE column is never handed an invalid literal (which MySQL rejects —
+     * that was the "bulk upload date is not set" bug).
+     */
+    public static function normDateWide($s): ?string
+    {
+        $s = trim((string) $s);
+        if ($s === '') {
+            return null;
+        }
+        $y4 = fn ($y) => (int) ($y < 100 ? ($y >= 70 ? 1900 + $y : 2000 + $y) : $y);
+        $mk = function ($y, $m, $d) {
+            return checkdate((int) $m, (int) $d, (int) $y) ? sprintf('%04d-%02d-%02d', $y, $m, $d) : null;
+        };
+        if (preg_match('#^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})#', $s, $m)) {
+            return $mk($m[1], $m[2], $m[3]);                    // ISO Y-m-d
+        }
+        if (preg_match('#^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})#', $s, $m)) {
+            return $mk($y4((int) $m[3]), $m[2], $m[1]);         // Indian d/m/Y (or d/m/y)
+        }
+        if (preg_match('#^(\d{1,2})[\s\-/.]([A-Za-z]{3,9})[\s\-/.,]+(\d{2,4})#', $s, $m)) {
+            $mo = date_parse($m[2].' 1 2000')['month'] ?? 0;    // 13-May-2024 / 13 May 24
+            return $mo ? $mk($y4((int) $m[3]), $mo, $m[1]) : null;
+        }
+        if (preg_match('/^\d{5,6}$/', $s)) {
+            $ts = ((int) $s - 25569) * 86400;                   // Excel serial (days since 1900)
+            return ($ts > 0) ? gmdate('Y-m-d', $ts) : null;
+        }
+        $ts = strtotime($s);
+
+        return $ts ? date('Y-m-d', $ts) : null;
+    }
+
     /** Keep only the array keys that are real columns on $table (schema-tolerant insert). */
     private function onlyExistingCols(string $table, array $row): array
     {
@@ -154,6 +192,7 @@ class AppDataController extends Controller
 
         $deptNames = DB::table('departments')->pluck('name', 'id');
         $desigNames = DB::table('designations')->pluck('name', 'id');
+        $compNames = DB::table('companies')->pluck('name', 'id');   // company_id -> NAME (Directory shows the name, never the raw id)
         $branchNames = DB::table('branches')->pluck('name', 'id');
         $teamRows = DB::table('teams')->get(['id', 'name', 'leader_id']);
         $teamNames = $teamRows->pluck('name', 'id');
@@ -164,7 +203,7 @@ class AppDataController extends Controller
         $refsByEmp = DB::table('employee_references')
             ->whereIn('employee_id', $emps->pluck('id'))->get()->groupBy('employee_id');
 
-        $employees = $emps->map(function ($e) use ($deptNames, $desigNames, $branchNames, $teamNames, $teamLeaderId, $empNames, $refsByEmp) {
+        $employees = $emps->map(function ($e) use ($deptNames, $desigNames, $compNames, $branchNames, $teamNames, $teamLeaderId, $empNames, $refsByEmp) {
             $refs = ($refsByEmp[$e->id] ?? collect())->map(fn ($r) => [
                 'name' => $r->name, 'relation' => $r->relation, 'aadhaar' => $r->aadhaar,
                 'pan' => $r->pan, 'mobile' => $r->mobile,
@@ -190,6 +229,8 @@ class AppDataController extends Controller
                 'photo' => $col('photo_path') ? url('/app/emp-photo/'.$col('emp_code')) : '',
                 'companyId' => (string) $col('company_id'),
                 'companies' => [(string) $col('company_id')],
+                // Primary company NAME for the Directory list / search / exports.
+                'company' => (string) ($compNames[$col('company_id')] ?? ''),
                 // Hierarchy: prefer the editable name column, else resolve the
                 // normalized FK (so seeded/existing employees show correctly).
                 'dept' => $col('department') ?: ($deptId ? ($deptNames[$deptId] ?? '') : ''),
@@ -223,6 +264,10 @@ class AppDataController extends Controller
                 'shift' => $col('shift') ?? '',   // rev173 — default Working Shift (name)
                 'draDeclared' => $col('dra_declared') ?? '',   // F5 — self-onboarding DRA (Yes/No)
                 'pccDeclared' => $col('pcc_declared') ?? '',   // F5 — self-onboarding PCC (Yes/No)
+                // Biometric Mapping — the employee's ID on the attendance device
+                // (employees.device_user_id). Editable in the Directory profile;
+                // punches whose device code matches it import under this employee.
+                'deviceUserId' => $col('device_user_id') ?? '',
             ];
         })->values();
 
@@ -319,7 +364,7 @@ class AppDataController extends Controller
             if ($tenantId) { $arQ->where('tenant_id', $tenantId); }
             if ($selfScope) { $arQ->where('id', $selfScope['id']); }
             $arRows = $arQ->orderByRaw($hasArch ? 'COALESCE(archived_at, deleted_at) DESC' : 'deleted_at DESC')->limit(1000)->get();
-            $archived = $arRows->map(function ($e) use ($deptNames) {
+            $archived = $arRows->map(function ($e) use ($deptNames, $compNames) {
                 $a = (array) $e;
                 $c = fn ($k) => $a[$k] ?? null;
                 $isArch = ! empty($c('archived_at'));
@@ -329,7 +374,7 @@ class AppDataController extends Controller
                     'name' => $c('name'),
                     'dept' => $deptNames[$c('department_id')] ?? ($c('department') ?? ''),
                     'designation' => $c('designation') ?? '',
-                    'company' => (string) ($c('company_id') ?? ''),
+                    'company' => (string) ($compNames[$c('company_id')] ?? ''),
                     'reason' => $isArch ? 'Backed up' : 'Deleted',
                     'archivedAt' => $when ? substr((string) $when, 0, 16) : '',
                     'archivedBy' => $c('archived_by') ?? '',
@@ -394,7 +439,9 @@ class AppDataController extends Controller
         // file's code — re-imports then created duplicates and leave/payslips
         // couldn't match the codes people expected.
         $lines[0] = preg_replace('/^\xEF\xBB\xBF/', '', $lines[0]);
-        $header = array_map(fn ($h) => strtolower(trim($h)), str_getcsv(array_shift($lines)));
+        // Header tolerance: lowercase, trim, and normalise separators so
+        // "Date of Joining" / "date-of-joining" both resolve to date_of_joining.
+        $header = array_map(fn ($h) => str_replace([' ', '-'], '_', strtolower(trim($h))), str_getcsv(array_shift($lines)));
 
         $salaryMap = ['salary' => 'only_salary', 'salary + commission' => 'salary_commission', 'commission' => 'only_commission'];
 
@@ -456,22 +503,16 @@ class AppDataController extends Controller
             ];
             // rev149 — richer fields from the full template (only set when present;
             // the columns were ensured above, so these are schema-safe).
-            // rev173g — normalise Indian date formats (13/05/2024, 13-05-2024,
-            // 2024-05-13…) to Y-m-d so payroll/reports never misread d/m as m/d.
-            $normDate = function ($s) {
-                $s = trim((string) $s);
-                if ($s === '') {
-                    return null;
-                }
-                if (preg_match('/^(\d{4})-(\d{1,2})-(\d{1,2})/', $s, $m)) {
-                    return sprintf('%04d-%02d-%02d', $m[1], $m[2], $m[3]);
-                }
-                if (preg_match('#^(\d{1,2})[/-](\d{1,2})[/-](\d{4})#', $s, $m)) {
-                    return sprintf('%04d-%02d-%02d', $m[3], $m[2], $m[1]);   // d/m/Y (Indian)
-                }
-
-                return $s;   // unknown shape — store as-is
-            };
+            // rev173g — normalise Indian date formats to Y-m-d so payroll/reports
+            // never misread d/m as m/d.
+            // 2026-08-05 — WIDENED: the dob/doj columns are real DATE columns, so an
+            // unrecognised shape stored "as-is" was rejected by MySQL and the date
+            // silently ended up NULL (Ejaz's "bulk upload date is not set" bug).
+            // Now also accepts 2024/05/13, 13.05.2024, 2-digit years, "13-May-2024",
+            // Excel serial numbers, and falls back to strtotime; a value that still
+            // can't be read returns null (and the row keeps importing) instead of
+            // feeding MySQL an invalid literal.
+            $normDate = [self::class, 'normDateWide'];
             $extra = [
                 'department' => trim((string) ($row['department'] ?? '')) ?: null,
                 'designation' => trim((string) ($row['designation'] ?? '')) ?: null,
@@ -481,8 +522,18 @@ class AppDataController extends Controller
                 'whatsapp' => trim((string) ($row['whatsapp'] ?? ($row['whatsapp_number'] ?? ''))) ?: null,
                 'address' => trim((string) ($row['address'] ?? '')) ?: null,
                 'dob' => $normDate($row['dob'] ?? ($row['date_of_birth'] ?? '')),
-                'doj' => $normDate($row['doj'] ?? ($row['date_of_joining'] ?? '')),
+                'doj' => $normDate($row['doj'] ?? ($row['date_of_joining'] ?? ($row['joining_date'] ?? ''))),
+                // Biometric Mapping — the person's ID on the attendance device.
+                'device_user_id' => trim((string) ($row['biometric_id'] ?? ($row['device_user_id'] ?? ($row['bio_id'] ?? '')))) ?: null,
             ];
+            // Surface (don't skip) a date the parser could not read — otherwise the
+            // import "succeeds" while the DOJ/DOB quietly stays empty.
+            foreach ([['doj', 'DOJ'], ['dob', 'DOB']] as [$dk, $dl]) {
+                $rawD = trim((string) ($row[$dk] ?? ''));
+                if ($rawD !== '' && $extra[$dk] === null) {
+                    $errors[] = 'Row "'.$name.'" ('.$code.'): '.$dl.' "'.$rawD.'" not understood - use DD/MM/YYYY or YYYY-MM-DD. Imported without it.';
+                }
+            }
             foreach ($extra as $k => $v) {
                 if ($v !== null && Schema::hasColumn('employees', $k)) {
                     $payload[$k] = $v;
@@ -631,10 +682,12 @@ class AppDataController extends Controller
     {
         // rev149 — full template: company / department / designation / branch / team
         // / dates / WhatsApp / address / password are now included and imported.
-        $head = 'emp_code,name,type,company,department,designation,branch,team,shift,doj,dob,mobile,whatsapp,address,email,ctc,salary_type,pan,uan,bank_acc,ifsc,password,dpa,pcc';
+        // 2026-08-05 — biometric_id added (Biometric Mapping): the employee's ID on
+        // the attendance device, saved to employees.device_user_id on import.
+        $head = 'emp_code,name,type,company,department,designation,branch,team,shift,doj,dob,mobile,whatsapp,address,email,ctc,salary_type,pan,uan,bank_acc,ifsc,password,biometric_id,dpa,pcc';
         $csv = $head."\n"
-            .'EMP100,Sample Name,office,Acme Recovery Pvt Ltd,Operations,Executive,Head Office,Alpha Team,General Shift,2024-04-01,1995-06-15,+919999999999,+919999999999,"12 MG Road, Hyderabad",sample@company.in,600000,Salary,ABCDE1234F,100200300400,12345678901,SBIN0001234,Welcome@123'."\n"
-            .'EMP101,Field Agent Name,field,Acme Recovery Pvt Ltd,Collections,Field Officer,Branch-2,Bravo Team,General Shift,2024-05-10,1998-02-20,+918888888888,+918888888888,"45 Park Street, Pune",agent@company.in,336000,Salary + Commission,FGHIJ5678K,100200300401,10987654321,HDFC0005678,Welcome@123'."\n";
+            .'EMP100,Sample Name,office,Acme Recovery Pvt Ltd,Operations,Executive,Head Office,Alpha Team,General Shift,2024-04-01,1995-06-15,+919999999999,+919999999999,"12 MG Road, Hyderabad",sample@company.in,600000,Salary,ABCDE1234F,100200300400,12345678901,SBIN0001234,Welcome@123,1043,Yes,Yes'."\n"
+            .'EMP101,Field Agent Name,field,Acme Recovery Pvt Ltd,Collections,Field Officer,Branch-2,Bravo Team,General Shift,2024-05-10,1998-02-20,+918888888888,+918888888888,"45 Park Street, Pune",agent@company.in,336000,Salary + Commission,FGHIJ5678K,100200300401,10987654321,HDFC0005678,Welcome@123,1044,Yes,Yes'."\n";
 
         return response($csv, 200, [
             'Content-Type' => 'text/csv',
@@ -2255,9 +2308,31 @@ class AppDataController extends Controller
         }
         $origCode = trim((string) ($e['orig_id'] ?? ''));
 
+        // 2026-08-05 — FIX: the form's Primary Company was IGNORED and every save
+        // force-reset company_id to the tenant's first company, so an edited
+        // company reverted after refresh. Resolve the company the form actually
+        // sent — by id (companyId) or by name (companyName/company) within this
+        // tenant; fall back to the employee's EXISTING company on edit, and only
+        // default to the first company for a brand-new employee with no choice.
+        $chosenCompanyId = null;
+        $cidRaw = $e['companyId'] ?? null;
+        if ($cidRaw !== null && $cidRaw !== '' && is_numeric($cidRaw)) {
+            $chosenCompanyId = DB::table('companies')
+                ->when($user->tenant_id, fn ($q) => $q->where('tenant_id', $user->tenant_id))
+                ->whereNull('deleted_at')->where('id', (int) $cidRaw)->value('id');
+        }
+        if (! $chosenCompanyId) {
+            $cName = trim((string) ($e['companyName'] ?? ($e['company'] ?? '')));
+            if ($cName !== '') {
+                $chosenCompanyId = DB::table('companies')
+                    ->when($user->tenant_id, fn ($q) => $q->where('tenant_id', $user->tenant_id))
+                    ->whereNull('deleted_at')->whereRaw('LOWER(name) = ?', [strtolower($cName)])->value('id');
+            }
+        }
+
         $payload = [
             'tenant_id' => $tenantId,
-            'company_id' => $companyId,
+            'company_id' => $chosenCompanyId ?: $companyId,
             'emp_code' => $code,
             'name' => $e['name'],
             'type' => $type,
@@ -2296,14 +2371,24 @@ class AppDataController extends Controller
             'status' => (strtolower(trim((string) ($e['status'] ?? 'active'))) === 'inactive') ? 'inactive' : 'active',   // rev183 — Active/Inactive from the form
             'address' => $e['addr'] ?? ($e['address'] ?? null),
             'dob' => $e['dob'] ?? null,
+            // Biometric Mapping — ID on the attendance device (Directory field).
+            'device_user_id' => trim((string) ($e['deviceUserId'] ?? ($e['device_user_id'] ?? ''))) ?: null,
             'updated_at' => now(),
         ];
+        // DATE columns reject unknown shapes — normalise both (null when unreadable).
+        $payload['doj'] = self::normDateWide($payload['doj']);
+        $payload['dob'] = self::normDateWide($payload['dob']);
 
         // Upsert by (tenant_id, emp_code). On EDIT the form sends the ORIGINAL code
         // (orig_id) so the Employee ID can be RENAMED on the same record without
         // creating a duplicate; the rename cascades to emp_code-keyed history. rev171.
         $findCode = $origCode !== '' ? $origCode : $code;
         $existing = DB::table('employees')->where('tenant_id', $tenantId)->where('emp_code', $findCode)->first();
+        // On EDIT with no resolvable company in the payload, keep the record's
+        // current company instead of silently resetting it to the first company.
+        if (! $chosenCompanyId && $existing && ! empty($existing->company_id)) {
+            $payload['company_id'] = $existing->company_id;
+        }
         if ($origCode === '' && $existing) {
             return response()->json(['ok' => false, 'error' => 'Employee ID "'.$code.'" is already in use — choose a different one.'], 422);
         }

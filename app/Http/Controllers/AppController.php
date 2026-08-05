@@ -1333,6 +1333,17 @@ CSS;
             set('mobile', r.mobile); set('email', r.email); set('whatsapp', r.whatsapp);
             window._refV = window._refV || {}; window._refV[n] = r.verify || {};
         });
+        // 2026-08-05 — the form's company select is f_companyName (a NAME), but the
+        // record only carried companyId, so editing always showed the FIRST company
+        // and looked like the saved company was lost. Prefill it from the resolved
+        // company name (or DB.companies by id).
+        try {
+            var cnEl = document.getElementById('f_companyName');
+            if (cnEl) {
+                var cName = emp.company || ((((DB && DB.companies) || []).find(function (c0) { return String(c0.id) === String(emp.companyId); }) || {}).name || '');
+                if (cName) { cnEl.value = cName; }
+            }
+        } catch (eCn) {}
         var h = document.querySelector('.content .page-header h2, #host h2');
         if (h) { h.textContent = 'Edit Employee — ' + (emp.name || ''); }
         // rev173b — "Audit Report" (RBI compliance PDF) also from the Directory
@@ -1375,6 +1386,17 @@ CSS;
             if (window._editEmp) {
                 var editing = window._editEmp;
                 var updated = readEmpForm(editing); updated.orig_id = editing.id; updated.refs = refs;
+                // 2026-08-05 — carry the company the form actually picked: resolve
+                // the name to an id so the Directory shows it immediately AND the
+                // server saves it (storeEmployee reads companyId/companyName).
+                try {
+                    var cSel = document.getElementById('f_companyName');
+                    if (cSel && cSel.value) {
+                        updated.company = cSel.value;
+                        var cRec = ((DB.companies || []).find(function (c1) { return String(c1.name) === String(cSel.value); }));
+                        if (cRec) { updated.companyId = cRec.id; updated.companies = [cRec.id]; }
+                    }
+                } catch (eC2) {}
                 var idx = (DB.employees || []).findIndex(function (e) { return e.id === editing.id; });
                 if (idx >= 0) { DB.employees[idx] = updated; }
                 if (typeof persist === 'function') { persist(); }
@@ -1389,10 +1411,12 @@ CSS;
                 var emp = Object.assign({}, DB.employees[0], { refs: refs });
                 // The prototype's native saveEmp() doesn't copy team/manager/leader
                 // into the record — read them straight off the form so they persist.
-                ['team', 'teamManager', 'teamLeader', 'designation', 'branch', 'dept', 'shift', 'draDeclared', 'pccDeclared'].forEach(function (k) {
+                ['team', 'teamManager', 'teamLeader', 'designation', 'branch', 'dept', 'shift', 'draDeclared', 'pccDeclared', 'deviceUserId'].forEach(function (k) {
                     var el = document.getElementById('f_' + k); if (el && el.value) { emp[k] = el.value; }
                 });
                 var _fid = document.getElementById('f_id'); if (_fid && _fid.value && _fid.value.trim()) { emp.id = _fid.value.trim(); }
+                var _fcn = document.getElementById('f_companyName'); if (_fcn && _fcn.value) { emp.company = _fcn.value; }   // list shows the NAME
+                if (DB.employees[0]) { DB.employees[0].company = emp.company || DB.employees[0].company; DB.employees[0].deviceUserId = emp.deviceUserId || ''; }
                 postEmp(emp).then(function (d) { if (d && d.ok && typeof toast === 'function') { toast('Saved to database (' + d.emp_code + ')'); } }).catch(function () {});
             }
         };
@@ -1941,7 +1965,9 @@ CSS;
             var c = d.config || {};
             var b = c.birthday || {};
             var a = c.anniversary || {};
+            var lt = c.late || {};   // 2026-08-05 — late-login email template
             var vars = (d.variables || []).join('  ');
+            var lvars = (d.lateVariables || []).join('  ');
 
             var block = function (key, t, obj, extra) {
                 return '<div class="card" style="margin-bottom:14px"><div style="padding:16px 18px">'
@@ -1961,7 +1987,7 @@ CSS;
                     + '</div></div>';
             };
 
-            return pghead('Greetings', 'Birthday and work-anniversary wishes',
+            return pghead('Greetings', 'Birthday, work-anniversary and late-login emails',
                 '<button class="btn btn-secondary" onclick="go(&#39;greetings-log&#39;)"><i class="fas fa-envelope-open-text"></i> Delivery log</button>')
                 + '<div class="card" style="margin-bottom:14px"><div style="padding:16px 18px">'
                 + '<label style="font-size:14px;font-weight:600"><input id="rmg-on" type="checkbox" ' + (c.enabled ? 'checked' : '') + '> Send greetings automatically</label>'
@@ -1976,6 +2002,8 @@ CSS;
                 + block('bd', 'Birthday', b, '')
                 + block('an', 'Work anniversary', a,
                     fieldRow('Only from year', '<input id="rmg-an-min" type="number" min="1" class="form-input" value="' + esc(a.min_years) + '" style="width:110px">'))
+                + block('lt', 'Late login email', lt,
+                    '<div style="font-size:12px;color:var(--text3);margin:-4px 0 10px">Sent automatically when an employee&#39;s first punch is after shift start + grace. Sending is switched on/off by <b>&quot;Email employees on late arrival&quot;</b> (Late Policy screen / Statutory Rate Settings) &mdash; not by the greetings switch above. Extra placeholders: <code>' + esc(lvars) + '</code></div>')
                 + '<button class="btn btn-primary" onclick="rmgSave()"><i class="fas fa-floppy-disk"></i> Save greetings</button>';
         }
         function rmgCollect() {
@@ -1992,6 +2020,10 @@ CSS;
                     enabled: checked('rmg-an-on'), email: checked('rmg-an-email'), in_app: checked('rmg-an-inapp'),
                     subject: val('rmg-an-sub'), message: val('rmg-an-msg'),
                     min_years: parseInt(val('rmg-an-min'), 10) || 1
+                },
+                late: {
+                    enabled: checked('rmg-lt-on'), email: checked('rmg-lt-email'), in_app: checked('rmg-lt-inapp'),
+                    subject: val('rmg-lt-sub'), message: val('rmg-lt-msg')
                 }
             };
         }
@@ -2002,7 +2034,7 @@ CSS;
             });
         };
         window.rmgPreview = function (key) {
-            var type = key === 'bd' ? 'birthday' : 'anniversary';
+            var type = key === 'bd' ? 'birthday' : (key === 'lt' ? 'late' : 'anniversary');
             // Preview must NOT save — post the text as typed instead, so looking
             // at a preview can never switch greetings on by accident.
             post('/app/greetings/preview', {
@@ -2018,7 +2050,7 @@ CSS;
             });
         };
         window.rmgTest = function (key) {
-            var type = key === 'bd' ? 'birthday' : 'anniversary';
+            var type = key === 'bd' ? 'birthday' : (key === 'lt' ? 'late' : 'anniversary');
             // A test send must NOT save either.
             post('/app/greetings/test', {
                 type: type, email: true,
@@ -8856,6 +8888,78 @@ CSS;
             } else { bioMsg('<span style="color:var(--red)">' + ((j && j.error) || 'Sync failed') + '</span>'); }
         }).catch(function () { bioMsg('<span style="color:var(--red)">Sync failed</span>'); });
     };
+    // ---- Biometric Mapping (2026-08-05) — SmartEPT-style device-ID ↔ employee
+    // linking. The mapping is stored on the employee (Directory field "Biometric
+    // ID"); this card lists unmapped device IDs seen in punches and lets HR link
+    // them in one click. ----
+    function bioMapLoad() {
+        fetch(cfg.bioUrl + '/mappings', { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (j) { window.__BIOMAP = j || { ok: false }; if (typeof render === 'function') { render(); } })
+            .catch(function () { window.__BIOMAP = { ok: false }; if (typeof render === 'function') { render(); } });
+    }
+    window.bioMapPick = function (v) { var el = document.getElementById('bio-map-id'); if (el && v) { el.value = v; } };
+    window.bioMapSave = function (force) {
+        var g = function (id) { var el = document.getElementById(id); return el ? el.value : ''; };
+        var devId = (g('bio-map-id') || '').trim() || g('bio-map-unmapped');
+        var empC = g('bio-map-emp');
+        var msgEl = document.getElementById('bio-map-msg');
+        var say2 = function (h) { if (msgEl) { msgEl.innerHTML = h; } };
+        if (!devId || !empC) { say2('<span style="color:var(--red)">Pick (or type) a biometric ID and choose the employee.</span>'); return; }
+        bioPost(cfg.bioUrl + '/map', { device_id: devId, emp_code: empC, force: force ? 1 : 0 }, 'Mapping')
+            .then(function (j) {
+                if (j && j.ok) {
+                    if (typeof toast === 'function') { toast('Biometric ID mapped'); }
+                    window.__BIOMAP = null; bioMapLoad();
+                } else if (j && j.needForce) {
+                    if (window.confirm(j.error + ' Move it to this employee?')) { window.bioMapSave(true); }
+                    else { say2('<span style="color:var(--text3)">Not changed.</span>'); }
+                } else { say2('<span style="color:var(--red)">' + ((j && j.error) || 'Could not map') + '</span>'); }
+            }).catch(function () { say2('<span style="color:var(--red)">Could not map</span>'); });
+    };
+    window.bioUnmap = function (code) {
+        if (!window.confirm('Remove this biometric mapping? Punch history is kept; new punches for that ID stay unmapped until re-linked.')) { return; }
+        bioPost(cfg.bioUrl + '/unmap', { emp_code: code }, 'Removing').then(function (j) {
+            if (j && j.ok) { if (typeof toast === 'function') { toast('Mapping removed'); } window.__BIOMAP = null; bioMapLoad(); }
+            else if (typeof toast === 'function') { toast((j && j.error) || 'Could not remove'); }
+        }).catch(function () { if (typeof toast === 'function') { toast('Could not remove'); } });
+    };
+    function bioMappingCard() {
+        var esc = function (s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); };
+        var m = window.__BIOMAP;
+        if (!m) { setTimeout(function () { if (!window.__BIOMAP) { bioMapLoad(); } }, 10); return '<div class="card" style="padding:16px 18px;margin-top:14px;color:var(--text3)">Loading employee mapping&hellip;</div>'; }
+        var unm = m.unmapped || [];
+        var maps = m.mappings || [];
+        var emps = m.employees || [];
+        var unmOpts = '<option value="">&mdash; pick an unmapped ID &mdash;</option>' + unm.map(function (u) {
+            return '<option value="' + esc(u.deviceId) + '">' + esc(u.deviceId) + ' &middot; ' + u.punches + ' punch(es)' + (u.lastSeen ? ' &middot; last ' + esc(u.lastSeen) : '') + '</option>';
+        }).join('');
+        var empOpts = '<option value="">&mdash; choose employee &mdash;</option>' + emps.map(function (e) {
+            return '<option value="' + esc(e.code) + '">' + esc(e.name) + ' (' + esc(e.code) + ')</option>';
+        }).join('');
+        var inSt = 'width:100%;padding:9px 11px;border:1.5px solid var(--border);border-radius:9px;font-size:13.5px';
+        var lbSt = 'display:block;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:10px 0 4px';
+        var rows = maps.map(function (r) {
+            var c = 'padding:8px 12px;font-size:13px;border-top:1px solid var(--border)';
+            return '<tr><td style="' + c + ';font-weight:600">' + esc(r.deviceId) + '</td><td style="' + c + '">' + esc(r.name) + ' <span style="color:var(--text3)">(' + esc(r.code) + ')</span></td>'
+                + '<td style="' + c + ';text-align:right"><i class="fas fa-link-slash" title="Remove mapping" style="cursor:pointer;color:var(--red)" onclick="bioUnmap(&#39;' + esc(r.code) + '&#39;)"></i></td></tr>';
+        }).join('');
+        if (!rows) { rows = '<tr><td colspan="3" style="padding:16px;text-align:center;color:var(--text3);font-size:13px">No mappings yet. Link an unmapped biometric ID to a person above &mdash; or set the &quot;Biometric ID&quot; field in the employee&#39;s Directory profile.</td></tr>'; }
+        var th = ['Biometric ID', 'Employee', ''].map(function (h) { return '<th style="padding:9px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3)">' + h + '</th>'; }).join('');
+        return '<div class="card" style="padding:18px 20px;margin-top:14px">'
+            + '<div style="font-weight:700;font-size:15px;margin-bottom:2px"><i class="fas fa-fingerprint" style="color:#f97316;margin-right:6px"></i> Employee Mapping (Biometric ID &rarr; Employee)</div>'
+            + '<div style="font-size:12.5px;color:var(--text3);margin-bottom:10px">A punch feeds nobody until its device ID is linked to a person. IDs that match the Employee ID map automatically; anything else appears below after a sync/upload. The link is saved on the employee (also editable as &quot;Biometric ID&quot; in the Directory profile and the employee CSV template&#39;s biometric_id column). Mapping an ID also re-links its earlier punches.</div>'
+            + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">'
+            + '<div><label style="' + lbSt + '">Unmapped biometric IDs (seen in punches)</label><select id="bio-map-unmapped" onchange="bioMapPick(this.value)" style="' + inSt + '">' + unmOpts + '</select></div>'
+            + '<div><label style="' + lbSt + '">Biometric ID (as on the device)</label><input id="bio-map-id" placeholder="e.g. 1043" style="' + inSt + '"></div>'
+            + '<div><label style="' + lbSt + '">SmartPRS employee</label><select id="bio-map-emp" style="' + inSt + '">' + empOpts + '</select></div>'
+            + '<div style="display:flex;align-items:flex-end;padding-bottom:2px"><button class="btn btn-primary" onclick="bioMapSave()"><i class="fas fa-link"></i> Map</button></div>'
+            + '</div>'
+            + '<div id="bio-map-msg" style="margin-top:8px;font-size:13px"></div>'
+            + '<div style="font-weight:700;font-size:13.5px;margin:14px 0 6px">Current mappings (' + maps.length + ')</div>'
+            + '<div style="overflow:auto;border:1px solid var(--border);border-radius:10px"><table style="width:100%;border-collapse:collapse"><thead><tr>' + th + '</tr></thead><tbody>' + rows + '</tbody></table></div>'
+            + '</div>';
+    }
     function biometricSetupScreen() {
         var d = window.__BIO;
         if (!d) { setTimeout(function () { if (!window.__BIO) { bioLoad(); } }, 10); return pghead('Biometric Device Setup', 'Loading&hellip;', '') + '<div class="card"><div style="padding:36px;text-align:center;color:var(--text3)">Loading&hellip;</div></div>'; }
@@ -8993,7 +9097,7 @@ CSS;
         var devices = d.devices || [];
         var head = pghead('Biometric Device Setup', 'Connect one or more attendance devices. Each maps to a branch; punches import into Attendance &amp; payroll automatically every hour.', '<button class="btn btn-primary" onclick="bioAdd()"><i class="fas fa-plus"></i> Add device</button>');
         if (!devices.length) {
-            return head + '<div class="card"><div style="padding:36px;text-align:center;color:var(--text3)">No biometric devices configured yet. Click <b>Add device</b> to connect your first one.</div></div>';
+            return head + '<div class="card"><div style="padding:36px;text-align:center;color:var(--text3)">No biometric devices configured yet. Click <b>Add device</b> to connect your first one.</div></div>' + bioMappingCard();
         }
         var cards = devices.map(function (v) {
             var status = v.lastSyncAt ? ('<i class="fas fa-clock"></i> Last sync: ' + esc(v.lastSyncAt) + ' — ' + esc(v.lastStatus || '')) : '<span style="color:var(--text3)">Never synced</span>';
@@ -9009,7 +9113,7 @@ CSS;
                 + '<button class="btn btn-outline btn-sm" onclick="bioDelete(' + v.id + ')"><i class="fas fa-trash"></i></button>'
                 + '</div></div></div>';
         }).join('');
-        return head + cards + '<div id="bio-result" style="margin-top:6px;font-size:13px"></div>';
+        return head + cards + '<div id="bio-result" style="margin-top:6px;font-size:13px"></div>' + bioMappingCard();
     }
 
     function codeOfConductScreen() {
@@ -9070,6 +9174,32 @@ CSS;
             }).catch(function () { if (typeof toast === 'function') { toast('Could not save'); } });
     };
     function lpAddMin(t, m) { var p = String(t || '09:30').split(':'); var mm = ((+p[0]) || 0) * 60 + ((+p[1]) || 0) + ((+m) || 0); mm = ((mm % 1440) + 1440) % 1440; var h = Math.floor(mm / 60), n = mm % 60; return (h < 10 ? '0' : '') + h + ':' + (n < 10 ? '0' : '') + n; }
+    // 2026-08-05 — the automatic late-arrival email toggle, shown right beside the
+    // grace-period setting (Ejaz). Saves the same statutory setting
+    // (late_email_enabled) the Rate Settings toggle uses; template lives in
+    // Greetings → "Late login email".
+    function lateEmailBox(compact) {
+        var on = !!(window.__RATES && Number(window.__RATES.late_email_enabled) === 1);
+        return '<div style="' + (compact ? 'grid-column:1 / -1;' : '') + 'background:var(--bg2,#f8fafc);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin:' + (compact ? '2px 0 0' : '0 0 12px') + '">'
+            + '<label style="display:flex;align-items:center;gap:9px;font-size:13.5px;font-weight:600;cursor:pointer"><input type="checkbox" id="lp-late-email"' + (on ? ' checked' : '') + ' onchange="lateEmailToggle(this)"> Enable automatic late-login emails</label>'
+            + '<div style="font-size:12px;color:var(--text3);margin:4px 0 0 27px">When ON, an employee whose first punch is after <b>shift start + grace</b> is emailed automatically the moment the punch is recorded (reporting manager cc&#39;d when known). Edit the wording in <b>Greetings &rarr; Late login email</b>. Needs employee emails + a configured mail server.</div>'
+            + '</div>';
+    }
+    window.lateEmailToggle = function (cb) {
+        var v = cb && cb.checked ? 1 : 0;
+        fetch(cfg.settingsSaveUrl, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ late_email_enabled: v }) })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (d && d.ok) {
+                    window.__RATES = d.rates || window.__RATES;
+                    if (window.__RATES) { window.__RATES.late_email_enabled = v; }
+                    if (typeof toast === 'function') { toast(v ? 'Late-login emails ON' : 'Late-login emails OFF'); }
+                } else {
+                    if (cb) { cb.checked = !cb.checked; }
+                    if (typeof toast === 'function') { toast('Could not save — admin only'); }
+                }
+            }).catch(function () { if (cb) { cb.checked = !cb.checked; } if (typeof toast === 'function') { toast('Could not save'); } });
+    };
     function latePolicyScreen() {
         if (!window.__MASTER['late-policy']) { setTimeout(function () { if (!window.__MASTER['late-policy']) { masterLoad('late-policy'); } }, 10); }
         if (window.__LPW && window.__LPW.active) { return lpWizard(); }
@@ -9087,6 +9217,7 @@ CSS;
         }).join('');
         var th = ['Company', 'Applies to', 'Mode', 'Shift / grace', ''].map(function (h) { return '<th style="padding:10px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3)">' + h + '</th>'; }).join('');
         return pghead('Late & Comp-Off Policy', 'How lateness and breaks reduce paid days in payroll. Set one policy per company, team or employee.', addBtn)
+            + lateEmailBox(false)
             + '<div class="card" style="padding:0;overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr>' + th + '</tr></thead><tbody>' + (rows || '<tr><td colspan="5" style="padding:30px;text-align:center;color:var(--text3)">No policies yet. Click &quot;New Late Policy (guided)&quot; to set one up step by step.</td></tr>') + '</tbody></table></div>';
     }
     function lpWizard() {
@@ -9107,6 +9238,7 @@ CSS;
                 + txt('grace_min', 'Grace period (minutes)', 'number', 'A punch within grace is still on-time')
                 + txt('shift_start', 'Shift start (HH:MM)', 'text')
                 + txt('shift_end', 'Shift end (HH:MM)', 'text')
+                + lateEmailBox(true)
                 + '</div>';
         } else if (step === 1) {
             var card = function (m, title, desc) { var on = d.mode === m; return '<div onclick="lpSetMode(\'' + m + '\')" style="cursor:pointer;border:2px solid ' + (on ? 'var(--accent)' : 'var(--border)') + ';background:' + (on ? 'var(--accent-soft,#fff7ed)' : '#fff') + ';border-radius:12px;padding:14px 16px"><div style="font-weight:700;color:var(--text1);margin-bottom:4px">' + (on ? '<i class="fas fa-circle-check" style="color:var(--accent);margin-right:6px"></i>' : '') + title + '</div><div style="font-size:13px;color:var(--text2);line-height:1.5">' + desc + '</div></div>'; };
@@ -9821,6 +9953,10 @@ CSS;
     window.abSingle = function () {
         var g = function (k) { var el = document.getElementById('ab_' + k); return el ? el.value : ''; };
         if (!g('emp') || !g('date') || !g('time')) { if (typeof toast === 'function') { toast('Pick the employee, date and time'); } return; }
+        // 2026-08-05 — a manual punch can never be beyond the current date & time
+        // (the server enforces this too; 1-minute clock-skew allowance).
+        var pd = new Date(g('date') + 'T' + g('time') + ':00');
+        if (!isNaN(pd.getTime()) && pd.getTime() > Date.now() + 60000) { if (typeof toast === 'function') { toast('Punch date/time cannot be in the future - use the current time or earlier.'); } return; }
         fetch(cfg.masterBase + '/att-manual', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ item: { emp_name: g('emp'), log_date: g('date'), punch_at: g('date') + ' ' + g('time') + ':00', direction: g('dir') } }) })
             .then(function (r) { return r.json(); }).then(function (j) {
                 if (j && j.ok) { if (typeof toast === 'function') { toast('Punch recorded'); } var t = document.getElementById('ab_time'); if (t) { t.value = ''; } }
@@ -9839,7 +9975,7 @@ CSS;
             + '<div style="font-weight:800;margin-bottom:10px"><i class="fas fa-user-pen" style="color:var(--accent)"></i> Single punch <span style="font-weight:500;color:var(--text3);font-size:12px">applies immediately</span></div>'
             + '<div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:10px;align-items:end">'
             + '<div><label style="' + lbl + '">Employee (type to search)</label><input id="ab_emp" list="ab_dl" placeholder="Type a name…" autocomplete="off" style="' + inp + '">' + dl + '</div>'
-            + '<div><label style="' + lbl + '">Date</label><input id="ab_date" type="date" value="' + today + '" style="' + inp + '"></div>'
+            + '<div><label style="' + lbl + '">Date</label><input id="ab_date" type="date" value="' + today + '" max="' + today + '" style="' + inp + '"></div>'
             + '<div><label style="' + lbl + '">Time</label><input id="ab_time" type="time" style="' + inp + '"></div>'
             + '<div><label style="' + lbl + '">Direction</label><select id="ab_dir" style="' + inp + '"><option value="in">In</option><option value="out">Out</option></select></div>'
             + '<div><button class="btn btn-primary" onclick="abSingle()"><i class="fas fa-plus"></i> Add</button></div>'

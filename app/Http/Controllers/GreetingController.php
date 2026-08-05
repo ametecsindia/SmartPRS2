@@ -32,6 +32,8 @@ class GreetingController extends Controller
                 'config' => GreetingService::config($tid),
                 'defaults' => GreetingService::defaults(),
                 'variables' => ['{{name}}', '{{first_name}}', '{{company}}', '{{years}}', '{{date}}'],
+                // extra placeholders available ONLY in the late-login template
+                'lateVariables' => ['{{name}}', '{{first_name}}', '{{company}}', '{{date}}', '{{arrival_time}}', '{{shift_start}}', '{{grace}}', '{{late_by}}'],
             ]);
         } catch (\Throwable $e) {
             return response()->json(['ok' => false, 'error' => $e->getMessage()]);
@@ -69,7 +71,8 @@ class GreetingController extends Controller
     {
         try {
             $tid = $request->user()->tenant_id ?? null;
-            $type = $request->input('type', 'birthday') === 'anniversary' ? 'anniversary' : 'birthday';
+            $type = in_array($request->input('type', 'birthday'), ['anniversary', 'late'], true)
+                ? (string) $request->input('type') : 'birthday';
             $cfg = GreetingService::config($tid);
             $tpl = $cfg[$type] ?? [];
             // Preview / test never writes config: the screen posts whatever is
@@ -83,16 +86,23 @@ class GreetingController extends Controller
             }
 
             // Sample vars, or a real employee if an id is supplied.
-            $vars = ['name' => 'Asha Rao', 'first_name' => 'Asha', 'company' => 'Your Company',
-                'years' => $type === 'anniversary' ? '3' : '', 'date' => now()->format('d M Y')];
+            // 2026-08-05 — use the tenant's REAL company name in previews (it used
+            // to show the literal placeholder "Your Company", which read like the
+            // {{company}} variable was broken).
+            $tenantCompany = GreetingService::tenantCompany($tid) ?: 'Your Company';
+            $vars = ['name' => 'Asha Rao', 'first_name' => 'Asha', 'company' => $tenantCompany,
+                'years' => $type === 'anniversary' ? '3' : '', 'date' => now()->format('d M Y'),
+                'arrival_time' => '10:12 AM', 'shift_start' => '09:30', 'grace' => '10', 'late_by' => '32 min'];
             $empId = $request->input('employee_id');
             if ($empId && Schema::hasTable('employees')) {
                 $e = DB::table('employees')->where('id', $empId)->where('tenant_id', $tid)->first();
                 if ($e) {
-                    $company = $e->company_id && Schema::hasTable('companies')
-                        ? (DB::table('companies')->where('id', $e->company_id)->value('name') ?: 'our company') : 'our company';
+                    $company = ($e->company_id && Schema::hasTable('companies')
+                        ? (string) DB::table('companies')->where('id', $e->company_id)->value('name') : '') ?: $tenantCompany;
                     $years = ($type === 'anniversary' && $e->doj) ? (now()->year - (int) date('Y', strtotime($e->doj))) : null;
-                    $vars = GreetingService::vars((array) $e, $company, $years, $cfg);
+                    $vars = GreetingService::vars((array) $e, $company, $years, $cfg) + [
+                        'arrival_time' => '10:12 AM', 'shift_start' => '09:30', 'grace' => '10', 'late_by' => '32 min',
+                    ];
                 }
             }
 
@@ -118,7 +128,8 @@ class GreetingController extends Controller
         try {
             $user = $request->user();
             $tid = $user->tenant_id ?? null;
-            $type = $request->input('type', 'birthday') === 'anniversary' ? 'anniversary' : 'birthday';
+            $type = in_array($request->input('type', 'birthday'), ['anniversary', 'late'], true)
+                ? (string) $request->input('type') : 'birthday';
             $cfg = GreetingService::config($tid);
             $tpl = $cfg[$type] ?? [];
             // Preview / test never writes config: the screen posts whatever is
@@ -130,8 +141,11 @@ class GreetingController extends Controller
             if ($request->filled('message')) {
                 $tpl['message'] = (string) $request->input('message');
             }
+            // 2026-08-05 — real company name in test sends too (was "Your Company").
             $vars = ['name' => $user->name ?? 'there', 'first_name' => trim(explode(' ', (string) ($user->name ?? 'there'))[0]),
-                'company' => 'Your Company', 'years' => $type === 'anniversary' ? '3' : '', 'date' => now()->format('d M Y')];
+                'company' => GreetingService::tenantCompany($tid) ?: 'Your Company',
+                'years' => $type === 'anniversary' ? '3' : '', 'date' => now()->format('d M Y'),
+                'arrival_time' => '10:12 AM', 'shift_start' => '09:30', 'grace' => '10', 'late_by' => '32 min'];
 
             $id = NotificationService::send([
                 'tenant_id' => $tid, 'user_id' => $user->id ?? null,

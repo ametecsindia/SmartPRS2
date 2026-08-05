@@ -981,6 +981,32 @@ class MasterController extends Controller
                 $row['emp_code'] = $emp->emp_code;
                 $row['emp_name'] = $emp->name;
             }
+            // 2026-08-05 (Ejaz) — a MANUAL punch can never be in the future:
+            // reject any punch_at / log_date beyond the current date & time
+            // (2-minute clock-skew allowance). Unparseable values fall through —
+            // the datetime cast / DB layer handles those as before.
+            $pAt = trim((string) ($row['punch_at'] ?? ''));
+            if ($pAt !== '') {
+                try {
+                    $when = \Illuminate\Support\Carbon::parse($pAt);
+                } catch (\Throwable $e) {
+                    $when = null;
+                }
+                if ($when && $when->gt(now()->addMinutes(2))) {
+                    throw new \RuntimeException('Punch date/time cannot be in the future — use the current time or earlier.');
+                }
+            }
+            $pLd = trim((string) ($row['log_date'] ?? ''));
+            if ($pLd !== '') {
+                try {
+                    if (\Illuminate\Support\Carbon::parse($pLd)->startOfDay()->gt(now()->endOfDay())) {
+                        throw new \RuntimeException('Punch date cannot be in the future.');
+                    }
+                } catch (\RuntimeException $e) {
+                    throw $e;
+                } catch (\Throwable $e) {
+                }
+            }
         }
         // Resolve any employee-name fields to their FK id column (emp_map). Accept emp_code too.
         foreach ($def['emp_map'] ?? [] as $nameField => $idCol) {

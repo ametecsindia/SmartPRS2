@@ -59,6 +59,7 @@ class EmployeeImportService
         'bank_acc' => ['bankacc', 'bankaccount', 'accountno', 'accountnumber'],
         'ifsc' => ['ifsc', 'ifsccode'],
         'address' => ['address'],
+        'device_user_id' => ['biometricid', 'deviceuserid', 'bioid', 'biometricemployeeid'],
         'dpa' => ['dpa', 'dra', 'drapcc', 'dpapcc'],
         'pcc' => ['pcc', 'policeclearance'],
     ];
@@ -360,7 +361,7 @@ class EmployeeImportService
             $out['emp_code'] = $v['emp_code'];
         }
         foreach (['email', 'mobile', 'whatsapp', 'address', 'pan', 'uan', 'bank_acc', 'ifsc',
-            'department', 'designation', 'branch', 'team', 'shift'] as $f) {
+            'department', 'designation', 'branch', 'team', 'shift', 'device_user_id'] as $f) {
             if (! empty($v[$f])) {
                 $out[$f] = $v[$f];
             }

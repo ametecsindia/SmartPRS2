@@ -79,11 +79,36 @@ class DashboardController extends Controller
             ->when($self, fn ($q) => $q->where('id', $self['id']))
             ->where('status', 'active')->whereNull('deleted_at')->count();
 
+        // Present Today (fixed 2026-08-05): count DISTINCT *employees* with a punch
+        // today — the old distinct-emp_code count also counted raw device codes
+        // (unmapped biometric IDs, stray rows with no tenant) and missed rows whose
+        // tenant_id was NULL, so the card disagreed with the Directory. Match
+        // case-insensitively against active, non-deleted employees of this tenant;
+        // rows imported before tenant stamping (tenant_id NULL) still count.
         $presentToday = 0;
         if (Schema::hasTable('attendance_logs')) {
-            $presentToday = (int) DB::table('attendance_logs')->when($tid, fn ($q) => $q->where('tenant_id', $tid))
-                ->when($self, fn ($q) => $q->where('emp_code', $self['code']))
-                ->whereDate('log_date', now()->toDateString())->distinct()->count('emp_code');
+            try {
+                $codes = DB::table('attendance_logs')
+                    ->when($tid && Schema::hasColumn('attendance_logs', 'tenant_id'),
+                        fn ($q) => $q->where(fn ($w) => $w->where('tenant_id', $tid)->orWhereNull('tenant_id')))
+                    ->when($self, fn ($q) => $q->whereRaw('LOWER(emp_code) = ?', [strtolower($self['code'])]))
+                    ->whereDate('log_date', now()->toDateString())
+                    ->distinct()->pluck('emp_code');
+                if ($codes->isNotEmpty()) {
+                    $lower = $codes->map(fn ($c) => strtolower(trim((string) $c)))->filter()->unique()->values()->all();
+                    $presentToday = (int) DB::table('employees')
+                        ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                        ->when($self, fn ($q) => $q->where('id', $self['id']))
+                        ->where('status', 'active')->whereNull('deleted_at')
+                        ->whereIn(DB::raw('LOWER(emp_code)'), $lower)
+                        ->count();
+                }
+            } catch (\Throwable $e) {
+                // fall back to the old raw count rather than showing nothing
+                $presentToday = (int) DB::table('attendance_logs')->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                    ->when($self, fn ($q) => $q->where('emp_code', $self['code']))
+                    ->whereDate('log_date', now()->toDateString())->distinct()->count('emp_code');
+            }
         }
 
         $pending = Schema::hasTable('leaves')

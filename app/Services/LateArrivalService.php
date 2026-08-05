@@ -222,21 +222,56 @@ class LateArrivalService
                 $company = (string) DB::table('companies')->where('id', $emp->company_id ?? 0)->value('name');
             } catch (\Throwable $e) {
             }
+            if ($company === '') {
+                $company = GreetingService::tenantCompany($tid);   // 2026-08-05 — never blank
+            }
             $startHhmm = sprintf('%02d:%02d', intdiv($startMin, 60), $startMin % 60);
             $h = intdiv($lateMin, 60);
             $m = $lateMin % 60;
             $lateStr = ($h > 0 ? $h.' hr ' : '').$m.' min';
             $dateNice = Carbon::parse($date)->format('d M Y');
 
-            $body = "Dear ".($emp->name ?? 'Employee').",\n\n"
-                ."This is an automated notification that your attendance for ".$dateNice." was recorded as a LATE ARRIVAL.\n\n"
-                ."  First punch (arrival) : ".$firstIn->format('h:i A')."\n"
-                ."  Shift start + grace   : ".$startHhmm." (+".$grace." min grace)\n"
-                ."  Late by               : ".$lateStr."\n\n"
-                ."Please ensure timely arrival as per the company's attendance policy. "
-                ."If this is due to approved duty, travel or an exception, kindly inform your reporting manager / HR.\n\n"
-                .($company !== '' ? $company."\n" : '')
-                ."(This is a system-generated email from SmartPRS. Please do not reply.)";
+            // 2026-08-05 — the wording now comes from the editable "Late login"
+            // template (Greetings screen). The saved/default template renders with
+            // the same {{var}} engine as greetings; a blank template falls back to
+            // the built-in default so mail can never go out empty.
+            $subject = 'Late arrival recorded — '.$dateNice;
+            $body = '';
+            try {
+                $cfg = GreetingService::config($tid);
+                $tpl = (array) ($cfg['late'] ?? []);
+                $vars = [
+                    'name' => (string) ($emp->name ?? 'Employee'),
+                    'first_name' => trim(explode(' ', (string) ($emp->name ?? 'Employee'))[0]),
+                    'company' => $company,
+                    'date' => $dateNice,
+                    'arrival_time' => $firstIn->format('h:i A'),
+                    'shift_start' => $startHhmm,
+                    'grace' => (string) $grace,
+                    'late_by' => $lateStr,
+                    'years' => '',
+                ];
+                $s = trim(GreetingService::render((string) ($tpl['subject'] ?? ''), $vars));
+                $b = trim(GreetingService::render((string) ($tpl['message'] ?? ''), $vars));
+                if ($s !== '') {
+                    $subject = $s;
+                }
+                if ($b !== '') {
+                    $body = $b;
+                }
+            } catch (\Throwable $e) {
+            }
+            if ($body === '') {
+                $body = "Dear ".($emp->name ?? 'Employee').",\n\n"
+                    ."This is an automated notification that your attendance for ".$dateNice." was recorded as a LATE ARRIVAL.\n\n"
+                    ."  First punch (arrival) : ".$firstIn->format('h:i A')."\n"
+                    ."  Shift start + grace   : ".$startHhmm." (+".$grace." min grace)\n"
+                    ."  Late by               : ".$lateStr."\n\n"
+                    ."Please ensure timely arrival as per the company's attendance policy. "
+                    ."If this is due to approved duty, travel or an exception, kindly inform your reporting manager / HR.\n\n"
+                    .($company !== '' ? $company."\n" : '')
+                    ."(This is a system-generated email from SmartPRS. Please do not reply.)";
+            }
 
             // CC the reporting manager when we can resolve their email.
             $ccEmail = null;
@@ -251,8 +286,8 @@ class LateArrivalService
             } catch (\Throwable $e) {
             }
 
-            Mail::raw($body, function ($msg) use ($emp, $ccEmail, $dateNice) {
-                $msg->to($emp->email)->subject('Late arrival recorded — '.$dateNice);
+            Mail::raw($body, function ($msg) use ($emp, $ccEmail, $subject) {
+                $msg->to($emp->email)->subject($subject);
                 if ($ccEmail && strcasecmp($ccEmail, (string) $emp->email) !== 0) {
                     $msg->cc($ccEmail);
                 }
