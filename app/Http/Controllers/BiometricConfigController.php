@@ -3,6 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Services\ETimeOfficeService;
+use App\Services\ETimeTrackLiteService;
+use App\Services\GenericApiService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
@@ -25,6 +27,18 @@ class BiometricConfigController extends Controller
     private static function tid(Request $request): ?int
     {
         return $request->user()->tenant_id ? (int) $request->user()->tenant_id : null;
+    }
+
+    /** Keep api_config only when it is valid JSON; else store null. */
+    private static function cleanJson($v): ?string
+    {
+        $v = trim((string) $v);
+        if ($v === '') {
+            return null;
+        }
+        $d = json_decode($v, true);
+
+        return is_array($d) ? json_encode($d) : null;
     }
 
     private static function ensureTable(): void
@@ -54,6 +68,9 @@ class BiometricConfigController extends Controller
             'out_machine_id' => fn ($t) => $t->string('out_machine_id', 40)->nullable(),
             'label' => fn ($t) => $t->string('label', 120)->nullable(),          // F3 — device / location label
             'branch' => fn ($t) => $t->string('branch', 120)->nullable(),        // F3 — mapped Branch (name)
+            'serial_number' => fn ($t) => $t->string('serial_number', 80)->nullable(),   // eTimeTrackLite / push — device serial
+            'api_config' => fn ($t) => $t->text('api_config')->nullable(),                // generic — request/mapping recipe (JSON)
+            'sync_interval_min' => fn ($t) => $t->integer('sync_interval_min')->nullable(), // owner-chosen sync frequency (min)
         ];
         foreach ($add as $c => $fn) {
             if (! Schema::hasColumn('biometric_configs', $c)) {
@@ -104,6 +121,9 @@ class BiometricConfigController extends Controller
             'base_url' => $r?->base_url ?? '',
             'endpoint' => $r?->endpoint ?? '',
             'corp_id' => $r?->corp_id ?? '',
+            'serial_number' => $r?->serial_number ?? '',
+            'api_config' => $r?->api_config ?? '',
+            'sync_interval_min' => $r?->sync_interval_min ?? '',
             'username' => $r?->username ?? '',
             'empcode' => $r?->empcode ?? '',
             'emp_prefix' => $r?->emp_prefix ?? '',
@@ -177,15 +197,24 @@ class BiometricConfigController extends Controller
         $id = $request->input('id') ? (int) $request->input('id') : null;
         $r = $id ? $this->rowById($request, $id) : null;
 
+        $provider = trim((string) $request->input('provider', 'etimeoffice')) ?: 'etimeoffice';
+        // eTimeTrackLite stores the raw WebAPI URL as typed; eTimeOffice keeps the cloud default.
+        $baseUrl = trim((string) $request->input('base_url', ''));
+        if ($baseUrl === '' && $provider !== 'etimetracklite') {
+            $baseUrl = 'https://api.etimeoffice.com/api';
+        }
         $data = [
             'tenant_id' => $tid,
             'label' => trim((string) $request->input('label', '')) ?: null,          // F3
             'branch' => trim((string) $request->input('branch', '')) ?: null,        // F3
-            'provider' => trim((string) $request->input('provider', 'etimeoffice')) ?: 'etimeoffice',
+            'provider' => $provider,
             'enabled' => $request->boolean('enabled'),
-            'base_url' => trim((string) $request->input('base_url', '')) ?: 'https://api.etimeoffice.com/api',
+            'base_url' => $baseUrl ?: null,
             'endpoint' => trim((string) $request->input('endpoint', '')) ?: 'DownloadPunchDataMCID',
             'corp_id' => trim((string) $request->input('corp_id', '')) ?: null,
+            'serial_number' => trim((string) $request->input('serial_number', '')) ?: null,   // eTimeTrackLite
+            'api_config' => self::cleanJson($request->input('api_config')),                     // generic (JSON string)
+            'sync_interval_min' => ($iv = trim((string) $request->input('sync_interval_min', ''))) !== '' ? max(0, (int) $iv) : null,
             'username' => trim((string) $request->input('username', '')) ?: null,
             'empcode' => trim((string) $request->input('empcode', '')) ?: 'ALL',
             'emp_prefix' => trim((string) $request->input('emp_prefix', '')) ?: null,
@@ -239,12 +268,20 @@ class BiometricConfigController extends Controller
         }
         $posted = (string) $request->input('password', '');
 
+        $provider = $request->input('provider', $r->provider ?? 'etimeoffice');
+        $baseUrl = trim((string) $request->input('base_url', $r->base_url ?? ''));
+        if ($baseUrl === '' && $provider !== 'etimetracklite') {
+            $baseUrl = 'https://api.etimeoffice.com/api';
+        }
+
         return [
-            'provider' => $request->input('provider', $r->provider ?? 'etimeoffice'),
+            'provider' => $provider,
             'enabled' => $request->boolean('enabled'),
-            'base_url' => trim((string) $request->input('base_url', $r->base_url ?? '')) ?: 'https://api.etimeoffice.com/api',
+            'base_url' => $baseUrl,
             'endpoint' => trim((string) $request->input('endpoint', $r->endpoint ?? '')) ?: 'DownloadPunchDataMCID',
             'corp_id' => trim((string) $request->input('corp_id', $r->corp_id ?? '')),
+            'serial_number' => trim((string) $request->input('serial_number', $r->serial_number ?? '')),
+            'api_config' => self::cleanJson($request->input('api_config', $r->api_config ?? '')) ?? '',
             'username' => trim((string) $request->input('username', $r->username ?? '')),
             'password' => $posted !== '' ? $posted : $savedPwd,
             'empcode' => trim((string) $request->input('empcode', $r->empcode ?? 'ALL')) ?: 'ALL',
@@ -262,11 +299,55 @@ class BiometricConfigController extends Controller
             return $deny;
         }
         $cfg = $this->effectiveConfig($request);
+        $to = now();
+        $from = (clone $to)->subDay();
+
+        // eSSL eTimeTrackLite local WebAPI (SOAP) — always surface the RAW device
+        // response so the field mapping can be confirmed / tuned against a live box.
+        if (($cfg['provider'] ?? '') === 'etimetracklite') {
+            if (! ETimeTrackLiteService::configured($cfg)) {
+                return response()->json(['ok' => false, 'error' => 'Enter the WebAPI URL, Serial Number, Username and Password first.'], 422);
+            }
+            $res = ETimeTrackLiteService::fetch($cfg, $from, $to);
+            if (! $res['ok']) {
+                return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
+            }
+            $parsed = ETimeTrackLiteService::parse((string) $res['raw'], $cfg);
+            $lines = [];
+            foreach (array_slice($parsed, 0, 8) as $p) {
+                $lines[] = $p['emp_code'].'  '.$p['punch_at']->format('Y-m-d H:i').'  '.$p['direction']
+                    .(($p['machine'] ?? '') !== '' ? '  MC:'.$p['machine'] : '');
+            }
+            $preview = ($parsed ? implode("\n", $lines)."\n\n" : '')
+                .'--- RAW device response (first 1500 chars) ---'."\n".substr((string) $res['raw'], 0, 1500);
+
+            return response()->json(['ok' => true, 'parsed' => count($parsed), 'preview' => $preview]);
+        }
+
+        // Custom / Generic API — same raw-first preview so the mapping can be tuned.
+        if (($cfg['provider'] ?? '') === 'generic') {
+            if (! GenericApiService::configured($cfg)) {
+                return response()->json(['ok' => false, 'error' => 'Set at least the API URL and Response format first.'], 422);
+            }
+            $res = GenericApiService::fetch($cfg, $from, $to);
+            if (! $res['ok']) {
+                return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
+            }
+            $parsed = GenericApiService::parse((string) $res['raw'], $cfg);
+            $lines = [];
+            foreach (array_slice($parsed, 0, 8) as $p) {
+                $lines[] = $p['emp_code'].'  '.$p['punch_at']->format('Y-m-d H:i').'  '.$p['direction']
+                    .(($p['machine'] ?? '') !== '' ? '  MC:'.$p['machine'] : '');
+            }
+            $preview = ($parsed ? implode("\n", $lines)."\n\n" : '')
+                .'--- RAW device response (first 1500 chars) ---'."\n".substr((string) $res['raw'], 0, 1500);
+
+            return response()->json(['ok' => true, 'parsed' => count($parsed), 'preview' => $preview]);
+        }
+
         if (! ETimeOfficeService::configured($cfg)) {
             return response()->json(['ok' => false, 'error' => 'Enter Corporate ID, Username and Password first.'], 422);
         }
-        $to = now();
-        $from = (clone $to)->subDay();
         $res = ETimeOfficeService::fetch($cfg, $from, $to);
         if (! $res['ok']) {
             return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
@@ -290,17 +371,40 @@ class BiometricConfigController extends Controller
             return $deny;
         }
         $cfg = $this->effectiveConfig($request);
-        if (! ETimeOfficeService::configured($cfg)) {
-            return response()->json(['ok' => false, 'error' => 'Save the connection details first.'], 422);
-        }
         $days = max(1, min(31, (int) $request->input('days', 1)));
         $to = now();
         $from = (clone $to)->subDays($days);
-        $res = ETimeOfficeService::fetch($cfg, $from, $to);
-        if (! $res['ok']) {
-            return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
+
+        if (($cfg['provider'] ?? '') === 'etimetracklite') {
+            if (! ETimeTrackLiteService::configured($cfg)) {
+                return response()->json(['ok' => false, 'error' => 'Save the WebAPI URL, Serial Number, Username and Password first.'], 422);
+            }
+            $res = ETimeTrackLiteService::fetch($cfg, $from, $to);
+            if (! $res['ok']) {
+                return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
+            }
+            $cfg['source'] = 'etimetracklite';
+            $punches = ETimeTrackLiteService::parse((string) $res['raw'], $cfg);
+        } elseif (($cfg['provider'] ?? '') === 'generic') {
+            if (! GenericApiService::configured($cfg)) {
+                return response()->json(['ok' => false, 'error' => 'Set the API URL and Response format first.'], 422);
+            }
+            $res = GenericApiService::fetch($cfg, $from, $to);
+            if (! $res['ok']) {
+                return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
+            }
+            $cfg['source'] = 'generic';
+            $punches = GenericApiService::parse((string) $res['raw'], $cfg);
+        } else {
+            if (! ETimeOfficeService::configured($cfg)) {
+                return response()->json(['ok' => false, 'error' => 'Save the connection details first.'], 422);
+            }
+            $res = ETimeOfficeService::fetch($cfg, $from, $to);
+            if (! $res['ok']) {
+                return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
+            }
+            $punches = ETimeOfficeService::parse($res['json'], $cfg);
         }
-        $punches = ETimeOfficeService::parse($res['json'], $cfg);
         $r = ETimeOfficeService::import($punches, $cfg);
 
         $status = 'Imported '.$r['imported'].' punch(es) for '.$r['matched'].' row(s)';

@@ -86,25 +86,6 @@ Route::post('/api/mobile/push-token', [App\Http\Controllers\MobileDeviceControll
     ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])
     ->middleware('throttle:30,1')->name('api.mobile.push');
 
-// eSSL / ZKTeco ADMS "push" receiver (iclock protocol). Devices dial OUT to
-// these fixed paths and upload punches themselves (see PushController). Public
-// + CSRF-exempt (a device cannot send a token); identified by SN, rate-limited.
-Route::match(['get', 'post'], '/iclock/cdata', [App\Http\Controllers\PushController::class, 'cdata'])
-    ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])
-    ->middleware('throttle:1000,1')->name('iclock.cdata');
-Route::get('/iclock/getrequest', [App\Http\Controllers\PushController::class, 'getrequest'])
-    ->middleware('throttle:1000,1')->name('iclock.getrequest');
-Route::match(['get', 'post'], '/iclock/devicecmd', [App\Http\Controllers\PushController::class, 'ok'])
-    ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])
-    ->middleware('throttle:1000,1')->name('iclock.devicecmd');
-Route::match(['get', 'post'], '/iclock/fdata', [App\Http\Controllers\PushController::class, 'ok'])
-    ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])
-    ->middleware('throttle:1000,1')->name('iclock.fdata');
-Route::match(['get', 'post'], '/iclock/edata', [App\Http\Controllers\PushController::class, 'ok'])
-    ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])
-    ->middleware('throttle:1000,1')->name('iclock.edata');
-
-
 // rev173d — PUBLIC sample RBI audit report (marketing site: landing RBI section + FAQ).
 // Illustrative data only, generic SmartPRS branding, rate-limited.
 Route::get('/sample-audit-report.pdf', [App\Http\Controllers\ComplianceController::class, 'publicSampleAuditPdf'])

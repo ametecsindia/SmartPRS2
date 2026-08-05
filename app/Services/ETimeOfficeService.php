@@ -53,12 +53,20 @@ class ETimeOfficeService
             }
         }
 
+        $provider = $r->provider ?? 'etimeoffice';
+
         return [
-            'provider' => $r->provider ?? 'etimeoffice',
+            'id' => $r->id ?? null,
+            'provider' => $provider,
             'enabled' => (bool) ($r->enabled ?? false),
-            'base_url' => $r->base_url ?: 'https://api.etimeoffice.com/api',
+            'last_sync_at' => $r->last_sync_at ?? null,
+            'sync_interval_min' => $r->sync_interval_min ?? null,
+            // eTimeTrackLite keeps the raw WebAPI URL; eTimeOffice falls back to the cloud default.
+            'base_url' => $r->base_url ?: ($provider === 'etimetracklite' ? '' : 'https://api.etimeoffice.com/api'),
             'endpoint' => $r->endpoint ?: 'DownloadPunchDataMCID',
             'corp_id' => $r->corp_id,
+            'serial_number' => $r->serial_number ?? null,   // etimetracklite — device serial
+            'api_config' => $r->api_config ?? null,          // generic — full request/mapping recipe (JSON)
             'username' => $r->username,
             'password' => $pwd,
             'empcode' => $r->empcode ?: 'ALL',
@@ -92,7 +100,7 @@ class ETimeOfficeService
         if (Schema::hasTable('biometric_configs')) {
             foreach (DB::table('biometric_configs')->where('enabled', true)->get() as $r) {
                 $cfg = self::rowToCfg($r);
-                if (self::configured($cfg)) {
+                if (self::configuredAny($cfg)) {
                     $out[] = $cfg;
                 }
             }
@@ -110,6 +118,20 @@ class ETimeOfficeService
     public static function configured(array $cfg): bool
     {
         return ! empty($cfg['corp_id']) && ! empty($cfg['username']) && ! empty($cfg['password']);
+    }
+
+    /** Provider-aware "is this connection usable?" — routes eTimeTrackLite to its own check. */
+    public static function configuredAny(array $cfg): bool
+    {
+        $p = $cfg['provider'] ?? '';
+        if ($p === 'etimetracklite') {
+            return ETimeTrackLiteService::configured($cfg);
+        }
+        if ($p === 'generic') {
+            return GenericApiService::configured($cfg);
+        }
+
+        return self::configured($cfg);
     }
 
     private static function authPair(array $cfg): array
@@ -320,7 +342,10 @@ class ETimeOfficeService
             $match = [
                 'emp_code' => $emp->emp_code,
                 'punch_at' => $p['punch_at']->format('Y-m-d H:i:s'),
-                'source' => 'etimeoffice',
+                // Channel label — 'etimeoffice' (cloud) by default, 'etimetracklite'
+                // (local WebAPI) when that provider imports. Keeps the two feeds
+                // from overwriting each other and lets a re-sync correct in place.
+                'source' => $cfg['source'] ?? 'etimeoffice',
             ];
             if (! empty($emp->tenant_id)) {
                 $match['tenant_id'] = $emp->tenant_id;

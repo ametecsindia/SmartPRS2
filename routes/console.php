@@ -217,9 +217,24 @@ Schedule::command('demo:reset')
 | absorbs any late device→cloud sync). INERT until ETIMEOFFICE_ENABLED=true and
 | the credentials are set in .env — the ->when() guard keeps it off otherwise.
 */
+// Fires when the .env cloud fallback is on OR any device is enabled on the
+// "Biometric Device Setup" screen — covers eTimeOffice (cloud) and eSSL
+// eTimeTrackLite (local WebAPI) installs where .env is left untouched.
+// Ticks every 5 min; the command gates each device by its own sync_interval_min
+// (default hourly), so the owner sets 5/10/15/30/60 per device.
 Schedule::command('attendance:sync-etimeoffice --days=1')
-    ->hourly()
-    ->when(fn () => (bool) config('smartprs.etimeoffice.enabled'))
+    ->everyFiveMinutes()
+    ->when(function () {
+        if ((bool) config('smartprs.etimeoffice.enabled')) {
+            return true;
+        }
+        try {
+            return \Illuminate\Support\Facades\Schema::hasTable('biometric_configs')
+                && \Illuminate\Support\Facades\DB::table('biometric_configs')->where('enabled', true)->exists();
+        } catch (\Throwable $e) {
+            return false;
+        }
+    })
     ->withoutOverlapping()
     ->onOneServer();
 

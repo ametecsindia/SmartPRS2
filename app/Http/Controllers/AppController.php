@@ -8723,16 +8723,99 @@ CSS;
         var g = function (id) { var el = document.getElementById(id); return el ? el.value : ''; };
         var ck = document.getElementById('bio-enabled');
         var f = window.__bioForm || {};
-        return {
+        var provider = g('bio-provider') || (f.provider || 'etimeoffice');
+        var out = {
             id: f.id || '',
             label: g('bio-label'), branch: g('bio-branch'),
-            provider: g('bio-provider'), base_url: g('bio-base'), endpoint: g('bio-endpoint'),
-            corp_id: g('bio-corp'), username: g('bio-user'), password: g('bio-pass'),
+            provider: provider, base_url: g('bio-base'), endpoint: g('bio-endpoint'),
+            corp_id: g('bio-corp'), serial_number: g('bio-serial'), username: g('bio-user'), password: g('bio-pass'),
             empcode: g('bio-empcode'), emp_prefix: g('bio-prefix'),
             in_machine_id: g('bio-inmc'), out_machine_id: g('bio-outmc'),
+            sync_interval_min: g('bio-interval'),
             enabled: (ck && ck.checked) ? 1 : 0
         };
+        if (provider === 'generic') {
+            var m = {};
+            var setm = function (k, id) { var v = g(id); if (v !== '') { m[k] = v; } };
+            setm('emp', 'gen-map-emp'); setm('datetime', 'gen-map-dt'); setm('date', 'gen-map-date');
+            setm('time', 'gen-map-time'); setm('direction', 'gen-map-dir'); setm('machine', 'gen-map-mc');
+            var gb = document.getElementById('gen-basic');
+            out.api_config = JSON.stringify({
+                method: g('gen-method') || 'GET', url: g('gen-url'),
+                basic_auth: (gb && gb.checked) ? 1 : 0, api_key: g('gen-key'),
+                headers: g('gen-headers'), body_type: g('gen-bodytype') || 'none', body: g('gen-body'),
+                date_format_req: g('gen-datefmt'),
+                token_url: g('gen-tokenurl'), token_body: g('gen-tokenbody'), token_path: g('gen-tokenpath'),
+                response_type: g('gen-restype') || 'json', record_path: g('gen-recpath'),
+                record_delim: g('gen-recdelim'), field_delim: g('gen-fielddelim'),
+                punch_date_format: g('gen-punchfmt'), dir_in: g('gen-dirin'), dir_out: g('gen-dirout'),
+                map: m
+            });
+        }
+        return out;
     }
+    // Switching provider re-renders the form with that provider's fields, keeping
+    // whatever was already typed (eTimeOffice cloud vs eSSL eTimeTrackLite local).
+    window.bioSetProvider = function (v) {
+        var f = window.__bioForm || {};
+        var cur = bioCollect();
+        cur.provider = v;
+        cur._new = f._new;
+        cur.hasPassword = f.hasPassword;
+        if (!cur.id) { cur.id = f.id || ''; }
+        window.__bioForm = cur;
+        if (typeof render === 'function') { render(); }
+    };
+    // Starting templates for the Custom/Generic API provider. Each fills the form;
+    // the admin adjusts the HOST and confirms field names against a live Test.
+    window.BIO_PRESETS = {
+        blank: { label: 'Custom (blank) — fill manually' },
+        json_query: {
+            label: 'Generic JSON — GET, credentials in the URL',
+            method: 'GET', url: 'http://HOST/api/attendance?username={user}&password={pass}&from={from}&to={to}',
+            response_type: 'json', record_path: 'data', date_format_req: 'Y-m-d H:i:s',
+            map: { emp: 'empcode', datetime: 'punchtime', direction: 'inout' }, dir_in: 'in,0', dir_out: 'out,1'
+        },
+        soap_xml: {
+            label: 'Generic SOAP / XML — POST',
+            method: 'POST', url: 'http://HOST/service.asmx',
+            headers: 'Content-Type: text/xml; charset=utf-8\\nSOAPAction: http://tempuri.org/GetLogs',
+            body_type: 'xml',
+            body: '<?xml version="1.0"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><GetLogs xmlns="http://tempuri.org/"><From>{from}</From><To>{to}</To><User>{user}</User><Pass>{pass}</Pass></GetLogs></soap:Body></soap:Envelope>',
+            response_type: 'xml', record_path: 'Row',
+            map: { emp: 'EmpCode', datetime: 'LogDateTime', direction: 'InOut' }, dir_in: 'in', dir_out: 'out'
+        },
+        zkteco_biotime: {
+            label: 'ZKTeco BioTime 8 — token login (set HOST)',
+            token_url: 'http://HOST/api-token-auth/', token_body: '{"username":"{user}","password":"{pass}"}', token_path: 'token',
+            method: 'GET', url: 'http://HOST/iclock/api/transactions/?start_time={from}&end_time={to}&page_size=1000',
+            headers: 'Authorization: Token {token}',
+            response_type: 'json', record_path: 'data', date_format_req: 'Y-m-d H:i:s',
+            map: { emp: 'emp_code', datetime: 'punch_time', direction: 'punch_state' }, dir_in: '0,255', dir_out: '1'
+        },
+        matrix_cosec: {
+            label: 'Matrix COSEC — REST (template, verify endpoints)',
+            method: 'GET', url: 'http://HOST/cosec/api/attendance?fromdate={from_date}&todate={to_date}', basic_auth: 1,
+            response_type: 'json', record_path: '', date_format_req: 'Y-m-d',
+            map: { emp: 'UserID', datetime: 'EventDateTime', direction: 'InOut' }, dir_in: 'in', dir_out: 'out'
+        }
+    };
+    window.bioPreset = function (name) {
+        var p = (window.BIO_PRESETS || {})[name] || {};
+        var sv = function (id, v) { var el = document.getElementById(id); if (el) { el.value = (v == null ? '' : v); } };
+        sv('gen-method', p.method || 'GET'); sv('gen-url', p.url || '');
+        var gb = document.getElementById('gen-basic'); if (gb) { gb.checked = !!p.basic_auth; }
+        sv('gen-key', p.api_key || ''); sv('gen-headers', p.headers || '');
+        sv('gen-bodytype', p.body_type || 'none'); sv('gen-body', p.body || '');
+        sv('gen-datefmt', p.date_format_req || '');
+        sv('gen-tokenurl', p.token_url || ''); sv('gen-tokenbody', p.token_body || ''); sv('gen-tokenpath', p.token_path || '');
+        sv('gen-restype', p.response_type || 'json'); sv('gen-recpath', p.record_path || '');
+        sv('gen-recdelim', p.record_delim || ''); sv('gen-fielddelim', p.field_delim || '');
+        sv('gen-punchfmt', p.punch_date_format || ''); sv('gen-dirin', p.dir_in || ''); sv('gen-dirout', p.dir_out || '');
+        var m = p.map || {};
+        sv('gen-map-emp', m.emp || ''); sv('gen-map-dt', m.datetime || ''); sv('gen-map-date', m.date || '');
+        sv('gen-map-time', m.time || ''); sv('gen-map-dir', m.direction || ''); sv('gen-map-mc', m.machine || '');
+    };
     window.bioAdd = function () { window.__bioForm = { _new: true }; if (typeof render === 'function') { render(); } };
     window.bioEdit = function (id) {
         var list = (window.__BIO && window.__BIO.devices) || [];
@@ -8791,28 +8874,118 @@ CSS;
                 + '<select id="bio-branch" style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:9px;font-size:14px">' + brOpts + '</select>'
                 + '<div style="font-size:12px;color:var(--text3);margin-top:4px">Which branch this device belongs to (from your Branches master).</div></div>';
             var pwPh = c.hasPassword ? 'Saved — leave blank to keep current password' : 'Device API password';
+            var prov = (c.provider || 'etimeoffice');
+            var lbSt = 'display:block;font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:5px';
+            var inSt = 'width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:9px;font-size:14px';
+            var selFld = function (label, id, opts, val, help, onch) {
+                var o = opts.map(function (op) { return '<option value="' + esc(op[0]) + '"' + (String(op[0]) === String(val == null ? '' : val) ? ' selected' : '') + '>' + esc(op[1]) + '</option>'; }).join('');
+                return '<div style="margin-bottom:14px"><label style="' + lbSt + '">' + esc(label) + '</label>'
+                    + '<select id="' + id + '"' + (onch ? ' onchange="' + onch + '"' : '') + ' style="' + inSt + '">' + o + '</select>'
+                    + (help ? '<div style="font-size:12px;color:var(--text3);margin-top:4px">' + esc(help) + '</div>' : '') + '</div>';
+            };
+            var taFld = function (label, id, val, ph, help, rows) {
+                return '<div style="margin-bottom:14px"><label style="' + lbSt + '">' + esc(label) + '</label>'
+                    + '<textarea id="' + id + '" rows="' + (rows || 3) + '" placeholder="' + esc(ph || '') + '" style="' + inSt + ';font-family:monospace;font-size:12px">' + esc(val || '') + '</textarea>'
+                    + (help ? '<div style="font-size:12px;color:var(--text3);margin-top:4px">' + esc(help) + '</div>' : '') + '</div>';
+            };
+            var chk = function (label, id, on, help) {
+                return '<label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:' + (help ? '4px' : '14px') + '"><input id="' + id + '" type="checkbox"' + (on ? ' checked' : '') + '> ' + esc(label) + '</label>'
+                    + (help ? '<div style="font-size:12px;color:var(--text3);margin:0 0 12px">' + esc(help) + '</div>' : '');
+            };
+            var provSel = '<div style="margin-bottom:14px"><label style="' + lbSt + '">Provider / Device type</label>'
+                + '<select id="bio-provider" onchange="bioSetProvider(this.value)" style="' + inSt + '">'
+                + '<option value="push"' + (prov === 'push' ? ' selected' : '') + '>Push / ADMS — device pushes to SmartPRS (best for many devices)</option>'
+                + '<option value="etimetracklite"' + (prov === 'etimetracklite' ? ' selected' : '') + '>eSSL eTimeTrackLite — Local WebAPI (SOAP, port 81)</option>'
+                + '<option value="etimeoffice"' + (prov === 'etimeoffice' ? ' selected' : '') + '>eTimeOffice — Cloud API (etimeoffice.com)</option>'
+                + '<option value="generic"' + (prov === 'generic' ? ' selected' : '') + '>Custom / Generic API — configure any HTTP API</option>'
+                + '</select>'
+                + '<div style="font-size:12px;color:var(--text3);margin-top:4px"><b>Push</b>: point the device at SmartPRS (recommended). <b>eTimeTrackLite</b>: on-prem eSSL SOAP. <b>eTimeOffice</b>: eSSL cloud. <b>Custom</b>: any other API.</div></div>';
+            // Sync-frequency options (push adds Real-time; the interval is sent to the device).
+            var ivOpts = (prov === 'push')
+                ? [['0', 'Real-time (each punch)'], ['5', 'Every 5 minutes'], ['10', 'Every 10 minutes'], ['15', 'Every 15 minutes'], ['30', 'Every 30 minutes'], ['60', 'Hourly']]
+                : [['5', 'Every 5 minutes'], ['10', 'Every 10 minutes'], ['15', 'Every 15 minutes'], ['30', 'Every 30 minutes'], ['60', 'Hourly']];
+            var ivVal = (c.sync_interval_min === 0 || c.sync_interval_min) ? String(c.sync_interval_min) : (prov === 'push' ? '0' : '60');
+            var intervalFld = selFld('Sync frequency', 'bio-interval', ivOpts, ivVal, (prov === 'push' ? 'How often the device pushes (sent to the device on connect). Real-time is best.' : 'How often SmartPRS pulls this device.'));
+            var pushPort = (location.port || '80');
+            var pushHost = (location.hostname || 'THIS-SERVER') + ((location.port && location.port !== '80' && location.port !== '443') ? (':' + location.port) : '');
+            var pushBox = '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:14px;font-size:13px;line-height:1.6">'
+                + '<div style="font-weight:700;margin-bottom:6px"><i class="fas fa-satellite-dish" style="color:#f97316"></i> Point the device here</div>'
+                + 'On the device: <b>Menu &rarr; Comm &rarr; Cloud Server / ADMS</b>. Set <b>Server Address</b> = this server’s IP and <b>Server Port</b> = <b>' + esc(pushPort) + '</b>. The device then pushes punches automatically — no URL or password needed here. It auto-registers by its serial number and appears in this list.'
+                + '<div style="margin-top:8px;color:var(--text3)">This server: <b>' + esc(pushHost) + '</b> &middot; path <code>/iclock/</code> (fixed in the device). If the devices are on your office LAN, use this machine’s <b>LAN IP</b>, not a public domain.</div>'
+                + '</div>';
+            var ac = {}; try { ac = c.api_config ? (typeof c.api_config === 'string' ? JSON.parse(c.api_config) : c.api_config) : {}; } catch (e) { ac = {}; }
+            var acm = ac.map || {};
+            var presetOpts = Object.keys(window.BIO_PRESETS || { blank: {} }).map(function (k) { return [k, (window.BIO_PRESETS[k] || {}).label || k]; });
+            var genBlock = selFld('Start from a preset', 'gen-preset', presetOpts, '', 'Fills the fields below with a starting template — then adjust and Test.', 'bioPreset(this.value)')
+                + selFld('HTTP Method', 'gen-method', [['GET', 'GET'], ['POST', 'POST']], ac.method || 'GET')
+                + fld('API URL', 'gen-url', ac.url || '', 'text', 'http://HOST/api?from={from}&to={to}', 'Placeholders: {from} {to} {from_date} {to_date} {serial} {user} {pass} {key} {token} {empcode}')
+                + chk('Send username/password as HTTP Basic auth', 'gen-basic', ac.basic_auth)
+                + fld('Username', 'bio-user', c.username || '', 'text', 'API username (also {user})')
+                + fld('Password', 'bio-pass', '', 'password', pwPh, 'Also available as {pass}.')
+                + fld('API Key / Token value', 'gen-key', ac.api_key || '', 'text', '', 'Optional. Available as {key} in URL / headers / body.')
+                + fld('Device Serial (optional)', 'bio-serial', c.serial_number || '', 'text', '', 'Available as {serial}.')
+                + taFld('Extra Headers', 'gen-headers', ac.headers || '', 'X-API-Key: {key}\\nSOAPAction: ...', 'One "Header: value" per line. Values accept placeholders.', 3)
+                + selFld('Request Body Type (POST)', 'gen-bodytype', [['none', 'None (GET / no body)'], ['form', 'Form-encoded'], ['json', 'JSON'], ['xml', 'XML / SOAP']], ac.body_type || 'none')
+                + taFld('Request Body Template', 'gen-body', ac.body || '', 'key={user}&from={from}   OR   {"user":"{user}"}   OR   <xml>...', 'For POST. Placeholders substituted.', 4)
+                + fld('Request date format', 'gen-datefmt', ac.date_format_req || '', 'text', 'Y-m-d H:i:s', 'PHP date format for {from}/{to}. Blank = Y-m-d H:i:s.')
+                + '<div style="border-top:1px dashed var(--border);margin:2px 0 12px;padding-top:10px;font-size:12px;font-weight:700;color:var(--text3)">OPTIONAL TOKEN LOGIN (called first — exposes {token})</div>'
+                + fld('Token login URL', 'gen-tokenurl', ac.token_url || '', 'text', 'http://HOST/api-token-auth/', 'Leave blank if not used.')
+                + fld('Token login body (JSON)', 'gen-tokenbody', ac.token_body || '', 'text', '{"username":"{user}","password":"{pass}"}')
+                + fld('Token JSON path', 'gen-tokenpath', ac.token_path || '', 'text', 'token', 'Where the token sits in the login response, e.g. token or data.token.')
+                + '<div style="border-top:1px dashed var(--border);margin:2px 0 12px;padding-top:10px;font-size:12px;font-weight:700;color:var(--text3)">RESPONSE MAPPING</div>'
+                + selFld('Response format', 'gen-restype', [['json', 'JSON'], ['xml', 'XML'], ['delimited', 'Delimited text']], ac.response_type || 'json')
+                + fld('Records location', 'gen-recpath', ac.record_path || '', 'text', 'data (JSON dot-path)  /  Row (XML tag)', 'JSON: dot-path to the array (blank = root). XML: the repeating tag. Delimited: leave blank.')
+                + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px">'
+                + fld('Record separator', 'gen-recdelim', ac.record_delim || '', 'text', '\\\\n', 'Delimited only. Type \\\\n for newline.')
+                + fld('Field separator', 'gen-fielddelim', ac.field_delim || '', 'text', '\\\\t', 'Delimited only. Type \\\\t for tab.')
+                + '</div>'
+                + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px">'
+                + fld('Map: Employee code', 'gen-map-emp', acm.emp || '', 'text', 'empcode / 0', 'Field key, dot-path, or column index.')
+                + fld('Map: Date+Time', 'gen-map-dt', acm.datetime || '', 'text', 'punchtime / 1')
+                + fld('Map: Date (if split)', 'gen-map-date', acm.date || '', 'text', '')
+                + fld('Map: Time (if split)', 'gen-map-time', acm.time || '', 'text', '')
+                + fld('Map: Direction', 'gen-map-dir', acm.direction || '', 'text', 'inout / status')
+                + fld('Map: Machine (optional)', 'gen-map-mc', acm.machine || '', 'text', '')
+                + '</div>'
+                + fld('Punch date format', 'gen-punchfmt', ac.punch_date_format || '', 'text', 'Y-m-d H:i:s', 'PHP format to read the punch time. Blank = auto-detect.')
+                + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px">'
+                + fld('Direction: IN values', 'gen-dirin', ac.dir_in || '', 'text', 'in,0,I')
+                + fld('Direction: OUT values', 'gen-dirout', ac.dir_out || '', 'text', 'out,1,O')
+                + '</div>';
+            var provFields = prov === 'etimetracklite'
+                ? (fld('WebAPI URL', 'bio-base', c.base_url || '', 'text', 'http://192.168.1.100:81/iclock/WebAPIservice.asmx', 'eTimeTrackLite Web API endpoint. Host:port is fine too — /iclock/WebAPIservice.asmx is appended automatically.')
+                    + fld('Device Serial Number', 'bio-serial', c.serial_number || '', 'text', 'e.g. CUB7244600978', 'Shown in eTimeTrackLite / printed on the device. Used by GetTransactionsLog.')
+                    + fld('WebAPI Username', 'bio-user', c.username || '', 'text', 'Test', 'A user created in eTimeTrackLite WITH API permission granted — not the desktop-app login.')
+                    + fld('WebAPI Password', 'bio-pass', '', 'password', pwPh, ''))
+                : prov === 'push'
+                    ? (pushBox + fld('Device Serial Number (optional)', 'bio-serial', c.serial_number || '', 'text', 'e.g. CUB7244600978', 'Pre-register a serial, or leave blank — the device auto-registers itself when it first pushes.'))
+                    : prov === 'generic'
+                        ? genBlock
+                        : (fld('API Base URL', 'bio-base', c.base_url || '', 'text', 'https://api.etimeoffice.com/api')
+                            + fld('Endpoint', 'bio-endpoint', c.endpoint || '', 'text', 'DownloadPunchDataMCID')
+                            + fld('Corporate ID', 'bio-corp', c.corp_id || '', 'text', 'Your eTimeOffice corporate ID')
+                            + fld('Username', 'bio-user', c.username || '', 'text', 'API username')
+                            + fld('Password', 'bio-pass', '', 'password', pwPh, '')
+                            + fld('Employee code filter', 'bio-empcode', c.empcode || '', 'text', 'ALL', 'Usually ALL.'));
+            var buttons = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px">'
+                + '<button class="btn btn-primary" onclick="bioSave()"><i class="fas fa-floppy-disk"></i> Save device</button>'
+                + (prov === 'push' ? '' : ('<button class="btn btn-outline" onclick="bioTest()"><i class="fas fa-plug"></i> Test connection</button>'
+                    + '<button class="btn btn-outline" onclick="bioSync(0)"><i class="fas fa-rotate"></i> Sync now</button>'))
+                + '</div>';
             var html = pghead('Biometric Device Setup', (c._new ? 'Add a new device' : 'Edit device') + ' — map it to a branch and give it a label.', '<button class="btn btn-outline" onclick="bioCancel()"><i class="fas fa-arrow-left"></i> Back to devices</button>')
-                + '<div class="card" style="padding:22px 24px;max-width:580px">'
-                + '<label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:16px"><input id="bio-enabled" type="checkbox"' + (c.enabled ? ' checked' : '') + '> Enable automatic hourly sync for this device</label>'
+                + '<div class="card" style="padding:22px 24px;max-width:600px">'
+                + '<label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:16px"><input id="bio-enabled" type="checkbox"' + (c.enabled ? ' checked' : '') + '> Enable this device (auto-sync / accept its pushes)</label>'
                 + fld('Device label', 'bio-label', c.label || '', 'text', 'e.g. Main Gate, 3rd Floor', 'A friendly name for this specific device / location.')
                 + brSel
-                + fld('Provider', 'bio-provider', c.provider || '', 'text', 'eTimeOffice', 'Cloud attendance provider name.')
-                + fld('API Base URL', 'bio-base', c.base_url || '', 'text', 'https://api.etimeoffice.com/api')
-                + fld('Endpoint', 'bio-endpoint', c.endpoint || '', 'text', 'DownloadPunchDataMCID')
-                + fld('Corporate ID', 'bio-corp', c.corp_id || '', 'text', 'Your eTimeOffice corporate ID')
-                + fld('Username', 'bio-user', c.username || '', 'text', 'API username')
-                + fld('Password', 'bio-pass', '', 'password', pwPh, '')
-                + fld('Employee code filter', 'bio-empcode', c.empcode || '', 'text', 'ALL', 'Usually ALL.')
+                + provSel
+                + provFields
+                + intervalFld
                 + fld('Employee ID prefix', 'bio-prefix', c.emp_prefix || '', 'text', 'e.g. A', 'If the device returns 12345 and your employees are A12345, enter A.')
                 + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px">'
-                + fld('In Machine ID', 'bio-inmc', c.in_machine_id || '', 'text', 'e.g. 1', 'Entry device machine no. — its punches are IN.')
-                + fld('Out Machine ID', 'bio-outmc', c.out_machine_id || '', 'text', 'e.g. 2', 'Exit device machine no. — its punches are OUT.')
+                + fld('In Machine ID', 'bio-inmc', c.in_machine_id || '', 'text', 'e.g. 1', 'Entry device number/serial — its punches are IN. Optional.')
+                + fld('Out Machine ID', 'bio-outmc', c.out_machine_id || '', 'text', 'e.g. 2', 'Exit device number/serial — its punches are OUT. Optional.')
                 + '</div>'
-                + '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px">'
-                + '<button class="btn btn-primary" onclick="bioSave()"><i class="fas fa-floppy-disk"></i> Save device</button>'
-                + '<button class="btn btn-outline" onclick="bioTest()"><i class="fas fa-plug"></i> Test connection</button>'
-                + '<button class="btn btn-outline" onclick="bioSync(0)"><i class="fas fa-rotate"></i> Sync now</button>'
-                + '</div>'
+                + buttons
                 + '<div id="bio-result" style="margin-top:14px;font-size:13px"></div>'
                 + '</div>';
             return html;
@@ -9741,7 +9914,7 @@ CSS;
         { k: 'unique_id', l: 'Serial / Device ID' },
         { k: 'company_name', l: 'Company', src: 'company' },
         { k: 'location', l: 'Location / Branch' },
-        { k: 'connect_mode', l: 'Connection Method', type: 'select', opts: ['cloud_push', 'lan_pull', 'usb_offline'], optLabels: ['Cloud Push (ADMS) - device pushes to server', 'Direct LAN - pull from IP : Port', 'Offline - USB download + bulk Excel upload'] },
+        { k: 'connect_mode', l: 'Connection Method', type: 'select', opts: ['cloud_push', 'lan_pull', 'essl_webapi', 'usb_offline'], optLabels: ['Cloud Push (ADMS) - device pushes to server', 'Direct LAN - pull from IP : Port', 'eSSL eTimeTrackLite - Local WebAPI (port 81) - set up under Biometric Device Setup', 'Offline - USB download + bulk Excel upload'] },
         { k: 'ip_address', l: 'IP Address (LAN mode)' },
         { k: 'port', l: 'Port (ZKTeco default 4370)', type: 'number', noList: 1 },
         { k: 'comm_key', l: 'Comm Key / Device Password', noList: 1 },
