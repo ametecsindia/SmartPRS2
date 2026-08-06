@@ -1400,7 +1400,12 @@ CSS;
                 var idx = (DB.employees || []).findIndex(function (e) { return e.id === editing.id; });
                 if (idx >= 0) { DB.employees[idx] = updated; }
                 if (typeof persist === 'function') { persist(); }
-                postEmp(updated).then(function () { if (typeof toast === 'function') { toast('Employee updated'); } }).catch(function () {});
+                // 2026-08-05 — HONEST result: a rejected save used to toast
+                // "Employee updated" anyway, so the loss only showed after refresh.
+                postEmp(updated).then(function (d) {
+                    if (d && d.ok) { if (typeof toast === 'function') { toast('Employee updated'); } }
+                    else { if (typeof toast === 'function') { toast('NOT SAVED - ' + ((d && d.error) || 'the server rejected the change. Please try again.')); } }
+                }).catch(function () { if (typeof toast === 'function') { toast('NOT SAVED - could not reach the server. Check the connection and save again.'); } });
                 window._editEmp = null;
                 go('emp-list', document.querySelector('.nav-item[data-id="emp-list"]'));
                 return;
@@ -1417,7 +1422,10 @@ CSS;
                 var _fid = document.getElementById('f_id'); if (_fid && _fid.value && _fid.value.trim()) { emp.id = _fid.value.trim(); }
                 var _fcn = document.getElementById('f_companyName'); if (_fcn && _fcn.value) { emp.company = _fcn.value; }   // list shows the NAME
                 if (DB.employees[0]) { DB.employees[0].company = emp.company || DB.employees[0].company; DB.employees[0].deviceUserId = emp.deviceUserId || ''; }
-                postEmp(emp).then(function (d) { if (d && d.ok && typeof toast === 'function') { toast('Saved to database (' + d.emp_code + ')'); } }).catch(function () {});
+                postEmp(emp).then(function (d) {
+                    if (d && d.ok) { if (typeof toast === 'function') { toast('Saved to database (' + d.emp_code + ')'); } }
+                    else { if (typeof toast === 'function') { toast('NOT SAVED - ' + ((d && d.error) || 'the server rejected the record.')); } }
+                }).catch(function () { if (typeof toast === 'function') { toast('NOT SAVED - could not reach the server.'); } });
             }
         };
         window.saveEmp.__wired = true;

@@ -544,8 +544,16 @@ class EmployeeImportService
                 ? sprintf('%04d-%02d-%02d', $m[1], $m[2], $m[3]) : null;
         }
         if (preg_match('#^(\d{1,2})[/-](\d{1,2})[/-](\d{4})#', $s, $m)) {
-            return checkdate((int) $m[2], (int) $m[1], (int) $m[3])
-                ? sprintf('%04d-%02d-%02d', $m[3], $m[2], $m[1]) : null;   // d/m/Y
+            // DD/MM/YYYY first (the app standard); impossible day/month combos
+            // (e.g. 04/23/2024) fall back to US m/d/Y — 2026-08-05 (Ejaz).
+            if (checkdate((int) $m[2], (int) $m[1], (int) $m[3])) {
+                return sprintf('%04d-%02d-%02d', $m[3], $m[2], $m[1]);   // d/m/Y
+            }
+            if (checkdate((int) $m[1], (int) $m[2], (int) $m[3])) {
+                return sprintf('%04d-%02d-%02d', $m[3], $m[1], $m[2]);   // m/d/Y fallback
+            }
+
+            return null;
         }
         try {
             return Carbon::parse($s)->toDateString();

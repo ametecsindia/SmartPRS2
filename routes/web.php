@@ -209,6 +209,13 @@ Route::middleware('guest')->group(function () {
     Route::post('/forgot-password', [AuthController::class, 'sendReset'])->name('password.email')->middleware('throttle:6,1');
     Route::get('/reset-password/{token}', [AuthController::class, 'showReset'])->name('password.reset');
     Route::post('/reset-password', [AuthController::class, 'doReset'])->name('password.update')->middleware('throttle:6,1');
+
+    // AS-DL — browser first-run setup wizard (self-disables once a user exists).
+    Route::get('/install', [App\Http\Controllers\InstallController::class, 'show'])->name('install');
+    Route::post('/install', [App\Http\Controllers\InstallController::class, 'store'])->middleware('throttle:10,1');
+    // AS-DL — PRE-LOGIN licence activation (on-prem): fingerprint + .lic paste/upload before sign-in.
+    Route::get('/activate', [App\Http\Controllers\ClientUpdateController::class, 'publicActivateShow'])->name('licence.activate.public');
+    Route::post('/activate', [App\Http\Controllers\ClientUpdateController::class, 'publicActivatePost'])->middleware('throttle:10,1');
 });
 
 Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
@@ -239,6 +246,7 @@ Route::middleware(['auth', App\Http\Middleware\LicenseGate::class, App\Http\Midd
     Route::post('/admin/onprem/{id}/partial', [App\Http\Controllers\OnpremClientController::class, 'partialToggle'])->name('admin.onprem.partial');
     Route::post('/admin/onprem/{id}/key', [App\Http\Controllers\OnpremClientController::class, 'issueKey'])->name('admin.onprem.key');
     Route::post('/admin/onprem/{id}/lic-file', [App\Http\Controllers\OnpremClientController::class, 'licFile'])->name('admin.onprem.licfile');   // AS-DL — RSA node-locked .lic download (replaces the retired SPRSX1 offline-key route)
+    Route::get('/admin/onprem/{id}/lic-file', [App\Http\Controllers\OnpremClientController::class, 'licDownload'])->name('admin.onprem.licdownload');   // AS-DL — re-download the stored last-generated .lic (Ejaz 6 Aug 2026)
     Route::post('/admin/onprem/{id}/renew', [App\Http\Controllers\OnpremClientController::class, 'renewAmc'])->name('admin.onprem.renew');
     Route::post('/admin/onprem/{id}/deactivate', [App\Http\Controllers\OnpremClientController::class, 'deactivate'])->name('admin.onprem.deactivate');
     Route::post('/admin/onprem/{id}/revoke', [App\Http\Controllers\OnpremClientController::class, 'revoke'])->name('admin.onprem.revoke');

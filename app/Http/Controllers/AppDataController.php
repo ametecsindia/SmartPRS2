@@ -101,7 +101,10 @@ class AppDataController extends Controller
             return $mk($m[1], $m[2], $m[3]);                    // ISO Y-m-d
         }
         if (preg_match('#^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})#', $s, $m)) {
-            return $mk($y4((int) $m[3]), $m[2], $m[1]);         // Indian d/m/Y (or d/m/y)
+            // Indian DD/MM/YYYY first (the app standard); when that is impossible
+            // (e.g. 04/23/2024 — month 23 doesn't exist) fall back to US m/d/Y so
+            // an Excel that switched the file to mm/dd/yyyy still imports.
+            return $mk($y4((int) $m[3]), $m[2], $m[1]) ?: $mk($y4((int) $m[3]), $m[1], $m[2]);
         }
         if (preg_match('#^(\d{1,2})[\s\-/.]([A-Za-z]{3,9})[\s\-/.,]+(\d{2,4})#', $s, $m)) {
             $mo = date_parse($m[2].' 1 2000')['month'] ?? 0;    // 13-May-2024 / 13 May 24
@@ -246,6 +249,22 @@ class AppDataController extends Controller
                 'type' => $col('type') === 'field' ? 'Field / FOS' : 'Office',
                 'employment_stage' => $col('employment_stage') ?: 'Permanent',
                 'doj' => $col('doj') ?? '',
+                // 2026-08-05 — FIX "edits revert after refresh": these form fields
+                // were SAVED by storeEmployee but never sent back here, so after a
+                // reload the edit form showed blanks and the next save wiped them.
+                'dob' => $col('dob') ?? '',
+                'gender' => $col('gender') ?? '',
+                'father' => $col('father') ?? '',
+                'spouse' => $col('spouse') ?? '',
+                'bloodGroup' => $col('blood_group') ?? '',
+                'idMarks' => $col('id_marks') ?? '',
+                'whatsapp' => $col('whatsapp') ?? '',
+                'addr' => $col('address') ?? '',
+                'homeLat' => $col('home_lat') ?? '',
+                'homeLng' => $col('home_lng') ?? '',
+                'geoStart' => $col('geo_start') ? ucfirst((string) $col('geo_start')) : '',
+                'geoRadius' => $col('geo_radius_km') ?? '',
+                'geoOutside' => $col('geo_outside') ? ucfirst((string) $col('geo_outside')) : '',
                 'mobile' => $col('mobile') ?? '',
                 'email' => $col('email') ?? '',
                 'ctc' => (float) $col('ctc'),
@@ -684,10 +703,12 @@ class AppDataController extends Controller
         // / dates / WhatsApp / address / password are now included and imported.
         // 2026-08-05 — biometric_id added (Biometric Mapping): the employee's ID on
         // the attendance device, saved to employees.device_user_id on import.
-        $head = 'emp_code,name,type,company,department,designation,branch,team,shift,doj,dob,mobile,whatsapp,address,email,ctc,salary_type,pan,uan,bank_acc,ifsc,password,biometric_id,dpa,pcc';
+        // 2026-08-05b (Ejaz) — column renamed dpa → dra (the import accepts both),
+        // and dates standardised to DD/MM/YYYY everywhere (form + template).
+        $head = 'emp_code,name,type,company,department,designation,branch,team,shift,doj,dob,mobile,whatsapp,address,email,ctc,salary_type,pan,uan,bank_acc,ifsc,password,biometric_id,dra,pcc';
         $csv = $head."\n"
-            .'EMP100,Sample Name,office,Acme Recovery Pvt Ltd,Operations,Executive,Head Office,Alpha Team,General Shift,2024-04-01,1995-06-15,+919999999999,+919999999999,"12 MG Road, Hyderabad",sample@company.in,600000,Salary,ABCDE1234F,100200300400,12345678901,SBIN0001234,Welcome@123,1043,Yes,Yes'."\n"
-            .'EMP101,Field Agent Name,field,Acme Recovery Pvt Ltd,Collections,Field Officer,Branch-2,Bravo Team,General Shift,2024-05-10,1998-02-20,+918888888888,+918888888888,"45 Park Street, Pune",agent@company.in,336000,Salary + Commission,FGHIJ5678K,100200300401,10987654321,HDFC0005678,Welcome@123,1044,Yes,Yes'."\n";
+            .'EMP100,Sample Name,office,Acme Recovery Pvt Ltd,Operations,Executive,Head Office,Alpha Team,General Shift,01/04/2024,15/06/1995,+919999999999,+919999999999,"12 MG Road, Hyderabad",sample@company.in,600000,Salary,ABCDE1234F,100200300400,12345678901,SBIN0001234,Welcome@123,1043,Yes,Yes'."\n"
+            .'EMP101,Field Agent Name,field,Acme Recovery Pvt Ltd,Collections,Field Officer,Branch-2,Bravo Team,General Shift,10/05/2024,20/02/1998,+918888888888,+918888888888,"45 Park Street, Pune",agent@company.in,336000,Salary + Commission,FGHIJ5678K,100200300401,10987654321,HDFC0005678,Welcome@123,1044,Yes,Yes'."\n";
 
         return response($csv, 200, [
             'Content-Type' => 'text/csv',
@@ -2375,6 +2396,36 @@ class AppDataController extends Controller
             'device_user_id' => trim((string) ($e['deviceUserId'] ?? ($e['device_user_id'] ?? ''))) ?: null,
             'updated_at' => now(),
         ];
+        // 2026-08-05 — FIX "edits revert after refresh": PF / ESI / commission %
+        // and the geo-fence fields were on the form but NEVER written to the
+        // employee row, so those edits silently disappeared.
+        if (array_key_exists('pf', $e)) {
+            $payload['pf_applicable'] = strtolower(trim((string) $e['pf'])) === 'yes';
+        }
+        if (array_key_exists('esi', $e)) {
+            $esiV = strtolower(trim((string) $e['esi']));
+            $payload['esi_applicable'] = in_array($esiV, ['auto', 'yes', 'no'], true) ? $esiV : 'auto';
+        }
+        if (array_key_exists('commPct', $e)) {
+            $payload['comm_pct'] = (float) $e['commPct'];
+        }
+        if (array_key_exists('homeLat', $e)) {
+            $payload['home_lat'] = is_numeric($e['homeLat']) ? (float) $e['homeLat'] : null;
+        }
+        if (array_key_exists('homeLng', $e)) {
+            $payload['home_lng'] = is_numeric($e['homeLng']) ? (float) $e['homeLng'] : null;
+        }
+        if (array_key_exists('geoStart', $e)) {
+            $gsV = strtolower(trim((string) $e['geoStart']));
+            $payload['geo_start'] = in_array($gsV, ['home', 'office'], true) ? $gsV : null;
+        }
+        if (array_key_exists('geoRadius', $e)) {
+            $payload['geo_radius_km'] = is_numeric($e['geoRadius']) ? (float) $e['geoRadius'] : null;
+        }
+        if (array_key_exists('geoOutside', $e)) {
+            $goV = strtolower(trim((string) $e['geoOutside']));
+            $payload['geo_outside'] = in_array($goV, ['strict', '1km', '2km'], true) ? $goV : null;
+        }
         // DATE columns reject unknown shapes — normalise both (null when unreadable).
         $payload['doj'] = self::normDateWide($payload['doj']);
         $payload['dob'] = self::normDateWide($payload['dob']);

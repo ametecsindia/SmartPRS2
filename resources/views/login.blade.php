@@ -119,24 +119,24 @@
                         </p>
                     </div>
                 @elseif (!empty($needLc))
-                    {{-- RENEW / first activation: the License Code input. --}}
+                    {{-- RENEW / first activation — .lic-only (Gulab/Ejaz, 6 Aug 2026):
+                         the manual License-Code input is retired. Activation and
+                         renewal happen by uploading the .lic file on /activate. --}}
                     <div class="form-group" style="margin-top:2px;">
-                        <label>License Code (LC)</label>
-                        <div class="input-wrap">
-                            <i class="fas fa-key"></i>
-                            <input type="text" name="license_code" value="{{ old('license_code') }}"
-                                   placeholder="SPRS-XXXX-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false"
-                                   style="text-transform:uppercase;letter-spacing:.5px;">
+                        <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:12px 14px;font-family:var(--font2);">
+                            <div style="font-weight:700;color:#b45309;font-size:13.5px;">
+                                @if (($lcState['state'] ?? '') === 'expired')
+                                    <i class="fas fa-triangle-exclamation"></i> Licence expired on {{ $lcState['expires_on'] ?? '—' }}
+                                @else
+                                    <i class="fas fa-circle-info"></i> This installation needs activation
+                                @endif
+                            </div>
+                            <p style="font-size:12.5px;color:var(--text2);margin:6px 0 10px;line-height:1.55;">
+                                Upload the .lic licence file Ametecs sent you — that is all it takes.
+                                Need one? WhatsApp <strong>9000098877</strong> &middot; ejaz@ametecsindia.com
+                            </p>
+                            <a href="{{ url('/activate') }}" style="display:inline-flex;align-items:center;gap:8px;font-size:13.5px;color:#fff;background:var(--accent);border-radius:9px;padding:9px 16px;font-family:var(--font2);font-weight:700;text-decoration:none;"><i class="fas fa-file-arrow-up"></i> Upload .lic file &amp; activate &rarr;</a>
                         </div>
-                        <p style="font-size:12px;color:var(--text3);margin:7px 2px 0;font-family:var(--font2);line-height:1.5;">
-                            @if (($lcState['state'] ?? '') === 'expired')
-                                <i class="fas fa-triangle-exclamation" style="color:#dc2626;"></i>
-                                Your licence expired on <strong>{{ $lcState['expires_on'] ?? '—' }}</strong>. Enter a new License Code from Ametecs to continue.
-                            @else
-                                <i class="fas fa-circle-info"></i>
-                                This SmartPRS installation needs activation. Enter the License Code provided by Ametecs (WhatsApp 9000098877).
-                            @endif
-                        </p>
                     </div>
                 @endif
                 <div class="form-group" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">

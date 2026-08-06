@@ -15,6 +15,16 @@ class AuthController extends Controller
 {
     public function show(Request $request)
     {
+        // AS-DL — FIRST RUN: on an on-prem install with no admin yet, send the
+        // visitor to the browser setup wizard instead of an unusable login.
+        try {
+            if (\App\Services\Edition::isOnPrem()
+                && ! \App\Http\Controllers\InstallController::alreadyInstalled()) {
+                return redirect('/install');
+            }
+        } catch (\Throwable $e) {
+        }
+
         // rev 109: a request arriving on a tenant's CUSTOM DOMAIN (their CNAME
         // pointing at this server) gets THEIR branded login automatically.
         $t = self::tenantByHost($request->getHost());
@@ -229,7 +239,7 @@ class AuthController extends Controller
                             $request->session()->invalidate();
                             $request->session()->regenerateToken();
 
-                            return back()->withErrors(['email' => 'SmartPRS is awaiting licence activation. Please ask your administrator to enter the License Code.'])->onlyInput('email');
+                            return back()->withErrors(['email' => 'SmartPRS is awaiting licence activation. Please ask your administrator to upload the .lic licence file on the Activate screen.'])->onlyInput('email');
                         }
                         $lc = trim((string) $request->input('license_code', ''));
                         if ($lc === '') {
@@ -237,8 +247,8 @@ class AuthController extends Controller
                             $request->session()->invalidate();
                             $request->session()->regenerateToken();
                             $msg = ($stat['state'] ?? '') === 'expired'
-                                ? 'Your SmartPRS licence expired on '.($stat['expires_on'] ?: '—').'. Enter a new License Code to continue.'
-                                : 'Enter the License Code to activate this SmartPRS installation.';
+                                ? 'Your SmartPRS licence expired on '.($stat['expires_on'] ?: '—').'. Upload the new .lic file Ametecs sent you on the Activate screen to continue.'
+                                : 'This SmartPRS installation needs activation — upload the .lic file Ametecs sent you on the Activate screen.';
 
                             return back()->withErrors(['license_code' => $msg])->onlyInput('email');
                         }

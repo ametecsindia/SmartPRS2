@@ -117,6 +117,9 @@
                     <label style="font-size:11px;">Seats<br><input type="number" name="seats" min="0" value="0" placeholder="0" style="width:90px;" title="Employee seat cap (device_limit). 0 = unlimited."></label>
                     <button class="btn btn-outline" type="submit" title="Download a node-locked .lic bound to that fingerprint; email/hand it to the client to import on their Activation screen"><i class="fas fa-file-arrow-down"></i> Generate .lic file</button>
                 </form>
+                @if ($live && \App\Http\Controllers\ClientUpdateController::looksLikeLicenceFile(\App\Services\LicenseService::reveal($live) ?? ''))
+                    <a class="btn btn-outline" href="{{ route('admin.onprem.licdownload', $c->id) }}" title="Re-download the last generated .lic exactly as it was issued — every generated licence file is stored on this server"><i class="fas fa-download"></i> Download .lic</a>
+                @endif
                 @if (! $live)
                     <form method="POST" action="{{ route('admin.onprem.key', $c->id) }}" style="display:inline;">@csrf
                         <button class="btn btn-primary" type="submit" {{ ($fullyPaid || $c->activate_on_partial) ? '' : 'disabled title=Payment-pending' }}>Generate licence key</button>

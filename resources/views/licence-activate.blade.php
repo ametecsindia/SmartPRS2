@@ -32,17 +32,16 @@
         <div class="err"><i class="fas fa-circle-exclamation"></i> {{ session('lic_err') }}</div>
     @endif
     @if ($activated)
-        <div class="ok"><i class="fas fa-circle-check"></i> This installation is activated{{ !empty($state['company']) ? ' for '.$state['company'] : '' }}. You can re-enter a key only if Ametecs has released this licence for a server move.</div>
+        <div class="ok"><i class="fas fa-circle-check"></i> This installation is activated{{ !empty($state['company']) ? ' for '.$state['company'] : '' }}. You can upload a new .lic file only if Ametecs has released this licence for a server move.</div>
     @else
-        <p>Enter the licence key from your SmartPRS welcome email. One key activates one server — after this, your team simply logs in and works.</p>
+        <p>Upload the <strong>.lic</strong> licence file Ametecs sent you. One licence file activates one server — after this, your team simply logs in and works.</p>
     @endif
 
-    <form method="POST" action="{{ url('/app/activate') }}" enctype="multipart/form-data">
+    <form method="POST" action="{{ $formAction ?? url('/app/activate') }}" enctype="multipart/form-data">
         @csrf
-        <label style="display:block;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">Licence key or .lic file</label>
-        <input type="text" name="key" placeholder="Paste your licence code (SPRS-… or .lic)" autocomplete="off">
-        <div style="margin-top:11px;font-size:12.5px;color:#64748b">…or upload the <strong>.lic</strong> file Ametecs sent you:</div>
-        <input type="file" name="licence_file" accept=".lic,text/plain" style="margin-top:6px;font-size:13px;width:100%">
+        <label style="display:block;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">Licence file (.lic)</label>
+        <input type="file" name="licence_file" accept=".lic,text/plain" required style="font-size:14px;width:100%;padding:14px;border:1.5px dashed #cbd5e1;border-radius:11px;background:#f8fafc">
+        <div style="margin-top:9px;font-size:12.5px;color:#64748b">Select the <strong>.lic</strong> file Ametecs sent you for this server.</div>
         <button class="btn" type="submit"><i class="fas fa-key"></i> Activate</button>
     </form>
 
@@ -54,7 +53,7 @@
         @if(!empty($deviceIds ?? [])) <div style="word-break:break-all"><strong>Hardware ID(s):</strong> {{ implode(', ', $deviceIds) }}</div> @endif
     </div>
 
-    <div class="note"><i class="fas fa-headset" style="color:#f97316"></i> Need help? Ametecs India — ejaz@ametecsindia.com · WhatsApp 9000098877. Activation needs internet on this server for one minute; after that SmartPRS runs fully offline.</div>
+    <div class="note"><i class="fas fa-headset" style="color:#f97316"></i> Need help? Ametecs India — ejaz@ametecsindia.com · WhatsApp 9000098877. Activation with the .lic file is instant and fully offline — no internet needed.</div>
 </div>
 </body>
 </html>

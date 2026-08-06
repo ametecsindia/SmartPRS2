@@ -579,6 +579,52 @@ class ClientUpdateController extends Controller
         return redirect('/app')->with('lic_ok', 'SmartPRS is activated. Welcome aboard!');
     }
 
+    /**
+     * GET /activate — PRE-LOGIN activation (AS-DL). On-prem only. Shows the
+     * machine fingerprint + accepts the .lic by paste OR file upload before the
+     * admin signs in, so a fresh node-locked install can be activated without
+     * first needing an authenticated session.
+     */
+    public function publicActivateShow(Request $request)
+    {
+        abort_unless(\App\Services\Edition::isOnPrem(), 404);
+        if (self::activated()) {
+            return redirect('/login')->with('status', 'This installation is already activated. Please sign in.');
+        }
+
+        return view('licence-activate', [
+            'edition' => Edition::label(),
+            'activated' => self::activated(),
+            'state' => self::state(),
+            'deviceEmail' => (string) config('smartprs.licence_email'),
+            'deviceIds' => self::machineHardwareIds(),
+            'fingerprint' => (new LicenseFile())->machineFingerprint(),
+            'seatUsed' => self::activeEmployeeCount(),
+            'seatLimit' => self::seatLimit(),
+            'formAction' => url('/activate'),
+        ]);
+    }
+
+    /** POST /activate — activate from a pasted code or uploaded .lic, pre-login (on-prem only). */
+    public function publicActivatePost(Request $request)
+    {
+        abort_unless(\App\Services\Edition::isOnPrem(), 404);
+        $token = trim((string) $request->input('key', ''));
+        if ($token === '' && $request->hasFile('licence_file')) {
+            try {
+                $token = trim((string) file_get_contents($request->file('licence_file')->getRealPath()));
+            } catch (\Throwable $e) {
+                $token = '';
+            }
+        }
+        $res = self::activateKey($token);
+        if (empty($res['ok'])) {
+            return back()->with('lic_err', $res['error'] ?? 'Could not activate — please try again.');
+        }
+
+        return redirect('/login')->with('status', 'SmartPRS is activated. Please sign in to continue.');
+    }
+
     // ---------- Administration → Updates ----------
 
     private function key(): ?string

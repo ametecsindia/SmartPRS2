@@ -394,6 +394,39 @@ class OnpremClientController extends Controller
         ]);
     }
 
+    /**
+     * GET /admin/onprem/{id}/lic-file — re-download the LAST generated .lic
+     * exactly as issued (Ejaz, 6 Aug 2026: a generated licence must be STORED
+     * and retrievable, not a one-shot download). No new storage was needed:
+     * licFile() has always saved the full token encrypted in the licences row
+     * (key_enc, via LicenseService::recordOffline) — this simply decrypts and
+     * streams it back, so it also works on a /super with no signing key.
+     */
+    public function licDownload(Request $request, int $id)
+    {
+        $this->guard($request);
+        $c = DB::table('onprem_clients')->where('id', $id)->first();
+        abort_unless($c, 404);
+        $live = DB::table('licences')->where('client_id', $id)->whereIn('status', ['pending', 'active'])->orderByDesc('id')->first();
+        $token = $live ? LicenseService::reveal($live) : null;
+        if (! $token || ! ClientUpdateController::looksLikeLicenceFile($token)) {
+            return redirect()->route('admin.onprem')->with('success', 'No stored .lic for '.$c->company.' yet — use "Generate .lic file" once; every generated file is stored here and can be re-downloaded afterwards.');
+        }
+        $key = 'license';
+        try {
+            $p = json_decode((string) base64_decode(strtr(explode('.', $token)[0], '-_', '+/')), true);
+            if (is_array($p) && ! empty($p['key'])) {
+                $key = (string) $p['key'];
+            }
+        } catch (\Throwable $e) {
+        }
+
+        return response($token."\n", 200, [
+            'Content-Type' => 'application/octet-stream',
+            'Content-Disposition' => 'attachment; filename="'.(new \App\Services\LicenseSigner())->filename($key).'"',
+        ]);
+    }
+
     // ---------- rev 107b: invoice + online payment link (SRS FR-11 steps 2-3) ----------
 
     /** POST /admin/onprem/{id}/invoice — assign number + email PDF + pay link. */
