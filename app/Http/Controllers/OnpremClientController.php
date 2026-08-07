@@ -341,10 +341,15 @@ class OnpremClientController extends Controller
         $seats = (int) $request->input('seats', 0);
         $expiry = self::resolveExpiry($c);
 
-        // Reuse the client's live licence key if present, else mint a fresh one so
-        // the .lic carries a stable identifier for records + revocation.
+        // Reuse the client's existing licence KEY (the SPRS-XXXX identifier) if
+        // present, else mint a fresh one so the .lic carries a stable id for
+        // records + revocation. IMPORTANT (bug fix 6 Aug 2026): recordOffline()
+        // stores the whole .lic TOKEN in key_enc, so on a RE-ISSUE reveal()
+        // returns a token, not a plain key. stableLicenceKey() unwraps it back to
+        // the real SPRS key — without this the previous token got nested into the
+        // new file's `key` field (a 1500+ char runaway key).
         $live = DB::table('licences')->where('client_id', $id)->whereIn('status', ['pending', 'active'])->orderByDesc('id')->first();
-        $key = ($live ? LicenseService::reveal($live) : null) ?: LicenseService::generateKey();
+        $key = self::stableLicenceKey($live) ?: LicenseService::generateKey();
 
         $token = $signer->sign([
             'key'          => $key,
@@ -425,6 +430,26 @@ class OnpremClientController extends Controller
             'Content-Type' => 'application/octet-stream',
             'Content-Disposition' => 'attachment; filename="'.(new \App\Services\LicenseSigner())->filename($key).'"',
         ]);
+    }
+
+    /**
+     * The plain SPRS-XXXX licence key for a client, unwrapping a stored .lic
+     * TOKEN (key_enc may hold a full token, not a bare key). Defensive against a
+     * few levels of accidental nesting from older rows. Null when none/uncertain.
+     */
+    private static function stableLicenceKey(?object $live): ?string
+    {
+        if (! $live) {
+            return null;
+        }
+        $val = (string) (LicenseService::reveal($live) ?? '');
+        for ($i = 0; $i < 3 && ClientUpdateController::looksLikeLicenceFile($val); $i++) {
+            $p = json_decode((string) base64_decode(strtr(explode('.', $val)[0], '-_', '+/')), true);
+            $val = is_array($p) ? (string) ($p['key'] ?? '') : '';
+        }
+        $val = trim($val);
+
+        return ($val !== '' && ! ClientUpdateController::looksLikeLicenceFile($val)) ? $val : null;
     }
 
     // ---------- rev 107b: invoice + online payment link (SRS FR-11 steps 2-3) ----------
