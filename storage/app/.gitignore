@@ -1,3 +1,5 @@
 *
 !public/
+!keys/
+!keys/**
 !.gitignore
