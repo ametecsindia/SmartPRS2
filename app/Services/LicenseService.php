@@ -84,6 +84,20 @@ class LicenseService
                     $t->timestamps();
                 });
             }
+            if (! Schema::hasTable('licence_devices')) {
+                Schema::create('licence_devices', function ($t) {
+                    $t->id();
+                    $t->unsignedBigInteger('licence_id')->index();
+                    $t->string('device_uid', 190)->index();          // the install fingerprint = one server seat
+                    $t->string('fingerprint')->nullable();
+                    $t->string('hostname')->nullable();
+                    $t->string('status', 16)->default('active');       // active|deactivated
+                    $t->timestamp('activated_at')->nullable();
+                    $t->timestamp('deactivated_at')->nullable();
+                    $t->timestamp('last_seen_at')->nullable();
+                    $t->timestamps();
+                });
+            }
             if (! Schema::hasTable('releases')) {
                 Schema::create('releases', function ($t) {
                     $t->id();
@@ -124,6 +138,17 @@ class LicenseService
             if (Schema::hasTable('licences') && ! Schema::hasColumn('licences', 'expiry_mode')) {
                 Schema::table('licences', function ($t) {
                     $t->string('expiry_mode', 12)->default('renew');
+                });
+            }
+            // anti-fraud + device seats (ported from SmartEPT, 6-Aug-2026), schema-guarded.
+            if (Schema::hasTable('licences') && ! Schema::hasColumn('licences', 'server_limit')) {
+                Schema::table('licences', function ($t) {
+                    $t->unsignedInteger('server_limit')->default(1);   // how many servers/devices this licence may run on
+                });
+            }
+            if (Schema::hasTable('licences') && ! Schema::hasColumn('licences', 'last_mismatch_at')) {
+                Schema::table('licences', function ($t) {
+                    $t->timestamp('last_mismatch_at')->nullable();     // last time a DIFFERENT machine tried this key
                 });
             }
         } catch (\Throwable $e) {
@@ -372,5 +397,141 @@ class LicenseService
         $payload['sig'] = hash_hmac('sha256', json_encode($payload), self::normalize($key));
 
         return $payload;
+    }
+
+    // ============================ anti-fraud + device seats (ported from SmartEPT, 6-Aug-2026)
+
+    /** Server-seat cap for a licence (how many servers/devices may run it). Default 1. */
+    public static function serverLimit(object $licence): int
+    {
+        $n = (int) ($licence->server_limit ?? 1);
+
+        return $n > 0 ? $n : 1;
+    }
+
+    /** Active server seats claimed against a licence. */
+    public static function activeDeviceCount(int $licenceId): int
+    {
+        try {
+            return (int) DB::table('licence_devices')->where('licence_id', $licenceId)->where('status', 'active')->count();
+        } catch (\Throwable $e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Register/refresh a server (device) seat for a licence. $deviceUid is the
+     * install fingerprint. Enforces the server-seat cap. Returns [ok, reason].
+     * Fail-soft: a device-table error never blocks the licence.
+     */
+    public static function recordDevice(int $licenceId, string $deviceUid, ?string $fingerprint = null, ?string $hostname = null): array
+    {
+        self::ensureTables();
+        $deviceUid = mb_substr(trim($deviceUid), 0, 190);
+        if ($deviceUid === '') {
+            return ['ok' => false, 'reason' => 'no_device'];
+        }
+        try {
+            $row = DB::table('licence_devices')->where('licence_id', $licenceId)->where('device_uid', $deviceUid)->first();
+            if ($row) {
+                DB::table('licence_devices')->where('id', $row->id)->update([
+                    'status' => 'active',
+                    'fingerprint' => $fingerprint ?: $row->fingerprint,
+                    'hostname' => $hostname ?: $row->hostname,
+                    'last_seen_at' => now(), 'deactivated_at' => null, 'updated_at' => now(),
+                ]);
+
+                return ['ok' => true, 'reason' => null];
+            }
+            $limit = (int) (DB::table('licences')->where('id', $licenceId)->value('server_limit') ?: 1);
+            if (self::activeDeviceCount($licenceId) >= max(1, $limit)) {
+                return ['ok' => false, 'reason' => 'device_limit_reached'];
+            }
+            DB::table('licence_devices')->insert([
+                'licence_id' => $licenceId, 'device_uid' => $deviceUid, 'fingerprint' => $fingerprint,
+                'hostname' => $hostname, 'status' => 'active', 'activated_at' => now(),
+                'last_seen_at' => now(), 'created_at' => now(), 'updated_at' => now(),
+            ]);
+
+            return ['ok' => true, 'reason' => null];
+        } catch (\Throwable $e) {
+            return ['ok' => true, 'reason' => 'store_error'];
+        }
+    }
+
+    /** Free a server seat (controlled move / offboard). */
+    public static function deactivateDevice(int $licenceId, string $deviceUid): bool
+    {
+        try {
+            return (bool) DB::table('licence_devices')
+                ->where('licence_id', $licenceId)
+                ->where('device_uid', mb_substr(trim($deviceUid), 0, 190))
+                ->where('status', 'active')
+                ->update(['status' => 'deactivated', 'deactivated_at' => now(), 'updated_at' => now()]);
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /** Once-per-day 'verified' history entry (hourly phone-homes never flood it). */
+    public static function verifyOnce(object $licence, ?string $fingerprint): void
+    {
+        try {
+            $already = DB::table('licence_events')->where('licence_id', $licence->id)->where('type', 'verified')
+                ->where('created_at', '>=', now()->startOfDay())->exists();
+            if (! $already) {
+                self::event($licence->id, 'verified', 'Verified by bound server '.($fingerprint ?: ($licence->fingerprint ?: '(no fingerprint)')));
+            }
+        } catch (\Throwable $e) {
+        }
+    }
+
+    /**
+     * Anti-fraud: record a rejected validation (deduped once/day per licence+reason)
+     * and, for a server mismatch, email sales. Fail-soft — never breaks a phone-home.
+     */
+    public static function logRejection(object $licence, string $reason, ?string $attempted, ?string $ip = null): void
+    {
+        try {
+            $already = DB::table('licence_events')->where('licence_id', $licence->id)->where('type', 'rejected')
+                ->where('detail', 'like', '%'.$reason.'%')->where('created_at', '>', now()->subDay())->exists();
+            if ($already) {
+                return;
+            }
+            self::event($licence->id, 'rejected', $reason.' — attempted='.($attempted ?: '(none)').' bound='.($licence->fingerprint ?: '(unbound)'), $ip);
+            if ($reason === 'server_mismatch') {
+                try {
+                    DB::table('licences')->where('id', $licence->id)->update(['last_mismatch_at' => now(), 'updated_at' => now()]);
+                } catch (\Throwable $e) {
+                }
+                self::alertSalesMismatch($licence, $attempted);
+            }
+        } catch (\Throwable $e) {
+        }
+    }
+
+    private static function alertSalesMismatch(object $licence, ?string $attempted): void
+    {
+        try {
+            $company = DB::table('onprem_clients')->where('id', $licence->client_id)->value('company') ?: ('client #'.$licence->client_id);
+            $to = (string) (config('smartprs.sales_email') ?: env('SMARTPRS_SALES_EMAIL', 'ejaz@ametecsindia.com'));
+            \App\Services\MailService::queue([
+                'tenant_id' => null,
+                'to' => $to,
+                'subject' => 'ALERT: SmartPRS licence contacted by a DIFFERENT machine — '.$company.' ('.now()->toDateString().')',
+                'heading' => 'Possible licence misuse — '.$company,
+                'intro' => 'A machine OTHER than the bound server tried to validate this licence. This can mean an old/"damaged" PC still running after a machine shift, or a cloned installation.',
+                'lines' => [
+                    'Company: '.$company,
+                    'Edition: SmartPRS-'.strtoupper((string) $licence->edition),
+                    'Bound server: '.($licence->fingerprint ?: '(not bound)'),
+                    'Attempted machine: '.($attempted ?: '—'),
+                    'Last good check-in: '.($licence->last_seen_at ?: '—'),
+                    'Action: /super -> On-Prem Clients -> this client -> History. If genuine (PC replaced), use "Shift machine".',
+                ],
+                'kind' => 'licence_alert',
+            ]);
+        } catch (\Throwable $e) {
+        }
     }
 }

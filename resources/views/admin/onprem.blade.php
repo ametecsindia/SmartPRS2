@@ -130,10 +130,33 @@
                         <button class="btn btn-outline" type="submit">Renew licence</button>
                     </form>
                     <form method="POST" action="{{ route('admin.onprem.deactivate', $c->id) }}" style="display:inline;" onsubmit="return confirm('Release the server binding so the client can activate on a NEW server?');">@csrf<button class="btn btn-outline">Release server binding</button></form>
+                    <form method="POST" action="{{ route('admin.onprem.shift', $c->id) }}" style="display:inline;" onsubmit="return confirm('Shift this licence to a NEW server? The current binding is released and the client re-binds on next check-in.');">@csrf<button class="btn btn-outline" title="Client genuinely replaced their server — release the old binding so the new one re-binds automatically">Shift machine</button></form>
                     <form method="POST" action="{{ route('admin.onprem.revoke', $c->id) }}" style="display:inline;" onsubmit="return confirm('REVOKE this licence? Activation and updates will be blocked for it.');">@csrf<button class="btn btn-outline" style="color:#dc2626;border-color:#fca5a5;">Revoke</button></form>
                 @endif
                 <form method="POST" action="{{ route('admin.onprem.delete', $c->id) }}" style="display:inline;margin-left:auto;" onsubmit="return confirm('DELETE {{ addslashes($c->company) }} and all its licence records here? This cannot be undone. (Tip: Revoke first if the client should be blocked.)');">@csrf<button class="btn btn-outline" style="color:#b91c1c;border-color:#fca5a5;background:#fef2f2;"><i class="fas fa-trash"></i> Delete</button></form>
             </div>
+            @if ($live)
+                @php
+                    \$lhEv = \Illuminate\Support\Facades\DB::table('licence_events')->where('licence_id', \$live->id)->orderByDesc('id')->limit(6)->get();
+                    \$lhDev = \Illuminate\Support\Facades\Schema::hasTable('licence_devices') ? \Illuminate\Support\Facades\DB::table('licence_devices')->where('licence_id', \$live->id)->where('status','active')->get() : collect();
+                @endphp
+                @if (!empty(\$live->last_mismatch_at))
+                    <div style="margin-top:10px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:10px 12px;font-size:12px;color:#b91c1c;"><i class="fas fa-triangle-exclamation"></i> <strong>Fraud alert:</strong> a DIFFERENT machine tried this licence on {{ \Illuminate\Support\Carbon::parse(\$live->last_mismatch_at)->format('d M Y H:i') }}. If the client replaced their PC, use <strong>Shift machine</strong>; otherwise investigate a possible cloned/old install.</div>
+                @endif
+                <details style="margin-top:10px;">
+                    <summary style="cursor:pointer;font-size:12px;color:#334155;font-weight:600;">Licence History &amp; bound servers ({{ \$lhDev->count() }}/{{ (int)(\$live->server_limit ?? 1) }} server seat(s) used)</summary>
+                    <div style="margin-top:6px;font-size:12px;color:#475569;">
+                        <div style="margin-bottom:6px;"><strong>Bound servers:</strong> @forelse(\$lhDev as \$d){{ \$d->hostname ?: 'server' }} <span style="font-family:Consolas,monospace;color:#94a3b8;">({{ \Illuminate\Support\Str::limit(\$d->device_uid,16,'…') }})</span>@if(!\$loop->last), @endif @empty <span style="color:#94a3b8;">none bound yet</span>@endforelse</div>
+                        <table style="width:100%;border-collapse:collapse;"><tbody>
+                        @forelse(\$lhEv as \$e)
+                            <tr><td style="padding:2px 6px;white-space:nowrap;color:#94a3b8;">{{ \Illuminate\Support\Carbon::parse(\$e->created_at)->format('d M H:i') }}</td><td style="padding:2px 6px;font-weight:600;color:{{ in_array(\$e->type,['rejected','denied'])?'#dc2626':(in_array(\$e->type,['verified','activated','machine_bound'])?'#059669':'#334155') }};">{{ \$e->type }}</td><td style="padding:2px 6px;color:#64748b;">{{ \Illuminate\Support\Str::limit(\$e->detail,80) }}</td></tr>
+                        @empty
+                            <tr><td colspan="3" style="padding:4px 6px;color:#94a3b8;">No history yet.</td></tr>
+                        @endforelse
+                        </tbody></table>
+                    </div>
+                </details>
+            @endif
             @if ($live && $revealId === (int) $c->id)
                 <div style="margin-top:12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:12px 14px;font-family:Consolas,monospace;font-size:16px;letter-spacing:1px;">
                     {{ \App\Services\LicenseService::reveal($live) ?? 'Could not decrypt the key on this server.' }}

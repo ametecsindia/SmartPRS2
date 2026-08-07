@@ -19,8 +19,9 @@ class AuthController extends Controller
         // visitor to the browser setup wizard instead of an unusable login.
         try {
             if (\App\Services\Edition::isOnPrem()
+                && strtolower((string) (config('smartprs.deployment') ?? env('SMARTPRS_DEPLOYMENT', 'saas'))) === 'onprem'
                 && ! \App\Http\Controllers\InstallController::alreadyInstalled()) {
-                return redirect('/install');
+                return redirect('/install');   // on-prem first-run wizard only; never a cloud/SaaS instance
             }
         } catch (\Throwable $e) {
         }

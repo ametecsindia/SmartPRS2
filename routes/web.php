@@ -176,6 +176,12 @@ if (! $spOnPrem) {
     Route::post('/update/heartbeat', [App\Http\Controllers\UpdateServerController::class, 'heartbeat'])
         ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])
         ->middleware('throttle:30,1')->name('update.heartbeat');
+    Route::post('/update/device/activate', [App\Http\Controllers\UpdateServerController::class, 'deviceActivate'])
+        ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])
+        ->middleware('throttle:60,1')->name('update.device.activate');
+    Route::post('/update/device/deactivate', [App\Http\Controllers\UpdateServerController::class, 'deviceDeactivate'])
+        ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])
+        ->middleware('throttle:60,1')->name('update.device.deactivate');
     Route::post('/update/check', [App\Http\Controllers\UpdateServerController::class, 'check'])
         ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])
         ->middleware('throttle:30,1')->name('update.check');
@@ -249,6 +255,7 @@ Route::middleware(['auth', App\Http\Middleware\LicenseGate::class, App\Http\Midd
     Route::get('/admin/onprem/{id}/lic-file', [App\Http\Controllers\OnpremClientController::class, 'licDownload'])->name('admin.onprem.licdownload');   // AS-DL — re-download the stored last-generated .lic (Ejaz 6 Aug 2026)
     Route::post('/admin/onprem/{id}/renew', [App\Http\Controllers\OnpremClientController::class, 'renewAmc'])->name('admin.onprem.renew');
     Route::post('/admin/onprem/{id}/deactivate', [App\Http\Controllers\OnpremClientController::class, 'deactivate'])->name('admin.onprem.deactivate');
+    Route::post('/admin/onprem/{id}/shift-machine', [App\Http\Controllers\OnpremClientController::class, 'shiftMachine'])->name('admin.onprem.shift');   // anti-fraud: rebind to a new server
     Route::post('/admin/onprem/{id}/revoke', [App\Http\Controllers\OnpremClientController::class, 'revoke'])->name('admin.onprem.revoke');
     Route::post('/admin/onprem/{id}/delete', [App\Http\Controllers\OnpremClientController::class, 'destroy'])->name('admin.onprem.delete');
     Route::get('/admin/releases', [App\Http\Controllers\ReleaseController::class, 'index'])->name('admin.releases');

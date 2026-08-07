@@ -452,6 +452,33 @@ class OnpremClientController extends Controller
         return ($val !== '' && ! ClientUpdateController::looksLikeLicenceFile($val)) ? $val : null;
     }
 
+    /**
+     * POST /admin/onprem/{id}/shift-machine — anti-fraud (ported from SmartEPT):
+     * release the current server binding so the client re-binds to a NEW machine
+     * on its next check-in. Use when a client GENUINELY replaces hardware. Frees
+     * all server seats and records it in History. (Revoke, by contrast, blocks it.)
+     */
+    public function shiftMachine(Request $request, int $id)
+    {
+        $this->guard($request);
+        $lic = DB::table('licences')->where('client_id', $id)->whereIn('status', ['pending', 'active'])->orderByDesc('id')->first();
+        abort_unless($lic, 404, 'No live licence for this client.');
+        $old = $lic->fingerprint;
+        DB::table('licences')->where('id', $lic->id)->update([
+            'fingerprint' => null, 'server_name' => null,
+            'reactivations_used' => (int) ($lic->reactivations_used ?? 0) + 1,
+            'updated_at' => now(),
+        ]);
+        try {
+            DB::table('licence_devices')->where('licence_id', $lic->id)->where('status', 'active')
+                ->update(['status' => 'deactivated', 'deactivated_at' => now(), 'updated_at' => now()]);
+        } catch (\Throwable $e) {
+        }
+        LicenseService::event($lic->id, 'machine_shifted', 'Binding released by '.$request->user()->name.' (was '.($old ?: 'unbound').') — client re-binds on next check-in.');
+
+        return redirect()->route('admin.onprem')->with('success', 'Machine binding released — the client can activate on the NEW server; it re-binds automatically on next check-in.');
+    }
+
     // ---------- rev 107b: invoice + online payment link (SRS FR-11 steps 2-3) ----------
 
     /** POST /admin/onprem/{id}/invoice — assign number + email PDF + pay link. */

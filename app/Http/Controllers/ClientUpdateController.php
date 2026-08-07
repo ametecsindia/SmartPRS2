@@ -134,11 +134,29 @@ class ClientUpdateController extends Controller
     private static function serverLicenceStatus(string $key): ?string
     {
         try {
-            $resp = Http::timeout(6)->post(config('smartprs.update_url').'/heartbeat', ['key' => $key]);
+            // Send THIS machine's fingerprint so Central can catch a second/cloned
+            // server using the same key (anti-fraud, ported from SmartEPT).
+            $resp = Http::timeout(6)->post(config('smartprs.update_url').'/heartbeat', [
+                'key' => $key,
+                'fingerprint' => self::fingerprint(),
+                'server_name' => gethostname() ?: 'unknown',
+            ]);
             $j = $resp->json();
-            if (is_array($j) && ! empty($j['ok'])) {
+            if (! is_array($j)) {
+                return null;
+            }
+            if (! empty($j['ok'])) {
                 return strtolower((string) ($j['status'] ?? 'active')) ?: 'active';
             }
+            $reason = strtolower((string) ($j['reason'] ?? ''));
+            if ($reason === 'server_mismatch') {
+                return 'server_mismatch';
+            }
+            if (str_starts_with($reason, 'licence_')) {
+                return substr($reason, 8);   // revoked | suspended | expired
+            }
+
+            return null;
         } catch (\Throwable $e) {
         }
 
@@ -180,12 +198,18 @@ class ClientUpdateController extends Controller
             }
             $st['last_revcheck'] = now()->toDateTimeString();
             $st['last_ok'] = now()->toDateTimeString();
-            if (in_array($status, ['revoked', 'suspended'], true)) {
-                $rev = $st['revoked_hashes'] ?? [];
-                $rev[] = LicenseService::hashKey($key);
-                $st['revoked_hashes'] = array_values(array_unique($rev));
+            if (in_array($status, ['revoked', 'suspended', 'server_mismatch'], true)) {
+                // revoked/suspended → remember the key as blocked; server_mismatch →
+                // block THIS install (not the bound server) but do NOT blacklist the
+                // key, so the genuine server keeps working / Shift-machine re-binds.
+                if ($status !== 'server_mismatch') {
+                    $rev = $st['revoked_hashes'] ?? [];
+                    $rev[] = LicenseService::hashKey($key);
+                    $st['revoked_hashes'] = array_values(array_unique($rev));
+                }
                 $st['cert'] = [];        // wipe → licenceValid() is now false (blocked)
                 $st['revoked'] = true;
+                $st['block_reason'] = $status;
             }
             self::saveState($st);
         } catch (\Throwable $e) {
@@ -200,7 +224,15 @@ class ClientUpdateController extends Controller
      */
     public static function licenceValid(): bool
     {
-        if (! Edition::isOnPrem()
+        // Node-locked .lic activation applies ONLY to a TRUE on-prem install
+        // (SMARTPRS_DEPLOYMENT=onprem). A SaaS / CLOUD-HOSTED instance — even when
+        // it runs an L1/L2/L3 EDITION purely for feature-gating — is governed by
+        // hosting + subscription, NEVER by a .lic, so it must never show the
+        // activation gate. (Fix 6 Aug 2026: previously this keyed off edition
+        // alone, so a cloud client on an L-edition wrongly demanded a .lic.)
+        $deployment = strtolower((string) (config('smartprs.deployment') ?? env('SMARTPRS_DEPLOYMENT', 'saas')));
+        if ($deployment !== 'onprem'
+            || ! Edition::isOnPrem()
             || ! filter_var(config('smartprs.licence_enforce', true), FILTER_VALIDATE_BOOLEAN)) {
             return true;
         }
