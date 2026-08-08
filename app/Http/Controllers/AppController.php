@@ -146,6 +146,7 @@ class AppController extends Controller
             'transfersBase' => url('/app/transfers'),     // + /{id}/letter (Transfer Order PDF)
             'incrementsBase' => url('/app/increments'),   // + /{id}/letter (PDF) + /{id}/apply (rev 83b)
             'liveSalaryUrl' => url('/app/live-salary/data'),   // running-month earned-till-today panel
+            'liveSalaryAllUrl' => url('/app/live-salary/all'),   // 7 Aug 2026 test report (item 4) — All Employees overview
             'attBulkBase' => url('/app/attendance-bulk'),      // bulk punches: /template /upload /{batch}/decide /row/{id}/delete
             'empBulkDeleteUrl' => url('/app/employees/bulk-delete'),   // soft-delete selected employees (admin)
             'salaryRunsUrl' => route('app.salaryruns'),
@@ -3605,7 +3606,7 @@ CSS;
         }).join('');
         return pghead('Mobile Devices', 'Approve the phones that may use the SmartPRS app. Only an approved device can sign in and punch — revoke a lost phone to lock it out instantly.', '<button class="btn btn-outline" onclick="window.__MOBDEV=null;mobDevLoad()"><i class="fas fa-rotate"></i> Refresh</button>')
             + '<div class="card" style="padding:0;overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr><th>Device</th><th>Code</th><th>Registered</th><th>Status</th><th></th></tr></thead><tbody>'
-            + (body || '<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:34px">No devices yet. When an employee enters your web address in the SmartPRS app, their phone appears here for approval.</td></tr>')
+            + (body || '<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:30px 18px"><div style="font-size:14px;color:var(--text2);font-weight:600;margin-bottom:6px"><i class="fas fa-mobile-screen-button" style="margin-right:6px"></i>No devices yet &mdash; phones enrol themselves</div><div style="font-size:12.5px;max-width:540px;margin:0 auto;line-height:1.6">There is no manual &ldquo;add device&rdquo; step, by design. Ask each employee to open the <b>SmartPRS mobile app</b>, enter your workspace web address and sign in &mdash; their phone then appears here as <b>Pending</b> for you to <b>Approve</b> or <b>Reject</b>. Only devices you approve can sign in and punch, so you stay in control.</div></td></tr>')
             + '</tbody></table></div>';
     }
     window.mobDevDecide = function (id, action) {
@@ -9728,6 +9729,8 @@ CSS;
     }
     // ---- LIVE SALARY (rev 79): earned-till-today panel, strict hierarchy -----
     window.__LS = null;
+    window.__LSALL = null;
+    window.__LSMODE = 'all';   // 7 Aug 2026 test report (item 4) — default to All Employees
     window.lsLoad = function (empId) {
         var url = cfg.liveSalaryUrl + (empId ? ('?employee_id=' + empId) : '');
         fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin' })
@@ -9735,15 +9738,53 @@ CSS;
             .then(function (j) { window.__LS = j; if (typeof render === 'function') { render(); } })
             .catch(function () { window.__LS = { ok: false, error: 'Could not load' }; if (typeof render === 'function') { render(); } });
     };
-    window.lsPick = function (v) { window.__LS = null; lsLoad(v); };
+    // 7 Aug 2026 test report (item 4) — load the All-Employees overview.
+    window.lsAllLoad = function () {
+        fetch(cfg.liveSalaryAllUrl, { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (j) { window.__LSALL = j; if (typeof render === 'function') { render(); } })
+            .catch(function () { window.__LSALL = { ok: false, error: 'Could not load' }; if (typeof render === 'function') { render(); } });
+    };
+    window.lsPick = function (v) {
+        if (v === '__all__') { window.__LSMODE = 'all'; if (!window.__LSALL) { lsAllLoad(); } else if (typeof render === 'function') { render(); } return; }
+        window.__LSMODE = 'single'; window.__LS = null; lsLoad(v);
+    };
+    // 7 Aug 2026 test report (item 4) — All Employees overview (default view).
+    function lsAllScreen() {
+        var d = window.__LSALL;
+        if (!d) { setTimeout(function () { if (!window.__LSALL) { lsAllLoad(); } }, 10); return pghead('Live Salary', 'Loading all employees…', '') + '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">Calculating…</div></div>'; }
+        if (!d.ok) { return pghead('Live Salary', 'Live earnings this month', '') + '<div class="card"><div style="padding:26px;color:var(--red)"><b>' + (d.error || 'Could not load') + '</b></div></div>'; }
+        var picker = '<select onchange="lsPick(this.value)" style="padding:9px 12px;border:1.5px solid var(--border);border-radius:9px;font-size:14px;background:#fff;min-width:240px"><option value="__all__" selected>All Employees</option>' + (d.rows || []).map(function (r) { return '<option value="' + r.code + '">' + r.name + ' (' + r.code + ')</option>'; }).join('') + '</select>';
+        var head = '<div class="card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px"><div><div style="font-size:19px;font-weight:800">All Employees <span style="color:var(--text3);font-weight:500;font-size:13px">&middot; ' + d.count + ' shown</span></div><div style="font-size:12.5px;color:var(--text3);margin-top:3px">' + d.monthLabel + ' &middot; as of ' + d.today + '</div></div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' + picker + '</div></div>';
+        var totCard = '<div class="card" style="text-align:center;margin-bottom:14px;background:linear-gradient(135deg,#0f1d33,#1e3a5f);color:#fff"><div style="font-size:12px;letter-spacing:1px;text-transform:uppercase;opacity:.75">Total base salary earned till today (all employees)</div><div style="font-size:34px;font-weight:800;margin:6px 0">' + inr(d.totEarned) + '</div><div style="font-size:12.5px;opacity:.8">Full-month projection: ' + inr(d.totFull) + ' net</div></div>';
+        var th2 = 'padding:10px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3)';
+        var rowsHtml = (d.rows || []).map(function (r) {
+            var c2 = 'padding:9px 12px;font-size:13px;border-top:1px solid var(--border)';
+            return '<tr style="cursor:pointer" onclick="lsPick(&#39;' + r.code + '&#39;)" title="Open detailed Live Salary">'
+                + '<td style="' + c2 + ';font-weight:600">' + r.name + ' <span style="color:var(--text3);font-weight:400">(' + r.code + ')</span></td>'
+                + '<td style="' + c2 + ';color:var(--text2)">' + (r.company || '') + '</td>'
+                + '<td style="' + c2 + ';text-align:center">' + (r.note ? '<span style="color:var(--text3);font-size:11px">' + r.note + '</span>' : (r.factorPct + '%')) + '</td>'
+                + '<td style="' + c2 + ';text-align:right;white-space:nowrap">' + inr(r.fullMonthNet) + '</td>'
+                + '<td style="' + c2 + ';text-align:right;white-space:nowrap;font-weight:700;color:#15803d">' + inr(r.earnedNet) + '</td></tr>';
+        }).join('');
+        var table = '<div class="card" style="padding:0;overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr>'
+            + '<th style="' + th2 + '">Employee</th><th style="' + th2 + '">Company</th><th style="' + th2 + ';text-align:center">Attendance</th><th style="' + th2 + ';text-align:right">Full-month net</th><th style="' + th2 + ';text-align:right">Earned till today</th></tr></thead><tbody>'
+            + (rowsHtml || '<tr><td colspan="5" style="padding:30px;text-align:center;color:var(--text3)">No employees</td></tr>')
+            + '</tbody></table></div>';
+        var noteCard = '<div style="font-size:11.5px;color:var(--text3);margin-top:10px;line-height:1.5">' + (d.capped ? 'Showing the first ' + d.limit + ' employees. ' : '') + (d.note || '') + '</div>';
+        return pghead('Live Salary', 'Running-month salary for everyone, computed with the same engine as payroll', '') + head + totCard + table + noteCard;
+    }
     function liveSalaryScreen() {
+        if (window.__LSMODE === 'all') { return lsAllScreen(); }
         var d = window.__LS;
         if (!d) { setTimeout(function () { if (!window.__LS) { lsLoad(); } }, 10); return pghead('Live Salary', 'Loading…', '') + '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">Calculating…</div></div>'; }
         if (!d.ok) { return pghead('Live Salary', 'Live earnings this month', '') + '<div class="card"><div style="padding:26px;color:var(--red)"><b>' + (d.error || 'Could not load') + '</b></div></div>'; }
         var e = d.employee || {}; var m = d.meta || {};
         var picker = '';
         if (d.canPick) {
-            var opts = (d.employees || []).map(function (x) { return '<option value="' + x.id + '"' + (x.id === e.id ? ' selected' : '') + '>' + x.name + ' (' + x.code + ')</option>'; }).join('');
+            // 7 Aug 2026 test report (item 4) — "All Employees" is the first option so
+            // the viewer can always return to the overview from a single employee.
+            var opts = '<option value="__all__">All Employees</option>' + (d.employees || []).map(function (x) { return '<option value="' + x.id + '"' + (x.id === e.id ? ' selected' : '') + '>' + x.name + ' (' + x.code + ')</option>'; }).join('');
             picker = '<select onchange="lsPick(this.value)" style="padding:9px 12px;border:1.5px solid var(--border);border-radius:9px;font-size:14px;background:#fff;min-width:240px">' + opts + '</select>';
         }
         var row = function (sign, label, amt) {
@@ -10095,7 +10136,7 @@ CSS;
         'salary-schedules': { type: 'salary-schedules', title: 'Salary Schedules', sub: 'Pay cycles & disbursement schedules', fields: [
             { k: 'name', l: 'Schedule Name' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'pay_cycle', l: 'Pay Cycle', type: 'select', opts: ['monthly', 'fortnightly', 'weekly'], optLabels: ['Monthly', 'Fortnightly', 'Weekly'], onch: 'schedPayDayOpts' }, { k: 'pay_day', l: 'Pay Day', type: 'select', opts: ['1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th', '10th', '11th', '12th', '13th', '14th', '15th', '16th', '17th', '18th', '19th', '20th', '21st', '22nd', '23rd', '24th', '25th', '26th', '27th', '28th', 'Last day of month', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'], hint: 'Options follow the Pay Cycle chosen' }, { k: 'applicable_to', l: 'Applicable To', type: 'select', opts: ['All types', 'Office', 'Field / FOS', 'Commission-based'], hint: 'Descriptive label — payroll pays each employee per the schedule assigned on their profile' }, { k: 'status', l: 'Status', type: 'select', opts: ['active', 'inactive'], optLabels: ['Active', 'Inactive'] }] },
         'tds-returns': { type: 'tds-returns', title: 'TDS Returns', sub: 'Quarterly TDS return filing tracker', fields: [
-            { k: 'company_name', l: 'Company', src: 'company' }, { k: 'quarter', l: 'Quarter', type: 'select', opts: ['Q1', 'Q2', 'Q3', 'Q4'], optLabels: ['Q1 (Apr–Jun)', 'Q2 (Jul–Sep)', 'Q3 (Oct–Dec)', 'Q4 (Jan–Mar)'] }, { k: 'deductees', l: 'Deductees', type: 'number' }, { k: 'tax_deducted', l: 'Tax Deducted (₹)', type: 'number' }, { k: 'deposited', l: 'Deposited (₹)', type: 'number' }, { k: 'due_date', l: 'Due Date', type: 'date' }, { k: 'status', l: 'Status', type: 'select', opts: ['pending', 'filed', 'revised'], optLabels: ['Pending', 'Filed', 'Revised'] }] },
+            { k: 'company_name', l: 'Company', src: 'company' }, { k: 'quarter', l: 'Quarter', type: 'select', opts: ['Q1', 'Q2', 'Q3', 'Q4'], optLabels: ['Q1 (Apr–Jun)', 'Q2 (Jul–Sep)', 'Q3 (Oct–Dec)', 'Q4 (Jan–Mar)'] }, { k: 'deductees', l: 'Deductees', type: 'number' }, { k: 'tax_deducted', l: 'Tax Deducted (₹)', type: 'number' }, { k: 'deposited', l: 'Deposited (₹)', type: 'number' }, { k: '__balance', l: 'Balance / Pending (₹)', compute: function (r) { return Math.round((Number(r.tax_deducted || 0) - Number(r.deposited || 0)) * 100) / 100; } }, { k: 'due_date', l: 'Due Date', type: 'date' }, { k: 'status', l: 'Status', type: 'select', opts: ['pending', 'filed', 'revised'], optLabels: ['Pending', 'Filed', 'Revised'] }] },
         'teams': { type: 'teams', title: 'Teams', sub: 'Teams with their manager & leader', fields: [
             { k: 'name', l: 'Team Name' }, { k: 'function', l: 'Function' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'manager', l: 'Manager', src: 'emp' }, { k: 'leader', l: 'Team Leader', src: 'emp' }, { k: 'status', l: 'Status', type: 'select', opts: ['active', 'inactive'], optLabels: ['Active', 'Inactive'] }] },
         'bgv': { type: 'bgv', title: 'Background Verification', sub: 'Structured BGV per agent — per-check results + re-verification schedule. Overdue / upcoming re-verifications show in Compliance Alerts.', fields: [
@@ -10137,7 +10178,7 @@ CSS;
         'faqs': { type: 'faqs', title: 'FAQs', sub: 'Frequently asked questions', fields: [
             { k: 'category', l: 'Category' }, { k: 'question', l: 'Question' }, { k: 'answer', l: 'Answer' }] },
         'escalations': { type: 'escalations', title: 'Escalations', sub: 'Field/ops escalations', fields: [
-            { k: 'date', l: 'Date', type: 'date' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'bank', l: 'Bank' }, { k: 'team', l: 'Team' }, { k: 'issue', l: 'Issue' }, { k: 'severity', l: 'Severity', type: 'select', opts: ['low', 'medium', 'high'], optLabels: ['Low', 'Medium', 'High'] }, { k: 'priority', l: 'Priority', type: 'select', opts: ['low', 'medium', 'high', 'urgent'], optLabels: ['Low', 'Medium', 'High', 'Urgent'] }, { k: 'status', l: 'Status', type: 'select', opts: ['open', 'in_progress', 'resolved', 'closed'], optLabels: ['Open', 'In progress', 'Resolved', 'Closed'] }, { k: 'action_taken', l: 'Action Taken' }] },
+            { k: 'date', l: 'Date', type: 'date', maxToday: 1 }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'bank', l: 'Bank' }, { k: 'team', l: 'Team' }, { k: 'issue', l: 'Issue — describe what happened', type: 'textarea' }, { k: 'severity', l: 'Severity', type: 'select', opts: ['low', 'medium', 'high'], optLabels: ['Low', 'Medium', 'High'] }, { k: 'priority', l: 'Priority', type: 'select', opts: ['low', 'medium', 'high', 'urgent'], optLabels: ['Low', 'Medium', 'High', 'Urgent'] }, { k: 'status', l: 'Status', type: 'select', opts: ['open', 'in_progress', 'resolved', 'closed'], optLabels: ['Open', 'In progress', 'Resolved', 'Closed'] }, { k: 'action_taken', l: 'Action Taken' }] },
         'agent-auth': { type: 'agent-auth', title: 'Agent Authorization', sub: 'DRA / bank authorizations', fields: [
             { k: 'employee', l: 'Employee', src: 'emp' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'bank', l: 'Bank' }, { k: 'portfolio', l: 'Portfolio' }, { k: 'auth_no', l: 'Authorization No.' }, { k: 'valid_to', l: 'Valid To', type: 'date' }, { k: 'status', l: 'Status', type: 'select', opts: ['active', 'expired', 'revoked'], optLabels: ['Active', 'Expired', 'Revoked'] }] },
         'dra-certs': { type: 'dra-certs', title: 'DRA Certifications', sub: 'IIBF Debt Recovery Agent certificate per agent — number, institute, training track, issue & expiry. Feeds Compliance Alerts and the bank-authorisation eligibility check.', fields: [
@@ -10260,6 +10301,19 @@ CSS;
         var body = rows.map(function (r) {
             var c = 'padding:9px 12px;font-size:13px;border-top:1px solid var(--border)';
             var cells = lcols.map(function (f, i) {
+                // 7 Aug 2026 test report (item 3) — computed columns (e.g. TDS
+                // Balance = Tax Deducted − Deposited). A positive balance is money
+                // still to be deposited: flag it red with a "pending" chip so a
+                // "Filed" row with an outstanding balance is impossible to miss.
+                if (f.compute) {
+                    var cval = f.compute(r);
+                    var pend = (typeof cval === 'number') && cval > 0;
+                    var cdisp = (typeof cval === 'number') ? (typeof inr === 'function' ? inr(cval) : String(cval)) : String(cval);
+                    var badge = pend
+                        ? ' <span style="font-size:10px;background:#fee2e2;color:#b91c1c;padding:1px 7px;border-radius:8px;font-weight:700">to deposit</span>'
+                        : ((typeof cval === 'number') ? ' <span style="font-size:10px;color:#15803d">cleared</span>' : '');
+                    return '<td data-label="' + f.l + '" style="' + c + (pend ? ';color:#b91c1c;font-weight:700' : '') + ';white-space:nowrap">' + cdisp + badge + '</td>';
+                }
                 var raw = r[f.k]; var disp;
                 if (raw === '' || raw == null) { disp = dash; }
                 else if (f.type === 'select' && f.opts) { var idx = f.opts.map(String).indexOf(String(raw)); disp = idx >= 0 ? (f.optLabels || f.opts)[idx] : String(raw); }
@@ -10330,7 +10384,11 @@ CSS;
                 var v2 = val;
                 if (fl.type === 'date' && val) { v2 = String(val).slice(0, 10); }
                 else if (fl.type === 'datetime' && val) { v2 = String(val).replace(' ', 'T').slice(0, 16); }
-                ctrl = '<input id="ms_' + fl.k + '" type="' + itype + '" value="' + String(v2).replace(/"/g, '&quot;') + '" style="' + inp + '">';
+                // 7 Aug 2026 test report (item 6b) — fields flagged maxToday cannot
+                // be set to a future date (e.g. an escalation is for a past/current
+                // incident). today is the SPA-wide current date string.
+                var maxAttr = (fl.maxToday && fl.type === 'date') ? ' max="' + new Date().toISOString().slice(0, 10) + '"' : '';
+                ctrl = '<input id="ms_' + fl.k + '" type="' + itype + '" value="' + String(v2).replace(/"/g, '&quot;') + '"' + maxAttr + ' style="' + inp + '">';
             }
             var wrapStyle = (fl.type === 'textarea') ? ' style="grid-column:1 / -1"' : '';
             return '<div' + wrapStyle + '><label id="ms_' + fl.k + '_lbl" style="' + lbl + '">' + fl.l + '</label>' + ctrl + (fl.hint ? '<div id="ms_' + fl.k + '_hint" style="font-size:11px;color:var(--text3);margin-top:3px">' + fl.hint + '</div>' : '') + '</div>';

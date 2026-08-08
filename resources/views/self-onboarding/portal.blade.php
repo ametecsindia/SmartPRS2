@@ -100,6 +100,8 @@
       <div class="two"><div><label>Date of birth</label><input type="date" data-field="dob"></div>
       <div><label>Gender</label><select data-field="gender"><option value="">Select</option><option>Male</option><option>Female</option><option>Other</option></select></div></div>
       <label>Father / Guardian name</label><input data-field="father_name">
+      <label>Mother's name</label><input data-field="mother_name">
+      <label>Spouse name (if married)</label><input data-field="spouse_name">
       <label>Nationality</label><input data-field="nationality" value="Indian">
       <div class="two"><div><label>Blood group</label><select data-field="blood_group"><option value="">Select</option><option>A+</option><option>A-</option><option>B+</option><option>B-</option><option>O+</option><option>O-</option><option>AB+</option><option>AB-</option></select></div>
       <div><label>Marital status</label><select data-field="marital"><option value="">Select</option><option>Single</option><option>Married</option><option>Widowed</option><option>Divorced</option></select></div></div>
@@ -203,7 +205,7 @@ window.SO = {
 (function(){
   var SO=window.SO;
   var STEPS=['verify','personal','contact','statutory','bank','selfie','documents','review'];
-  var DOCS=[{k:'id',l:'ID proof (Aadhaar / Passport)'},{k:'address',l:'Address proof'},{k:'education',l:'Education certificate'},{k:'experience',l:'Experience / relieving letter'},{k:'bank',l:'Bank proof (cheque / passbook)'}];
+  var DOCS=[{k:'id',l:'ID proof (Aadhaar / Passport)'},{k:'address',l:'Address proof'},{k:'education',l:'Education certificate'},{k:'experience',l:'Experience / relieving letter'},{k:'bank',l:'Bank proof (cheque / passbook)'},{k:'pcc',l:'PCC (Police Clearance Certificate)'},{k:'dra',l:'DRA certificate'}];
   var done={}, cur='verify';
   document.getElementById('refCode').textContent='Ref: '+(SO.tempCode||'');
 

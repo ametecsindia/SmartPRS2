@@ -31,27 +31,35 @@
     @if (session('lic_err'))
         <div class="err"><i class="fas fa-circle-exclamation"></i> {{ session('lic_err') }}</div>
     @endif
-    @if ($activated)
-        <div class="ok"><i class="fas fa-circle-check"></i> This installation is activated{{ !empty($state['company']) ? ' for '.$state['company'] : '' }}. You can upload a new .lic file only if Ametecs has released this licence for a server move.</div>
+    {{-- 7 Aug 2026 test report (Cloud item) — CLOUD/SaaS tenants must NOT see the
+         .lic file-upload; their licence is managed server-side by Ametecs. Only
+         on-prem editions (L1/L2/L3) get the upload form. --}}
+    @if (! \App\Services\Edition::isOnPrem())
+        <p>Your SmartPRS <strong>Cloud</strong> subscription is managed by Ametecs — there is no licence file to upload here.</p>
+        <div class="ok"><i class="fas fa-cloud"></i> Cloud workspace — nothing to activate on this screen. Your access renews automatically with your subscription. To renew or change your plan, open <strong>My Subscription</strong> inside the app, or contact Ametecs below.</div>
     @else
-        <p>Upload the <strong>.lic</strong> licence file Ametecs sent you. One licence file activates one server — after this, your team simply logs in and works.</p>
+        @if ($activated)
+            <div class="ok"><i class="fas fa-circle-check"></i> This installation is activated{{ !empty($state['company']) ? ' for '.$state['company'] : '' }}. You can upload a new .lic file only if Ametecs has released this licence for a server move.</div>
+        @else
+            <p>Upload the <strong>.lic</strong> licence file Ametecs sent you. One licence file activates one server — after this, your team simply logs in and works.</p>
+        @endif
+
+        <form method="POST" action="{{ $formAction ?? url('/app/activate') }}" enctype="multipart/form-data">
+            @csrf
+            <label style="display:block;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">Licence file (.lic)</label>
+            <input type="file" name="licence_file" accept=".lic,text/plain" required style="font-size:14px;width:100%;padding:14px;border:1.5px dashed #cbd5e1;border-radius:11px;background:#f8fafc">
+            <div style="margin-top:9px;font-size:12.5px;color:#64748b">Select the <strong>.lic</strong> file Ametecs sent you for this server.</div>
+            <button class="btn" type="submit"><i class="fas fa-key"></i> Activate</button>
+        </form>
+
+        <div class="note" style="margin-top:18px">
+            <div style="font-weight:700;color:#334155;margin-bottom:6px"><i class="fas fa-desktop" style="color:#f97316"></i> This device — share these with Ametecs to receive your licence file</div>
+            @if(!empty($fingerprint ?? '')) <div style="word-break:break-all"><strong>Machine fingerprint:</strong> <span style="font-family:Consolas,monospace">{{ $fingerprint }}</span></div> @endif
+            <div><strong>Active employees now:</strong> {{ $seatUsed ?? 0 }}@if(!empty($seatLimit)) / {{ $seatLimit }} licensed @endif</div>
+            @if(!empty($deviceEmail ?? '')) <div><strong>Account email:</strong> {{ $deviceEmail }}</div> @endif
+            @if(!empty($deviceIds ?? [])) <div style="word-break:break-all"><strong>Hardware ID(s):</strong> {{ implode(', ', $deviceIds) }}</div> @endif
+        </div>
     @endif
-
-    <form method="POST" action="{{ $formAction ?? url('/app/activate') }}" enctype="multipart/form-data">
-        @csrf
-        <label style="display:block;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">Licence file (.lic)</label>
-        <input type="file" name="licence_file" accept=".lic,text/plain" required style="font-size:14px;width:100%;padding:14px;border:1.5px dashed #cbd5e1;border-radius:11px;background:#f8fafc">
-        <div style="margin-top:9px;font-size:12.5px;color:#64748b">Select the <strong>.lic</strong> file Ametecs sent you for this server.</div>
-        <button class="btn" type="submit"><i class="fas fa-key"></i> Activate</button>
-    </form>
-
-    <div class="note" style="margin-top:18px">
-        <div style="font-weight:700;color:#334155;margin-bottom:6px"><i class="fas fa-desktop" style="color:#f97316"></i> This device — share these with Ametecs to receive your licence file</div>
-        @if(!empty($fingerprint ?? '')) <div style="word-break:break-all"><strong>Machine fingerprint:</strong> <span style="font-family:Consolas,monospace">{{ $fingerprint }}</span></div> @endif
-        <div><strong>Active employees now:</strong> {{ $seatUsed ?? 0 }}@if(!empty($seatLimit)) / {{ $seatLimit }} licensed @endif</div>
-        @if(!empty($deviceEmail ?? '')) <div><strong>Account email:</strong> {{ $deviceEmail }}</div> @endif
-        @if(!empty($deviceIds ?? [])) <div style="word-break:break-all"><strong>Hardware ID(s):</strong> {{ implode(', ', $deviceIds) }}</div> @endif
-    </div>
 
     <div class="note"><i class="fas fa-headset" style="color:#f97316"></i> Need help? Ametecs India — ejaz@ametecsindia.com · WhatsApp 9000098877. Activation with the .lic file is instant and fully offline — no internet needed.</div>
 </div>

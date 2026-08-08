@@ -474,6 +474,7 @@ Route::middleware(['auth', App\Http\Middleware\LicenseGate::class, App\Http\Midd
     Route::get('/app/payroll/preview', [App\Http\Controllers\PayrollGenController::class, 'preview'])->name('app.payroll.preview');
     // LIVE SALARY — one employee's running-month earnings till today (strict hierarchy).
     Route::get('/app/live-salary/data', [App\Http\Controllers\PayrollGenController::class, 'liveSalary'])->name('app.livesalary');
+    Route::get('/app/live-salary/all', [App\Http\Controllers\PayrollGenController::class, 'liveSalaryAll'])->name('app.livesalary.all');   // 7 Aug 2026 test report (item 4) — All Employees overview
     // rev178 — SALARY SIMULATOR: what-if payslip with every variable, computed by the real engine (all roles, read-only).
     Route::post('/app/salary-simulate', [App\Http\Controllers\PayrollGenController::class, 'simulate'])->name('app.salary.simulate');
     Route::post('/app/payroll/generate', [App\Http\Controllers\PayrollGenController::class, 'generate'])->name('app.payroll.generate');

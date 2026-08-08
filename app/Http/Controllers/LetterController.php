@@ -289,12 +289,30 @@ class LetterController extends Controller
             }
         }
 
+        // 7 Aug 2026 test report (item 2 — "ID card not showing the company logo").
+        // Embed the company logo as a base64 data URI — a bare file path/URL is
+        // unreliable in dompdf; a data URI always renders.
+        $logo = null;
+        $lf = $brand['logo_file'] ?? null;
+        if ($lf && is_file($lf)) {
+            $logo = 'data:'.(function_exists('mime_content_type') ? mime_content_type($lf) : 'image/png').';base64,'.base64_encode(file_get_contents($lf));
+        }
+
+        // 7 Aug 2026 test report (item 2 — designation etc. not updating). The
+        // Add/Edit form saves designation/department as NAME strings on the
+        // employee row (e.designation / e.department), but this query only joined
+        // by *_id, so a card built from the form showed a blank designation.
+        // Prefer the FK-joined name; fall back to the string the form saved.
+        $designation = $e->designation_name ?: ($e->designation ?? null);
+        $department = $e->department_name ?: ($e->department ?? null);
+
         $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('idcard-pdf', [
             'e' => $e, 'brand' => $brand,
-            'company' => $e->company_name,
-            'designation' => $e->designation_name,
-            'department' => $e->department_name,
+            'company' => $e->company_name ?: null,
+            'designation' => $designation,
+            'department' => $department,
             'photo' => $photo,
+            'logo' => $logo,
         ]);
 
         // Desktop opens this in a new tab for preview (inline). Mobile browsers and

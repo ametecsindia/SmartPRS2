@@ -699,7 +699,9 @@ class SelfOnboardingController extends Controller
         $tid = $rec->tenant_id;
         $companyId = $rec->company_id;
         $hrPatch = $this->hrPatch(is_array($hr) ? $hr : [], $tid);
-        $candExtra = array_filter(['blood_group' => $p['blood_group'] ?? null, 'marital_status' => $p['marital'] ?? null, 'category' => $st['category'] ?? null, 'esic_no' => $st['esic'] ?? null, 'father' => $p['father_name'] ?? null, 'nationality' => $p['nationality'] ?? null, 'aadhaar' => $st['aadhaar'] ?? null, 'permanent_address' => $ct['permanent_address'] ?? null, 'emergency_name' => $ct['emergency_name'] ?? null, 'emergency_phone' => $ct['emergency_phone'] ?? null, 'dra_declared' => $st['dra_status'] ?? null, 'pcc_declared' => $st['pcc_status'] ?? null]);
+        // 7 Aug 2026 test report (item 12) — carry Mother's & Spouse's name from
+        // onboarding into the employee record (columns ensured in AppDataController).
+        $candExtra = array_filter(['blood_group' => $p['blood_group'] ?? null, 'marital_status' => $p['marital'] ?? null, 'category' => $st['category'] ?? null, 'esic_no' => $st['esic'] ?? null, 'father' => $p['father_name'] ?? null, 'mother' => $p['mother_name'] ?? null, 'spouse' => $p['spouse_name'] ?? null, 'nationality' => $p['nationality'] ?? null, 'aadhaar' => $st['aadhaar'] ?? null, 'permanent_address' => $ct['permanent_address'] ?? null, 'emergency_name' => $ct['emergency_name'] ?? null, 'emergency_phone' => $ct['emergency_phone'] ?? null, 'dra_declared' => $st['dra_status'] ?? null, 'pcc_declared' => $st['pcc_status'] ?? null]);
 
         if ($rec->employee_id) {
             $patch = ['email_verified' => (bool) $rec->email_verified, 'mobile_verified' => (bool) $rec->mobile_verified, 'wa_verified' => (bool) $rec->wa_verified, 'docs_status' => 'approved', 'updated_at' => now()];
@@ -731,7 +733,84 @@ class SelfOnboardingController extends Controller
         }
         DB::table('self_onboarding')->where('id', $rec->id)->update(['status' => 'injected', 'employee_id' => $empId, 'approved_at' => now(), 'link_disabled_at' => now(), 'updated_at' => now()]);
 
+        // 7 Aug 2026 test report (item 13) — documents the employee uploaded during
+        // self-onboarding were stored only in self_onboarding_docs, so they never
+        // appeared in the main app's Document Tracker. Copy each into the public
+        // documents store + the `documents` table (linked to the employee) so HR
+        // sees them there. Non-fatal: a copy failure never blocks provisioning.
+        try {
+            $this->copyOnboardingDocsToEmployee($rec->id, (int) $empId, $tid, $p['full_name'] ?? $rec->name);
+        } catch (\Throwable $e) {
+        }
+
         return ['emp_code' => $code, 'employee_id' => $empId, 'updated' => $updated];
+    }
+
+    /**
+     * 7 Aug 2026 test report (item 13) — surface self-onboarding uploads in the
+     * main Document Tracker. Copies each self_onboarding_docs file from the
+     * 'local' disk to the 'public' disk and inserts a `documents` row.
+     */
+    private function copyOnboardingDocsToEmployee(int $onboardingId, int $empId, $tid, ?string $empName): void
+    {
+        if (! \Illuminate\Support\Facades\Schema::hasTable('self_onboarding_docs')) {
+            return;
+        }
+        // Ensure the documents table exists with the core columns (mirrors DocumentController).
+        if (! \Illuminate\Support\Facades\Schema::hasTable('documents')) {
+            \Illuminate\Support\Facades\Schema::create('documents', function (\Illuminate\Database\Schema\Blueprint $t) {
+                $t->id();
+                $t->unsignedBigInteger('tenant_id')->nullable()->index();
+                $t->unsignedBigInteger('employee_id')->index();
+                $t->string('kind')->nullable();
+                $t->string('category')->nullable();
+                $t->string('doc_name')->nullable();
+                $t->string('status')->nullable();
+                $t->date('expiry')->nullable();
+                $t->string('file_name')->nullable();
+                $t->string('file_path')->nullable();
+                $t->unsignedBigInteger('file_size')->nullable();
+                $t->timestamps();
+            });
+        }
+        $niceKind = ['id' => 'ID Proof', 'address' => 'Address Proof', 'education' => 'Education Certificate', 'experience' => 'Experience / Relieving Letter', 'bank' => 'Bank Proof', 'pcc' => 'PCC Certificate', 'dra' => 'DRA Certificate'];
+        $rows = DB::table('self_onboarding_docs')->where('self_onboarding_id', $onboardingId)->get();
+        foreach ($rows as $od) {
+            $local = $od->path ?? null;
+            if (! $local) {
+                continue;
+            }
+            try {
+                $abs = \Illuminate\Support\Facades\Storage::disk('local')->path($local);
+                if (! is_file($abs)) {
+                    continue;
+                }
+                // Skip if already copied for this employee+kind (idempotent re-provision).
+                $exists = DB::table('documents')->where('employee_id', $empId)->where('kind', $od->kind)
+                    ->where('doc_name', 'like', '%(from onboarding)%')->exists();
+                if ($exists) {
+                    continue;
+                }
+                $base = basename($local);
+                $pubRel = 'employee-docs/'.$empId.'/'.$base;
+                \Illuminate\Support\Facades\Storage::disk('public')->put($pubRel, file_get_contents($abs));
+                DB::table('documents')->insert(ApprovalService::safeRow('documents', [
+                    'tenant_id' => $tid,
+                    'employee_id' => $empId,
+                    'kind' => (string) $od->kind,
+                    'category' => $niceKind[$od->kind] ?? ucfirst((string) $od->kind),
+                    'doc_name' => ($niceKind[$od->kind] ?? ucfirst((string) $od->kind)).' (from onboarding)',
+                    'status' => 'approved',
+                    'file_name' => $base,
+                    'file_path' => $pubRel,
+                    'file_size' => @filesize($abs) ?: null,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]));
+            } catch (\Throwable $e) {
+                // one bad doc must not stop the rest
+            }
+        }
     }
 
     /* --------------------------------------------------------------- BULK import */

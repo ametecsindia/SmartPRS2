@@ -36,7 +36,9 @@ class AppDataController extends Controller
         if (! Schema::hasTable('employees')) {
             return;
         }
-        $cols = ['department', 'designation', 'branch', 'team', 'reporting_manager', 'team_leader', 'father', 'spouse', 'blood_group', 'id_marks', 'gender', 'address', 'pt_state', 'shift', 'employment_stage', 'dra_declared', 'pcc_declared'];
+        // 7 Aug 2026 test report (item 10c / item 2) — new personal & bank fields:
+        // mother, national_id (Government ID / SSN), marital_status, bank_branch.
+        $cols = ['department', 'designation', 'branch', 'team', 'reporting_manager', 'team_leader', 'father', 'mother', 'spouse', 'marital_status', 'blood_group', 'id_marks', 'gender', 'address', 'national_id', 'bank_branch', 'pt_state', 'shift', 'employment_stage', 'dra_declared', 'pcc_declared'];
         $missing = array_values(array_filter($cols, fn ($c) => ! Schema::hasColumn('employees', $c)));
         if (! $missing) {
             return;
@@ -255,7 +257,11 @@ class AppDataController extends Controller
                 'dob' => $col('dob') ?? '',
                 'gender' => $col('gender') ?? '',
                 'father' => $col('father') ?? '',
+                'mother' => $col('mother') ?? '',   // 7 Aug 2026 test report (item 10c) — read back so edits persist
                 'spouse' => $col('spouse') ?? '',
+                'maritalStatus' => $col('marital_status') ?? '',
+                'nationalId' => $col('national_id') ?? '',
+                'bankBranch' => $col('bank_branch') ?? '',
                 'bloodGroup' => $col('blood_group') ?? '',
                 'idMarks' => $col('id_marks') ?? '',
                 'whatsapp' => $col('whatsapp') ?? '',
@@ -370,6 +376,30 @@ class AppDataController extends Controller
 
         // rev183b — "Backed up / Old data" tab: employees moved out of the active
         // directory (archived_at set). Their data stays intact; surface a light
+        // 7 Aug 2026 test report (item 11) — the Employee → Statutory & Salary
+        // "Salary Schedule" dropdown showed only "Select…" because the bootstrap
+        // never sent the salarySchedules collection the form maps over
+        // (DB.salarySchedules.map(s => s.name + ' — ' + s.companyId)). Feed the
+        // tenant's real, active schedules so the dropdown lists them.
+        $salarySchedules = [];
+        try {
+            if (Schema::hasTable('salary_schedules')) {
+                $salarySchedules = DB::table('salary_schedules')
+                    ->when(Schema::hasColumn('salary_schedules', 'deleted_at'), fn ($q) => $q->whereNull('deleted_at'))
+                    ->when($tenantId && Schema::hasColumn('salary_schedules', 'tenant_id'), fn ($q) => $q->where('tenant_id', $tenantId))
+                    ->when(Schema::hasColumn('salary_schedules', 'status'), fn ($q) => $q->where(fn ($x) => $x->where('status', 'active')->orWhereNull('status')))
+                    ->orderBy('name')->get()
+                    ->map(fn ($r) => [
+                        'id' => (string) ($r->id ?? ''),
+                        'name' => (string) ($r->name ?? ''),
+                        'companyId' => (string) ($r->company_name ?? ''),
+                        'payCycle' => (string) ($r->pay_cycle ?? ''),
+                    ])->values();
+            }
+        } catch (\Throwable $e) {
+            $salarySchedules = [];
+        }
+
         // list plus a download link to the stored JSON backup.
         $archived = [];
         try {
@@ -414,6 +444,7 @@ class AppDataController extends Controller
             'designations' => $optList('designations'),
             'teams' => $optList('teams'),
             'shifts' => $shiftList,
+            'salarySchedules' => $salarySchedules,
             'tenants' => $tenants,
             'payrollRuns' => $payroll['runs'],
             'payslips' => $payroll['payslips'],
@@ -540,6 +571,16 @@ class AppDataController extends Controller
                 'shift' => trim((string) ($row['shift'] ?? ($row['working_shift'] ?? ''))) ?: null,   // rev173g
                 'whatsapp' => trim((string) ($row['whatsapp'] ?? ($row['whatsapp_number'] ?? ''))) ?: null,
                 'address' => trim((string) ($row['address'] ?? '')) ?: null,
+                // 7 Aug 2026 test report (item 2 / 10c) — personal + bank fields the sample file now carries.
+                'gender' => trim((string) ($row['gender'] ?? '')) ?: null,
+                'father' => trim((string) ($row['father'] ?? ($row['father_name'] ?? ($row["father's_name"] ?? '')))) ?: null,
+                'mother' => trim((string) ($row['mother'] ?? ($row['mother_name'] ?? ($row["mother's_name"] ?? '')))) ?: null,
+                'spouse' => trim((string) ($row['spouse'] ?? ($row['spouse_name'] ?? ''))) ?: null,
+                'marital_status' => trim((string) ($row['marital_status'] ?? ($row['marital'] ?? ''))) ?: null,
+                'blood_group' => trim((string) ($row['blood_group'] ?? ($row['blood'] ?? ''))) ?: null,
+                'national_id' => trim((string) ($row['national_id'] ?? ($row['ssn'] ?? ($row['government_id'] ?? ($row['govt_id'] ?? ''))))) ?: null,
+                'bank_name' => trim((string) ($row['bank_name'] ?? ($row['bank'] ?? ''))) ?: null,
+                'bank_branch' => trim((string) ($row['bank_branch'] ?? ($row['branch_name'] ?? ''))) ?: null,
                 'dob' => $normDate($row['dob'] ?? ($row['date_of_birth'] ?? '')),
                 'doj' => $normDate($row['doj'] ?? ($row['date_of_joining'] ?? ($row['joining_date'] ?? ''))),
                 // Biometric Mapping — the person's ID on the attendance device.
@@ -705,10 +746,13 @@ class AppDataController extends Controller
         // the attendance device, saved to employees.device_user_id on import.
         // 2026-08-05b (Ejaz) — column renamed dpa → dra (the import accepts both),
         // and dates standardised to DD/MM/YYYY everywhere (form + template).
-        $head = 'emp_code,name,type,company,department,designation,branch,team,shift,doj,dob,mobile,whatsapp,address,email,ctc,salary_type,pan,uan,bank_acc,ifsc,password,biometric_id,dra,pcc';
+        // 7 Aug 2026 test report (item 2) — sample file now includes gender,
+        // marital_status, father, mother, spouse, blood_group, national_id (Govt
+        // ID / SSN), bank_name and bank_branch.
+        $head = 'emp_code,name,type,company,department,designation,branch,team,shift,doj,dob,gender,marital_status,father,mother,spouse,blood_group,national_id,mobile,whatsapp,address,email,ctc,salary_type,pan,uan,bank_name,bank_acc,bank_branch,ifsc,password,biometric_id,dra,pcc';
         $csv = $head."\n"
-            .'EMP100,Sample Name,office,Acme Recovery Pvt Ltd,Operations,Executive,Head Office,Alpha Team,General Shift,01/04/2024,15/06/1995,+919999999999,+919999999999,"12 MG Road, Hyderabad",sample@company.in,600000,Salary,ABCDE1234F,100200300400,12345678901,SBIN0001234,Welcome@123,1043,Yes,Yes'."\n"
-            .'EMP101,Field Agent Name,field,Acme Recovery Pvt Ltd,Collections,Field Officer,Branch-2,Bravo Team,General Shift,10/05/2024,20/02/1998,+918888888888,+918888888888,"45 Park Street, Pune",agent@company.in,336000,Salary + Commission,FGHIJ5678K,100200300401,10987654321,HDFC0005678,Welcome@123,1044,Yes,Yes'."\n";
+            .'EMP100,Sample Name,office,Acme Recovery Pvt Ltd,Operations,Executive,Head Office,Alpha Team,General Shift,01/04/2024,15/06/1995,Male,Married,Ramesh Sample,Sita Sample,Priya Sample,O+,,+919999999999,+919999999999,"12 MG Road, Hyderabad",sample@company.in,600000,Salary,ABCDE1234F,100200300400,State Bank of India,12345678901,MG Road,SBIN0001234,Welcome@123,1043,Yes,Yes'."\n"
+            .'EMP101,Field Agent Name,field,Acme Recovery Pvt Ltd,Collections,Field Officer,Branch-2,Bravo Team,General Shift,10/05/2024,20/02/1998,Female,Single,Suresh Kumar,Latha Kumar,,B+,,+918888888888,+918888888888,"45 Park Street, Pune",agent@company.in,336000,Salary + Commission,FGHIJ5678K,100200300401,HDFC Bank,10987654321,Park Street,HDFC0005678,Welcome@123,1044,Yes,Yes'."\n";
 
         return response($csv, 200, [
             'Content-Type' => 'text/csv',
@@ -2315,6 +2359,33 @@ class AppDataController extends Controller
             return response()->json(['ok' => false, 'error' => 'Name required'], 422);
         }
 
+        // 7 Aug 2026 test report (item 10a) — reject invalid phone numbers instead
+        // of silently saving them. Accept a 10-digit Indian mobile (optionally with
+        // a 91 / +91 / 0 prefix); blank is allowed (the field is optional).
+        $phoneErr = static function ($raw, string $label): ?string {
+            $raw = trim((string) $raw);
+            if ($raw === '') {
+                return null;
+            }
+            $digits = preg_replace('/\D+/', '', $raw);
+            // strip a leading country code (91) or trunk 0 so 10 real digits remain.
+            if (strlen($digits) === 12 && str_starts_with($digits, '91')) {
+                $digits = substr($digits, 2);
+            } elseif (strlen($digits) === 11 && str_starts_with($digits, '0')) {
+                $digits = substr($digits, 1);
+            }
+            if (! preg_match('/^[6-9]\d{9}$/', $digits)) {
+                return $label.' looks invalid — enter a 10-digit mobile number (starting 6-9).';
+            }
+
+            return null;
+        };
+        foreach ([['mobile', 'Mobile'], ['whatsapp', 'WhatsApp']] as $pf) {
+            if ($msg = $phoneErr($e[$pf[0]] ?? null, $pf[1])) {
+                return response()->json(['ok' => false, 'error' => $msg], 422);
+            }
+        }
+
         $salaryMap = [
             'Salary' => 'only_salary',
             'Salary + Commission' => 'salary_commission',
@@ -2381,7 +2452,11 @@ class AppDataController extends Controller
             'team_leader' => $e['teamLeader'] ?? ($e['leader'] ?? null),
             // rev160: Personal Details — Father / Spouse / Blood group / ID marks (+ gender, address, dob).
             'father' => $e['father'] ?? null,
+            'mother' => $e['mother'] ?? null,   // 7 Aug 2026 test report (item 10c)
             'spouse' => $e['spouse'] ?? null,
+            'marital_status' => $e['maritalStatus'] ?? ($e['marital_status'] ?? null),
+            'national_id' => $e['nationalId'] ?? ($e['national_id'] ?? null),   // Government ID / SSN
+            'bank_branch' => $e['bankBranch'] ?? ($e['bank_branch'] ?? null),
             'blood_group' => $e['bloodGroup'] ?? null,
             'id_marks' => $e['idMarks'] ?? null,
             'gender' => $e['gender'] ?? null,

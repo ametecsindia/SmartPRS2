@@ -289,11 +289,16 @@ class LeaveController extends Controller
             // rev184b (Ejaz) — an Employee login always applies for THEMSELVES,
             // whatever the client posted (the UI locks the field; this makes the
             // server safe too and fixes the blank-dropdown submit failure).
-            if ($user->hasRole('employee')) {
+            // 7 Aug 2026 test report (item 9) — SECURITY: force self for ANY
+            // non-manager login, not just the 'employee' role. A Field Agent was
+            // able to select another employee and submit leave on their behalf.
+            // Only super_admin / admin / hr_manager may apply for someone else.
+            if (! $this->isManagerRole($request)) {
                 $selfRow = $this->currentEmployee($request);
-                if ($selfRow) {
-                    $v['employee'] = (string) (($selfRow->emp_code ?? '') !== '' ? $selfRow->emp_code : $selfRow->name);
+                if (! $selfRow) {
+                    return response()->json(['ok' => false, 'error' => 'Your login is not linked to an employee record, so you can only apply leave for yourself once linked. Contact your admin.'], 422);
                 }
+                $v['employee'] = (string) (($selfRow->emp_code ?? '') !== '' ? $selfRow->emp_code : $selfRow->name);
             }
             if (trim((string) ($v['employee'] ?? '')) === '') {
                 return response()->json(['ok' => false, 'error' => 'Pick the employee this leave is for.'], 422);

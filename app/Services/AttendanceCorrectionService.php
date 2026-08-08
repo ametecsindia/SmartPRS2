@@ -116,6 +116,20 @@ class AttendanceCorrectionService
                 return ['ok' => false, 'id' => null, 'error' => 'Check-out cannot be earlier than check-in.'];
             }
 
+            // 7 Aug 2026 test report (item 8) — a correction for TODAY must not
+            // request a check-in/out time that is still in the future. (A future
+            // DATE is already blocked above; this closes the same-day case, e.g.
+            // an 18:00 check-out entered at 16:26.) A small skew tolerance covers
+            // clock drift between the client and server.
+            if (Carbon::parse($date)->isSameDay(Carbon::now())) {
+                $nowHm = Carbon::now()->addMinutes(2)->format('H:i');
+                foreach (['check-in' => $reqIn, 'check-out' => $reqOut] as $lbl => $t) {
+                    if ($t && strcmp($t, $nowHm) > 0) {
+                        return ['ok' => false, 'id' => null, 'error' => 'The corrected '.$lbl.' time cannot be in the future. For today, enter a time up to the current time only.'];
+                    }
+                }
+            }
+
             // One open request per employee-day.
             $dupe = DB::table('attendance_corrections')
                 ->where('employee_id', $a['id'])->whereDate('log_date', $date)

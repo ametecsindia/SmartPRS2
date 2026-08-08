@@ -1,7 +1,7 @@
 <?php
     $color = $brand['color'] ?? '#f97316';
     $brandName = $brand['display_name'] ?? ($company ?? 'SmartPRS');
-    $brandLogo = $brand['logo_file'] ?? ($brand['logo'] ?? '');   // rev 131: company logo
+    $brandLogo = ($logo ?? null) ?: ($brand['logo_file'] ?? ($brand['logo'] ?? ''));   // rev 131 company logo; 7 Aug 2026 — prefer base64 $logo (reliable in dompdf)
     $initials = collect(explode(' ', (string) $e->name))->map(fn ($p) => mb_substr($p, 0, 1))->take(2)->implode('');
 ?>
 <!DOCTYPE html>

@@ -23,14 +23,25 @@ class EmployeeExportController extends Controller
     /** Export columns: [Header => employees-row property]. Denormalised name
      *  columns (department/designation/branch/team/reporting_manager) are read
      *  straight off the row, exactly like AppDataController::bootstrap. */
+    // 7 Aug 2026 test report (item 10d) — added the personal / statutory / bank
+    // columns the tester found missing: Marital Status, Father, Mother, Spouse,
+    // Blood Group, Government ID (SSN), Shift, Salary Schedule, Bank Branch.
+    // Columns that do not exist on a given install are silently skipped (see
+    // effectiveMap()), so a header appears the moment its field is added.
     private const MAP = [
         'Employee Code' => 'emp_code',
         'Name' => 'name',
         'Gender' => 'gender',
         'Date of Birth' => 'dob',
+        'Marital Status' => 'marital_status',
+        'Father Name' => 'father',
+        'Mother Name' => 'mother',
+        'Spouse' => 'spouse',
+        'Blood Group' => 'blood_group',
         'Mobile' => 'mobile',
         'WhatsApp' => 'whatsapp',
         'Email' => 'email',
+        'Government ID / SSN' => 'national_id',
         'Address' => 'address',
         'Department' => 'department',
         'Designation' => 'designation',
@@ -38,11 +49,13 @@ class EmployeeExportController extends Controller
         'Team' => 'team',
         'Company' => '__company',
         'Type' => 'type',
+        'Shift' => 'shift',
         'Employment Stage' => 'employment_stage',
         'Reporting Manager' => 'reporting_manager',
         'Date of Joining' => 'doj',
         'CTC (annual ₹)' => 'ctc',
         'Salary Type' => 'salary_type',
+        'Salary Schedule' => 'salary_schedule',
         'Commission %' => 'comm_pct',
         'PF Applicable' => 'pf_applicable',
         'ESI Applicable' => 'esi_applicable',
@@ -55,10 +68,27 @@ class EmployeeExportController extends Controller
         'PCC Expiry' => 'pcc_expiry',
         'Biometric ID' => 'device_user_id',
         'Bank Name' => 'bank_name',
+        'Bank Branch' => 'bank_branch',
         'Bank A/C' => 'bank_acc',
         'IFSC' => 'ifsc',
         'Status' => 'status',
     ];
+
+    /** MAP filtered to columns that actually exist on this install (denormalised
+     *  name columns + the synthetic __company are always kept). Prevents a header
+     *  with no backing column from showing a permanently blank column. */
+    private static function effectiveMap(): array
+    {
+        $keepAlways = ['__company', 'department', 'designation', 'branch', 'team', 'reporting_manager'];
+        $out = [];
+        foreach (self::MAP as $header => $prop) {
+            if (in_array($prop, $keepAlways, true) || Schema::hasColumn('employees', $prop)) {
+                $out[$header] = $prop;
+            }
+        }
+
+        return $out;
+    }
 
     public function export(Request $request)
     {
@@ -90,7 +120,7 @@ class EmployeeExportController extends Controller
             // logging is best-effort
         }
 
-        $headers = array_keys(self::MAP);
+        $headers = array_keys(self::effectiveMap());
         $fname = 'smartprs-employees-'.now()->format('Ymd-His');
 
         if ($format === 'xlsx' && class_exists(\ZipArchive::class)) {
@@ -120,11 +150,12 @@ class EmployeeExportController extends Controller
         $records = $q->orderBy('emp_code')->get();
 
         $boolCols = ['pf_applicable'];
+        $map = self::effectiveMap();
         $out = [];
         foreach ($records as $rec) {
             $r = (array) $rec;
             $line = [];
-            foreach (self::MAP as $header => $prop) {
+            foreach ($map as $header => $prop) {
                 if ($prop === '__company') {
                     $val = $companyNames[$r['company_id'] ?? 0] ?? '';
                 } else {

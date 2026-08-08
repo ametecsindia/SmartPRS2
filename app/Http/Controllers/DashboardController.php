@@ -75,8 +75,15 @@ class DashboardController extends Controller
 
     private function companyCards(?int $tid, ?array $self = null): array
     {
+        // 7 Aug 2026 test report (item 1) — the Dashboard "Active Employees" count
+        // disagreed with the People Directory (24 vs 21). Root cause: the Directory
+        // feed hides backed-up / "Old data" employees (archived_at IS NOT NULL) but
+        // this card did not, so archived-yet-active rows inflated the number. Match
+        // the Directory exactly by also excluding archived rows.
+        $hasArchived = Schema::hasColumn('employees', 'archived_at');
         $headcount = (int) DB::table('employees')->when($tid, fn ($q) => $q->where('tenant_id', $tid))
             ->when($self, fn ($q) => $q->where('id', $self['id']))
+            ->when($hasArchived, fn ($q) => $q->whereNull('archived_at'))
             ->where('status', 'active')->whereNull('deleted_at')->count();
 
         // Present Today (fixed 2026-08-05): count DISTINCT *employees* with a punch

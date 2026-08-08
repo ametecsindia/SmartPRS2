@@ -150,8 +150,10 @@
             </form>
 
             {{-- Demo-credentials hint: LOCAL/DEMO ONLY. Never shown in production
-                 (rev 88 — Ejaz live check 6 Jun 2026: this was visible on smartprs.com). --}}
-            @if (config('app.env') !== 'production' && filter_var(env('SMARTPRS_DEMO_DATA', false), FILTER_VALIDATE_BOOLEAN))
+                 (rev 88 — Ejaz live check 6 Jun 2026: this was visible on smartprs.com).
+                 7 Aug 2026 test report (On-Premises item 1) — NEVER show this on any
+                 on-prem client edition (L1/L2/L3), whatever the local env flags say. --}}
+            @if (! \App\Services\Edition::isOnPrem() && config('app.env') !== 'production' && filter_var(env('SMARTPRS_DEMO_DATA', false), FILTER_VALIDATE_BOOLEAN))
             <div class="login-footer">
                 Demo: <a href="#">admin@smartprs.local</a> · password: <strong style="color:var(--text2);">password</strong>
             </div>

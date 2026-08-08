@@ -341,6 +341,21 @@ class OnpremClientController extends Controller
         $seats = (int) $request->input('seats', 0);
         $expiry = self::resolveExpiry($c);
 
+        // 7 Aug 2026 test report (ONP-3 — ".lic works on other PCs"). A token with
+        // an EMPTY fingerprint is NOT machine-locked (LicenseFile::verifyToken skips
+        // the wrong_machine check when no fingerprint is present), so it runs on any
+        // PC. If the admin didn't paste one, fall back to the fingerprint this client
+        // already bound via the phone-home heartbeat — so a re-issued .lic stays
+        // locked to their real machine. (A brand-new client that has never checked
+        // in still needs the fingerprint pasted from their Activation screen.)
+        $liveLic = DB::table('licences')->where('client_id', $id)->whereIn('status', ['pending', 'active'])->orderByDesc('id')->first();
+        if ($fingerprint === '' && $liveLic) {
+            $fingerprint = trim((string) ($liveLic->fingerprint ?? ''));
+            if ($fingerprint === '' && \Illuminate\Support\Facades\Schema::hasTable('licence_devices')) {
+                $fingerprint = trim((string) (DB::table('licence_devices')->where('licence_id', $liveLic->id)->where('status', 'active')->orderByDesc('last_seen_at')->value('fingerprint') ?? ''));
+            }
+        }
+
         // Reuse the client's existing licence KEY (the SPRS-XXXX identifier) if
         // present, else mint a fresh one so the .lic carries a stable id for
         // records + revocation. IMPORTANT (bug fix 6 Aug 2026): recordOffline()

@@ -1920,6 +1920,146 @@ class PayrollGenController extends Controller
     }
 
     /**
+     * 7 Aug 2026 test report (item 4) — Live Salary "All Employees" overview.
+     * An ADDITIVE summary (never touches the trusted single-employee liveSalary
+     * above): for every employee in the viewer's scope, the full-month projected
+     * NET and the base salary earned till today (basic + allowances − statutory),
+     * pro-rated by attendance with the SAME computeSlip engine and LOP basis as
+     * payroll. Per-employee approved extras (commission / OT / EMI / reimbursement)
+     * are shown in each employee's detailed Live Salary, not aggregated here.
+     */
+    public function liveSalaryAll(Request $request)
+    {
+        try {
+            $user = $request->user();
+            $tid = $user->tenant_id;
+            $isHr = $user->hasAnyRole(['super_admin', 'admin', 'hr_manager']);
+
+            $me = null;
+            if (! empty($user->employee_id)) {
+                $me = DB::table('employees')->where('id', $user->employee_id)->whereNull('deleted_at')->first();
+            }
+            if (! $me) {
+                $me = DB::table('employees')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->whereNull('deleted_at')
+                    ->where(fn ($q) => $q->where('email', $user->email)->orWhere('name', $user->name))->first();
+            }
+            $base = DB::table('employees')->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                ->whereNull('deleted_at')->where('status', 'active')
+                ->when(Schema::hasColumn('employees', 'archived_at'), fn ($q) => $q->whereNull('archived_at'));
+            if ($isHr) {
+                $scope = $base->orderBy('emp_code')->get();
+            } elseif ($me) {
+                $scope = $base->where(function ($q) use ($me) {
+                    $q->where('id', $me->id)->orWhere('reporting_manager', $me->name)->orWhere('team_leader', $me->name);
+                    if (Schema::hasColumn('employees', 'reporting_manager_id')) {
+                        $q->orWhere('reporting_manager_id', $me->id);
+                    }
+                })->orderBy('emp_code')->get();
+            } else {
+                return response()->json(['ok' => false, 'error' => 'Your login is not linked to an employee record.'], 422);
+            }
+            if ($scope->isEmpty()) {
+                return response()->json(['ok' => false, 'error' => 'No employees in your view.'], 422);
+            }
+
+            $rates = SettingsController::rates($tid);
+            $month = now()->format('Y-m');
+            [$start, $daysInMonth, , ] = $this->monthMeta($month);
+            $today = now()->toDateString();
+            $dayOfMonth = (int) now()->day;
+            $holidays = $this->holidayDates($tid, $month, $start->copy()->endOfMonth()->toDateString(), $rates);
+            $working = 0;
+            $workingSoFar = 0;
+            for ($d = 1; $d <= $daysInMonth; $d++) {
+                $cur = Carbon::create($start->year, $start->month, $d);
+                if (self::isWeekOff($cur, $rates) || isset($holidays[$cur->toDateString()])) {
+                    continue;
+                }
+                $working++;
+                if ($d <= $dayOfMonth) {
+                    $workingSoFar++;
+                }
+            }
+            $working = max(1, $working);
+            $lopBasis = strtolower(trim((string) ($rates['lop_basis'] ?? 'working')));
+
+            $companyCache = [];
+            $compCache = [];
+            $rows = [];
+            $totFull = 0.0;
+            $totEarned = 0.0;
+            $capped = false;
+            $limit = 300;   // no silent unbounded loop; log if we hit it
+            $i = 0;
+            foreach ($scope as $e) {
+                if ($i++ >= $limit) {
+                    $capped = true;
+                    break;
+                }
+                $ctc = (float) $e->ctc;
+                $cid = $e->company_id;
+                if (! array_key_exists($cid, $companyCache)) {
+                    $companyCache[$cid] = DB::table('companies')->where('id', $cid)->first();
+                }
+                $company = $companyCache[$cid];
+                if ($ctc <= 0 || ! $company) {
+                    $rows[] = ['code' => $e->emp_code, 'name' => $e->name, 'company' => $company->name ?? '—', 'fullMonthNet' => 0, 'earnedNet' => 0, 'factorPct' => 0, 'present' => 0, 'note' => $ctc <= 0 ? 'No CTC set' : 'No company'];
+                    continue;
+                }
+                if (! array_key_exists($company->id, $compCache)) {
+                    $compCache[$company->id] = $this->componentRows($company, $tid);
+                }
+                $team = property_exists($e, 'team') ? $e->team : null;
+                $salComps = $this->resolveComponents($compCache[$company->id], $e->emp_code, $team);
+                $stx = [
+                    'tenant_id' => $tid, 'company_id' => $company->id ?? null,
+                    'branch_id' => (int) ($e->branch_id ?? 0) ?: null,
+                    'pt_state' => (string) ($e->pt_state ?? ''), 'gender' => (string) ($e->gender ?? ''),
+                    'month' => $month, 'esi_lock' => false,
+                ];
+                $stage = (string) ($e->employment_stage ?? '');
+                $sFull = $salComps->isNotEmpty()
+                    ? (AppDataController::computeSlipFromComponents($ctc, $salComps, $rates, $stage, $stx) ?: AppDataController::computeSlip($ctc, $rates, $stage, $stx))
+                    : AppDataController::computeSlip($ctc, $rates, $stage, $stx);
+                $fullNet = (float) ($sFull['net'] ?? 0);
+
+                $present = $this->presentDays($e->emp_code, $month, $today, $tid);
+                $leave = $present > 0 ? $this->paidLeaveDays((int) $e->id, $tid, $month, $today, $holidays, $rates) : 0.0;
+                $paidSoFar = $present > 0 ? max(0.0, min($working, $present + $leave)) : (float) $workingSoFar;
+                $factor = min(1.0, $paidSoFar / $working);
+                if (in_array($lopBasis, ['calendar', 'fixed30'], true)) {
+                    $absent = max(0.0, min($working, $workingSoFar) - $paidSoFar);
+                    $factor = $lopBasis === 'fixed30'
+                        ? max(0.0, min(1.0, (30.0 * $dayOfMonth / max(1, $daysInMonth) - $absent) / 30.0))
+                        : max(0.0, min(1.0, ($dayOfMonth - $absent) / max(1, $daysInMonth)));
+                }
+                $earned = round($fullNet * $factor, 2);
+                $rows[] = ['code' => $e->emp_code, 'name' => $e->name, 'company' => $company->name ?? '—', 'fullMonthNet' => round($fullNet, 2), 'earnedNet' => $earned, 'factorPct' => (int) round($factor * 100), 'present' => $present];
+                $totFull += $fullNet;
+                $totEarned += $earned;
+            }
+            if ($capped) {
+                \Illuminate\Support\Facades\Log::info('liveSalaryAll capped at '.$limit.' employees for tenant '.$tid);
+            }
+
+            return response()->json([
+                'ok' => true,
+                'monthLabel' => now()->format('F Y'),
+                'today' => now()->format('d M Y'),
+                'rows' => $rows,
+                'totFull' => round($totFull, 2),
+                'totEarned' => round($totEarned, 2),
+                'count' => count($rows),
+                'capped' => $capped,
+                'limit' => $limit,
+                'note' => 'Base salary earned till today (basic + allowances − statutory), pro-rated by attendance. Approved commission, overtime, loan EMI and reimbursements show in each employee\'s detailed Live Salary.',
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+        }
+    }
+
+    /**
      * rev178 — SALARY SIMULATOR (Ejaz): "what would the salary be?" for ANY
      * hypothetical inputs, computed by the SAME engine as real payroll
      * (computeSlip / company components / statutory rates / LOP basis).

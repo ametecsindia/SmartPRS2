@@ -692,7 +692,11 @@ class MasterController extends Controller
                 'companies' => DB::table('companies')->when($tid, fn ($x) => $x->where('tenant_id', $tid))->whereNull('deleted_at')->orderBy('name')->pluck('name')->values(),
             ]);
         } catch (\Throwable $e) {
-            return response()->json(['rows' => [], 'error' => $e->getMessage()]);
+            // 7 Aug 2026 test report (item 6) — never leak the raw SQL / SQLSTATE
+            // to the browser. Log the detail for support; show a safe message.
+            \Illuminate\Support\Facades\Log::error('master.list failed', ['type' => $type, 'error' => $e->getMessage()]);
+
+            return response()->json(['rows' => [], 'error' => 'Could not load this list. Please refresh (Ctrl+F5); if it repeats, contact support.']);
         }
     }
 
@@ -819,7 +823,16 @@ class MasterController extends Controller
 
             return response()->json(['ok' => true]);
         } catch (\Throwable $e) {
-            return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+            // 7 Aug 2026 test report (item 6) — the raw SQLSTATE / INSERT string
+            // was being shown in the UI toast (info leak + confusing to users).
+            // Log the real error; return a safe, friendly message.
+            \Illuminate\Support\Facades\Log::error('master.save failed', ['type' => $type, 'error' => $e->getMessage()]);
+            $msg = 'Could not save. Please check your entries and try again.';
+            if (stripos($e->getMessage(), 'truncated') !== false || stripos($e->getMessage(), 'Incorrect') !== false) {
+                $msg = 'Could not save — one of the values is not allowed for its field. Please review and try again.';
+            }
+
+            return response()->json(['ok' => false, 'error' => $msg], 422);
         }
     }
 
