@@ -559,7 +559,13 @@ class SelfOnboardingController extends Controller
         if ($rec->status !== 'verified') {
             return response()->json(['ok' => false, 'error' => 'Mark the submission Verified before approving.'], 422);
         }
-        $res = $this->injectOne($rec);
+        try {
+            $res = $this->injectOne($rec);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('self-onboarding approve/inject failed', ['id' => $id, 'err' => $e->getMessage()]);
+
+            return response()->json(['ok' => false, 'error' => 'Could not create the employee from this submission. Please re-check the HR fields and try again.'], 500);
+        }
 
         return response()->json(['ok' => true, 'emp_code' => $res['emp_code'], 'employee_id' => $res['employee_id'], 'updated' => $res['updated']]);
     }
@@ -698,6 +704,16 @@ class SelfOnboardingController extends Controller
         $hr = $all['hr'] ?? [];
         $tid = $rec->tenant_id;
         $companyId = $rec->company_id;
+        // 10 Aug 2026 — the onboarding link may have been issued by an HR/admin
+        // user whose account has no company_id, so the record carries none and the
+        // employee insert failed ("Column 'company_id' cannot be null"). Fall back
+        // to the tenant's first company, exactly like storeEmployee does.
+        if (! $companyId) {
+            $companyId = DB::table('companies')
+                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                ->whereNull('deleted_at')
+                ->orderBy('id')->value('id');
+        }
         $hrPatch = $this->hrPatch(is_array($hr) ? $hr : [], $tid);
         // 7 Aug 2026 test report (item 12) — carry Mother's & Spouse's name from
         // onboarding into the employee record (columns ensured in AppDataController).

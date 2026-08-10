@@ -20,10 +20,13 @@ use Illuminate\Support\Str;
  */
 class AppDataController extends Controller
 {
+    // Labels MUST match the Add/Edit form's Salary Type dropdown options
+    // ("Only Salary" / "Salary + Commission" / "Only Commission"), otherwise the
+    // read-back value is not a valid option and the select shows blank on edit.
     private const SALARY_TYPE = [
-        'only_salary' => 'Salary',
+        'only_salary' => 'Only Salary',
         'salary_commission' => 'Salary + Commission',
-        'only_commission' => 'Commission',
+        'only_commission' => 'Only Commission',
     ];
 
     /**
@@ -31,14 +34,16 @@ class AppDataController extends Controller
      * (department/designation/branch/team/reporting_manager/team_leader), used as
      * editable overrides. Self-creating per project convention; never fatal.
      */
-    private static function ensureEmployeeColumns(): void
+    public static function ensureEmployeeColumns(): void
     {
         if (! Schema::hasTable('employees')) {
             return;
         }
         // 7 Aug 2026 test report (item 10c / item 2) — new personal & bank fields:
         // mother, national_id (Government ID / SSN), marital_status, bank_branch.
-        $cols = ['department', 'designation', 'branch', 'team', 'reporting_manager', 'team_leader', 'father', 'mother', 'spouse', 'marital_status', 'blood_group', 'id_marks', 'gender', 'address', 'national_id', 'bank_branch', 'pt_state', 'shift', 'employment_stage', 'dra_declared', 'pcc_declared'];
+        $cols = ['department', 'designation', 'branch', 'team', 'reporting_manager', 'team_leader', 'father', 'mother', 'spouse', 'marital_status', 'blood_group', 'id_marks', 'gender', 'address', 'national_id', 'bank_branch', 'pt_state', 'shift', 'employment_stage', 'dra_declared', 'pcc_declared', 'dra_status', 'pcc_status', 'pcc_deadline',
+            // rev190 (item C) — import/export + self-onboarding parity columns.
+            'permanent_address', 'emergency_name', 'emergency_phone', 'esic_no', 'category', 'account_holder'];
         $missing = array_values(array_filter($cols, fn ($c) => ! Schema::hasColumn('employees', $c)));
         if (! $missing) {
             return;
@@ -149,10 +154,16 @@ class AppDataController extends Controller
      * super-admin); null for privileged roles (never scoped). An employee not
      * linked to any record gets a non-matching sentinel so they see nobody else.
      */
-    public static function selfScope(Request $request): ?array
+    public static function selfScope(Request $request, bool $allNonPrivileged = false): ?array
     {
         $user = $request->user();
-        if (! $user || $user->hasAnyRole(['super_admin', 'admin', 'hr_manager']) || ! $user->hasRole('employee')) {
+        if (! $user || $user->hasAnyRole(['super_admin', 'admin', 'hr_manager'])) {
+            return null;
+        }
+        // rev190 — attendance callers pass $allNonPrivileged=true so a Field Agent
+        // (not just the 'employee' role) is also scoped to their own punches; the
+        // Directory/bootstrap callers keep the stricter employee-only default.
+        if (! $allNonPrivileged && ! $user->hasRole('employee')) {
             return null;
         }
         $tid = $user->tenant_id;
@@ -197,6 +208,12 @@ class AppDataController extends Controller
 
         $deptNames = DB::table('departments')->pluck('name', 'id');
         $desigNames = DB::table('designations')->pluck('name', 'id');
+        // 10 Aug 2026 — Salary Schedule labels (id -> "Name — Company") so the
+        // employee's assigned pay schedule shows in the Add/Edit form dropdown.
+        $scheduleLabels = Schema::hasTable('salary_schedules')
+            ? DB::table('salary_schedules')->get(['id', 'name', 'company_name'])
+                ->mapWithKeys(fn ($s) => [$s->id => trim((string) $s->name).' — '.trim((string) ($s->company_name ?? ''))])
+            : collect();
         $compNames = DB::table('companies')->pluck('name', 'id');   // company_id -> NAME (Directory shows the name, never the raw id)
         $branchNames = DB::table('branches')->pluck('name', 'id');
         $teamRows = DB::table('teams')->get(['id', 'name', 'leader_id']);
@@ -208,7 +225,7 @@ class AppDataController extends Controller
         $refsByEmp = DB::table('employee_references')
             ->whereIn('employee_id', $emps->pluck('id'))->get()->groupBy('employee_id');
 
-        $employees = $emps->map(function ($e) use ($deptNames, $desigNames, $compNames, $branchNames, $teamNames, $teamLeaderId, $empNames, $refsByEmp) {
+        $employees = $emps->map(function ($e) use ($deptNames, $desigNames, $compNames, $branchNames, $teamNames, $teamLeaderId, $empNames, $refsByEmp, $scheduleLabels) {
             $refs = ($refsByEmp[$e->id] ?? collect())->map(fn ($r) => [
                 'name' => $r->name, 'relation' => $r->relation, 'aadhaar' => $r->aadhaar,
                 'pan' => $r->pan, 'mobile' => $r->mobile,
@@ -287,8 +304,14 @@ class AppDataController extends Controller
                 'salaryType' => self::SALARY_TYPE[$col('salary_type')] ?? 'Salary',
                 'commPct' => (float) ($col('comm_pct') ?? 0),
                 'shift' => $col('shift') ?? '',   // rev173 — default Working Shift (name)
+                'schedule' => $scheduleLabels[$col('schedule_id')] ?? '',   // 10 Aug 2026 — assigned Salary Schedule
                 'draDeclared' => $col('dra_declared') ?? '',   // F5 — self-onboarding DRA (Yes/No)
                 'pccDeclared' => $col('pcc_declared') ?? '',   // F5 — self-onboarding PCC (Yes/No)
+                // Documents tab (10 Aug 2026) — read back so the edit form shows
+                // the saved values (ucfirst to match the dropdown option casing).
+                'dra' => ucfirst(strtolower((string) ($col('dra_status') ?? ''))),
+                'pcc' => ucfirst(strtolower((string) ($col('pcc_status') ?? ''))),
+                'pccDeadline' => $col('pcc_deadline') ? substr((string) $col('pcc_deadline'), 0, 10) : '',
                 // Biometric Mapping — the employee's ID on the attendance device
                 // (employees.device_user_id). Editable in the Directory profile;
                 // punches whose device code matches it import under this employee.
@@ -738,26 +761,234 @@ class AppDataController extends Controller
     }
 
     /** Download a CSV import template. */
-    public function employeeTemplate()
+    /**
+     * rev190 (item C) — Employee import sample as a native .xlsx with in-cell
+     * DROPDOWNS: Type / Department / Designation / Branch / Team / Shift (from the
+     * tenant's masters) and Gender / Marital / Blood group / Salary type / DRA /
+     * PCC (fixed lists). ALL-CAPS headers, DD-MM-YYYY date hints, Present +
+     * Permanent Address (matches Self-Onboarding), Bank Account Holder before
+     * Account Number, ESIC / Category / Emergency contact columns. Built with
+     * plain ZipArchive — no external library; falls back to CSV if zip is absent.
+     */
+    public function employeeTemplate(Request $request)
     {
-        // rev149 — full template: company / department / designation / branch / team
-        // / dates / WhatsApp / address / password are now included and imported.
-        // 2026-08-05 — biometric_id added (Biometric Mapping): the employee's ID on
-        // the attendance device, saved to employees.device_user_id on import.
-        // 2026-08-05b (Ejaz) — column renamed dpa → dra (the import accepts both),
-        // and dates standardised to DD/MM/YYYY everywhere (form + template).
-        // 7 Aug 2026 test report (item 2) — sample file now includes gender,
-        // marital_status, father, mother, spouse, blood_group, national_id (Govt
-        // ID / SSN), bank_name and bank_branch.
-        $head = 'emp_code,name,type,company,department,designation,branch,team,shift,doj,dob,gender,marital_status,father,mother,spouse,blood_group,national_id,mobile,whatsapp,address,email,ctc,salary_type,pan,uan,bank_name,bank_acc,bank_branch,ifsc,password,biometric_id,dra,pcc';
-        $csv = $head."\n"
-            .'EMP100,Sample Name,office,Acme Recovery Pvt Ltd,Operations,Executive,Head Office,Alpha Team,General Shift,01/04/2024,15/06/1995,Male,Married,Ramesh Sample,Sita Sample,Priya Sample,O+,,+919999999999,+919999999999,"12 MG Road, Hyderabad",sample@company.in,600000,Salary,ABCDE1234F,100200300400,State Bank of India,12345678901,MG Road,SBIN0001234,Welcome@123,1043,Yes,Yes'."\n"
-            .'EMP101,Field Agent Name,field,Acme Recovery Pvt Ltd,Collections,Field Officer,Branch-2,Bravo Team,General Shift,10/05/2024,20/02/1998,Female,Single,Suresh Kumar,Latha Kumar,,B+,,+918888888888,+918888888888,"45 Park Street, Pune",agent@company.in,336000,Salary + Commission,FGHIJ5678K,100200300401,HDFC Bank,10987654321,Park Street,HDFC0005678,Welcome@123,1044,Yes,Yes'."\n";
+        $tenantId = optional($request->user())->tenant_id;
+
+        // Header labels (ALL CAPS). Order mirrors the Add/Edit tabs + Self-Onboarding.
+        $headers = [
+            'EMPLOYEE CODE', 'NAME', 'TYPE', 'COMPANY', 'DEPARTMENT', 'DESIGNATION', 'BRANCH', 'TEAM', 'SHIFT',
+            'DOJ (DD-MM-YYYY)', 'DOB (DD-MM-YYYY)', 'GENDER', 'MARITAL STATUS', 'BLOOD GROUP',
+            'FATHER NAME', 'MOTHER NAME', 'SPOUSE NAME', 'CATEGORY', 'NATIONAL ID / SSN', 'ESIC',
+            'MOBILE', 'WHATSAPP', 'EMERGENCY CONTACT PERSON', 'EMERGENCY CONTACT NUMBER',
+            'PRESENT ADDRESS', 'PERMANENT ADDRESS', 'EMAIL', 'CTC', 'SALARY TYPE', 'PAN', 'UAN',
+            'BANK NAME', 'BANK ACCOUNT HOLDER', 'ACCOUNT NUMBER', 'BANK BRANCH', 'IFSC', 'BIOMETRIC ID', 'DRA', 'PCC',
+        ];
+
+        $sample = [
+            ['EMP100', 'Sample Name', 'Office', 'Acme Recovery Pvt Ltd', 'Operations', 'Executive', 'Head Office', 'Alpha Team', 'General Shift',
+                '01-04-2024', '15-06-1995', 'Male', 'Married', 'O+', 'Ramesh Sample', 'Sita Sample', 'Priya Sample', 'General', 'ABCDE1234F', '31001234567',
+                '+919999999999', '+919999999999', 'Ramesh Sample', '+919888888888',
+                '12 MG Road, Hyderabad', '12 MG Road, Hyderabad', 'sample@company.in', '600000', 'Salary', 'ABCDE1234F', '100200300400',
+                'State Bank of India', 'Sample Name', '12345678901', 'MG Road', 'SBIN0001234', '1043', 'Yes', 'Yes'],
+            ['EMP101', 'Field Agent Name', 'Field', 'Acme Recovery Pvt Ltd', 'Collections', 'Field Officer', 'Branch-2', 'Bravo Team', 'General Shift',
+                '10-05-2024', '20-02-1998', 'Female', 'Single', 'B+', 'Suresh Kumar', 'Latha Kumar', '', 'General', 'FGHIJ5678K', '',
+                '+918888888888', '+918888888888', 'Suresh Kumar', '+918777777777',
+                '45 Park Street, Pune', '45 Park Street, Pune', 'agent@company.in', '336000', 'Salary + Commission', 'FGHIJ5678K', '100200300401',
+                'HDFC Bank', 'Field Agent Name', '10987654321', 'Park Street', 'HDFC0005678', '1044', 'Yes', 'NA'],
+        ];
+
+        // Dynamic dropdown sources from the tenant's masters (names only).
+        $names = function (string $table) use ($tenantId): array {
+            try {
+                if (! Schema::hasTable($table)) {
+                    return [];
+                }
+
+                return DB::table($table)
+                    ->when(Schema::hasColumn($table, 'deleted_at'), fn ($q) => $q->whereNull('deleted_at'))
+                    ->when($tenantId && Schema::hasColumn($table, 'tenant_id'), fn ($q) => $q->where('tenant_id', $tenantId))
+                    ->orderBy('name')->pluck('name')->filter(fn ($n) => trim((string) $n) !== '')->unique()->values()->all();
+            } catch (\Throwable $e) {
+                return [];
+            }
+        };
+        $lists = [
+            ['header' => 'DEPARTMENTS', 'values' => $names('departments')],
+            ['header' => 'DESIGNATIONS', 'values' => $names('designations')],
+            ['header' => 'BRANCHES', 'values' => $names('branches')],
+            ['header' => 'TEAMS', 'values' => $names('teams')],
+            ['header' => 'SHIFTS', 'values' => $names('shifts')],
+        ];
+
+        $idx = array_flip($headers);
+        $listRef = fn (int $listCol, int $count) => 'Lists!$'.self::tplColLetter($listCol + 1).'$2:$'
+            .self::tplColLetter($listCol + 1).'$'.max(2, $count + 1);
+        $validations = [
+            ['col' => $idx['TYPE'], 'inline' => 'Office,Field'],
+            ['col' => $idx['GENDER'], 'inline' => 'Male,Female,Other'],
+            ['col' => $idx['MARITAL STATUS'], 'inline' => 'Single,Married,Divorced,Widowed'],
+            ['col' => $idx['BLOOD GROUP'], 'inline' => 'A+,A-,B+,B-,O+,O-,AB+,AB-'],
+            ['col' => $idx['SALARY TYPE'], 'inline' => 'Salary,Salary + Commission,Commission'],
+            ['col' => $idx['DRA'], 'inline' => 'Yes,No,NA'],
+            ['col' => $idx['PCC'], 'inline' => 'Yes,No,NA'],
+        ];
+        // Only wire a master dropdown when that master actually has rows.
+        foreach ([['DEPARTMENT', 0], ['DESIGNATION', 1], ['BRANCH', 2], ['TEAM', 3], ['SHIFT', 4]] as [$hdr, $lc]) {
+            $cnt = count($lists[$lc]['values']);
+            if ($cnt > 0) {
+                $validations[] = ['col' => $idx[$hdr], 'ref' => $listRef($lc, $cnt)];
+            }
+        }
+
+        $fname = 'smartprs-employee-import-template';
+        if (class_exists(\ZipArchive::class)) {
+            $bytes = self::buildEmployeeXlsx($headers, $sample, $validations, $lists);
+            if ($bytes !== null) {
+                return response($bytes, 200, [
+                    'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    'Content-Disposition' => 'attachment; filename="'.$fname.'.xlsx"',
+                    'Content-Length' => (string) strlen($bytes),
+                ]);
+            }
+        }
+
+        // CSV fallback (no dropdowns possible in CSV, but every column is present).
+        $csvLine = function (array $vals): string {
+            return implode(',', array_map(function ($v) {
+                $v = (string) $v;
+
+                return preg_match('/[",\r\n]/', $v) ? '"'.str_replace('"', '""', $v).'"' : $v;
+            }, $vals))."\r\n";
+        };
+        $csv = "\xEF\xBB\xBF".$csvLine($headers);
+        foreach ($sample as $row) {
+            $csv .= $csvLine($row);
+        }
 
         return response($csv, 200, [
-            'Content-Type' => 'text/csv',
-            'Content-Disposition' => 'attachment; filename="smartprs-employee-import-template.csv"',
+            'Content-Type' => 'text/csv; charset=UTF-8',
+            'Content-Disposition' => 'attachment; filename="'.$fname.'.csv"',
         ]);
+    }
+
+    /** A→Z, AA→… column letter from a 1-based index. */
+    private static function tplColLetter(int $n): string
+    {
+        $s = '';
+        while ($n > 0) {
+            $m = ($n - 1) % 26;
+            $s = chr(65 + $m).$s;
+            $n = intdiv($n - 1, 26);
+        }
+
+        return $s;
+    }
+
+    /** Inline-string sheetData rows from a 2-D array. */
+    private static function tplSheetRows(array $rows): string
+    {
+        $esc = fn ($v) => htmlspecialchars((string) $v, ENT_QUOTES | ENT_XML1, 'UTF-8');
+        $xml = '';
+        $rn = 0;
+        foreach ($rows as $cells) {
+            $rn++;
+            $cx = '';
+            $cn = 0;
+            foreach ($cells as $val) {
+                $cn++;
+                $cx .= '<c r="'.self::tplColLetter($cn).$rn.'" t="inlineStr"><is><t xml:space="preserve">'.$esc($val).'</t></is></c>';
+            }
+            $xml .= '<row r="'.$rn.'">'.$cx.'</row>';
+        }
+
+        return $xml;
+    }
+
+    /**
+     * Two-sheet .xlsx: "Employees" (headers + samples + list dropdowns) and a
+     * hidden "Lists" sheet holding the dynamic dropdown sources. Returns the file
+     * bytes, or null if the zip could not be assembled (caller falls back to CSV).
+     */
+    private static function buildEmployeeXlsx(array $headers, array $sampleRows, array $validations, array $lists): ?string
+    {
+        $lastCol = self::tplColLetter(max(1, count($headers)));
+        $dataRows = 1 + count($sampleRows);
+        $dim = 'A1:'.$lastCol.max(1, $dataRows);
+
+        $allRows = array_merge([$headers], $sampleRows);
+        $dvXml = '';
+        if ($validations) {
+            $dvXml = '<dataValidations count="'.count($validations).'">';
+            foreach ($validations as $v) {
+                $colL = self::tplColLetter($v['col'] + 1);
+                $f1 = isset($v['inline']) ? '"'.$v['inline'].'"' : $v['ref'];
+                $dvXml .= '<dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" sqref="'.$colL.'2:'.$colL.'1000">'
+                    .'<formula1>'.htmlspecialchars($f1, ENT_QUOTES | ENT_XML1, 'UTF-8').'</formula1></dataValidation>';
+            }
+            $dvXml .= '</dataValidations>';
+        }
+        $sheet1 = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            .'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            .'<dimension ref="'.$dim.'"/>'
+            .'<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+            .'<sheetData>'.self::tplSheetRows($allRows).'</sheetData>'
+            .'<autoFilter ref="'.$dim.'"/>'.$dvXml.'</worksheet>';
+
+        $maxLen = 0;
+        foreach ($lists as $l) {
+            $maxLen = max($maxLen, count($l['values']));
+        }
+        $listRows = [array_map(fn ($l) => $l['header'], $lists)];
+        for ($i = 0; $i < $maxLen; $i++) {
+            $row = [];
+            foreach ($lists as $l) {
+                $row[] = $l['values'][$i] ?? '';
+            }
+            $listRows[] = $row;
+        }
+        $sheet2 = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            .'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            .'<sheetData>'.self::tplSheetRows($listRows).'</sheetData></worksheet>';
+
+        $contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            .'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            .'<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            .'<Default Extension="xml" ContentType="application/xml"/>'
+            .'<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            .'<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            .'<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            .'</Types>';
+        $rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            .'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            .'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            .'</Relationships>';
+        $workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            .'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            .'<sheets><sheet name="Employees" sheetId="1" r:id="rId1"/><sheet name="Lists" sheetId="2" state="hidden" r:id="rId2"/></sheets></workbook>';
+        $workbookRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            .'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            .'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            .'<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>'
+            .'</Relationships>';
+
+        $tmp = tempnam(sys_get_temp_dir(), 'xlsx');
+        $zip = new \ZipArchive();
+        if ($zip->open($tmp, \ZipArchive::OVERWRITE) !== true) {
+            @unlink($tmp);
+
+            return null;
+        }
+        $zip->addFromString('[Content_Types].xml', $contentTypes);
+        $zip->addFromString('_rels/.rels', $rels);
+        $zip->addFromString('xl/workbook.xml', $workbook);
+        $zip->addFromString('xl/_rels/workbook.xml.rels', $workbookRels);
+        $zip->addFromString('xl/worksheets/sheet1.xml', $sheet1);
+        $zip->addFromString('xl/worksheets/sheet2.xml', $sheet2);
+        $zip->close();
+        $bytes = @file_get_contents($tmp);
+        @unlink($tmp);
+
+        return $bytes === false ? null : $bytes;
     }
 
     /** Download a branded PDF payslip for an employee (computed from CTC). */
@@ -2367,6 +2598,12 @@ class AppDataController extends Controller
             if ($raw === '') {
                 return null;
             }
+            // 10 Aug 2026 — reject values with characters that are not part of a
+            // phone number (e.g. "9391024484rrr"): the old check stripped ALL
+            // non-digits first, so letters slipped through and got saved.
+            if (preg_match('/[^0-9+\-\s()]/', $raw)) {
+                return $label.' looks invalid — remove letters/symbols and enter a 10-digit mobile number (starting 6-9).';
+            }
             $digits = preg_replace('/\D+/', '', $raw);
             // strip a leading country code (91) or trunk 0 so 10 real digits remain.
             if (strlen($digits) === 12 && str_starts_with($digits, '91')) {
@@ -2386,9 +2623,22 @@ class AppDataController extends Controller
             }
         }
 
+        // 10 Aug 2026 — the `pan` column is 10 chars; an over-length value (e.g.
+        // "ACQPH7766766") threw a raw "Data too long" SQL error and the WHOLE save
+        // was lost with an unhelpful message. Validate the PAN format up front.
+        $panRaw = strtoupper(trim((string) ($e['pan'] ?? '')));
+        if ($panRaw !== '' && ! preg_match('/^[A-Z]{5}[0-9]{4}[A-Z]$/', $panRaw)) {
+            return response()->json(['ok' => false, 'error' => 'PAN looks invalid — it must be 10 characters in the format ABCDE1234F.'], 422);
+        }
+        $e['pan'] = $panRaw ?: null;
+
+        // Accept BOTH the dropdown labels ("Only Salary"/"Only Commission") and the
+        // short forms, so "Only Commission" no longer silently mis-maps to salary.
         $salaryMap = [
+            'Only Salary' => 'only_salary',
             'Salary' => 'only_salary',
             'Salary + Commission' => 'salary_commission',
+            'Only Commission' => 'only_commission',
             'Commission' => 'only_commission',
         ];
         $type = stripos($e['type'] ?? '', 'field') !== false ? 'field' : 'office';
@@ -2464,6 +2714,12 @@ class AppDataController extends Controller
             // F5 — self-onboarding compliance self-declaration (Yes/No), normalised.
             'dra_declared' => self::yesNo($e['draDeclared'] ?? null),
             'pcc_declared' => self::yesNo($e['pccDeclared'] ?? null),
+            // Documents tab (10 Aug 2026) — DRA Certificate status, PCC status &
+            // PCC deadline were on the form but NEVER written, so they blanked
+            // after a refresh. Stored lowercase to match ComplianceController.
+            'dra_status' => strtolower(trim((string) ($e['dra'] ?? ''))) ?: null,
+            'pcc_status' => strtolower(trim((string) ($e['pcc'] ?? ''))) ?: null,
+            'pcc_deadline' => trim((string) ($e['pccDeadline'] ?? '')) ?: null,
             'status' => (strtolower(trim((string) ($e['status'] ?? 'active'))) === 'inactive') ? 'inactive' : 'active',   // rev183 — Active/Inactive from the form
             'address' => $e['addr'] ?? ($e['address'] ?? null),
             'dob' => $e['dob'] ?? null,
@@ -2501,6 +2757,20 @@ class AppDataController extends Controller
             $goV = strtolower(trim((string) $e['geoOutside']));
             $payload['geo_outside'] = in_array($goV, ['strict', '1km', '2km'], true) ? $goV : null;
         }
+        // 10 Aug 2026 — Salary Schedule assignment: resolve the form's
+        // "Name — Company" string to a salary_schedules.id so the employee's pay
+        // schedule persists (employees.schedule_id); blank clears it.
+        if (array_key_exists('schedule', $e) && Schema::hasColumn('employees', 'schedule_id')) {
+            $schedId = null;
+            $schedRaw = trim((string) $e['schedule']);
+            if ($schedRaw !== '' && Schema::hasTable('salary_schedules')) {
+                $schedName = trim(explode(' — ', $schedRaw)[0]);
+                $schedId = DB::table('salary_schedules')
+                    ->when($tenantId && Schema::hasColumn('salary_schedules', 'tenant_id'), fn ($q) => $q->where('tenant_id', $tenantId))
+                    ->where('name', $schedName)->orderByDesc('id')->value('id');
+            }
+            $payload['schedule_id'] = $schedId;
+        }
         // DATE columns reject unknown shapes — normalise both (null when unreadable).
         $payload['doj'] = self::normDateWide($payload['doj']);
         $payload['dob'] = self::normDateWide($payload['dob']);
@@ -2525,6 +2795,7 @@ class AppDataController extends Controller
                 return response()->json(['ok' => false, 'error' => 'Employee ID "'.$code.'" is already in use — choose a different one.'], 422);
             }
         }
+        try {
         if ($existing) {
             $oldCode = $existing->emp_code;
             DB::table('employees')->where('id', $existing->id)->update($payload);
@@ -2579,6 +2850,21 @@ class AppDataController extends Controller
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
+        }
+        } catch (\Illuminate\Database\QueryException $qe) {
+            // 10 Aug 2026 — the employee row is written directly (every payload key
+            // must be a real column of the right width). A too-long / bad value used
+            // to surface as a raw 500 and the generic "server rejected" toast, losing
+            // the whole edit. Convert it to an actionable, field-named message.
+            $col = null;
+            if (preg_match("/column '([^']+)'/", $qe->getMessage(), $m)) {
+                $col = $m[1];
+            }
+            $friendly = $col
+                ? 'Couldn\'t save — the value for "'.$col.'" is invalid or too long. Please correct that field and save again.'
+                : 'Couldn\'t save — one of the values is invalid or too long. Please check the form and save again.';
+
+            return response()->json(['ok' => false, 'error' => $friendly], 422);
         }
 
         return response()->json(['ok' => true, 'id' => $empId, 'emp_code' => $code]);

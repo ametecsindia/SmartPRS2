@@ -58,10 +58,33 @@ class EmployeeImportService
         'uan' => ['uan', 'pfnumber', 'pf', 'uannumber'],
         'bank_acc' => ['bankacc', 'bankaccount', 'accountno', 'accountnumber'],
         'ifsc' => ['ifsc', 'ifsccode'],
-        'address' => ['address'],
+        'address' => ['address', 'presentaddress', 'currentaddress'],
         'device_user_id' => ['biometricid', 'deviceuserid', 'bioid', 'biometricemployeeid'],
         'dpa' => ['dpa', 'dra', 'drapcc', 'dpapcc'],
         'pcc' => ['pcc', 'policeclearance'],
+        // rev190 — the wizard was silently dropping every column below (present in
+        // the sample template but absent from this whitelist), so Gender / Marital /
+        // Blood group / parents / bank name etc. never imported. Brought to parity
+        // with the one-shot importer's mapping.
+        'type' => ['type', 'employmenttype', 'emptype'],
+        'gender' => ['gender', 'sex'],
+        'marital_status' => ['maritalstatus', 'marital'],
+        'blood_group' => ['bloodgroup', 'blood'],
+        'father' => ['father', 'fathername', 'fathersname'],
+        'mother' => ['mother', 'mothername', 'mothersname'],
+        'spouse' => ['spouse', 'spousename'],
+        'national_id' => ['nationalid', 'nationalidssn', 'ssn', 'governmentid', 'govtid', 'aadhaar', 'aadhar'],
+        'bank_name' => ['bankname', 'bank'],
+        'bank_branch' => ['bankbranch', 'branchname'],
+        // rev190 (item C) — the new sample-template columns. Field key = the real
+        // employees column so payload() writes it directly (present address is the
+        // legacy `address` column; permanent address is its own).
+        'permanent_address' => ['permanentaddress', 'permaddress'],
+        'category' => ['category'],
+        'esic_no' => ['esic', 'esicno', 'esicnumber'],
+        'emergency_name' => ['emergencycontactperson', 'emergencyname', 'emergencyperson', 'emergencycontact'],
+        'emergency_phone' => ['emergencycontactnumber', 'emergencyphone', 'emergencynumber', 'emergencymobile'],
+        'account_holder' => ['bankaccountholder', 'accountholder', 'accountholdername', 'bankholder'],
     ];
 
     /** Fields a row cannot be imported without. */
@@ -147,7 +170,9 @@ class EmployeeImportService
     {
         $map = [];
         foreach ($headers as $h) {
-            $norm = self::norm($h);
+            // rev190 (item C) — strip a parenthetical hint like "DOJ (DD-MM-YYYY)"
+            // so the header still matches its field alias ("doj").
+            $norm = self::norm(preg_replace('/\(.*?\)/', '', $h));
             foreach (self::FIELDS as $field => $aliases) {
                 if (in_array($norm, $aliases, true)) {
                     $map[$h] = $field;
@@ -182,6 +207,14 @@ class EmployeeImportService
     private static function process(string $token, array $mapping, string $dupMode, ?int $tid, ?string $by, bool $write): array
     {
         self::ensureSchema();
+        // rev190 — make sure the personal/bank/compliance columns exist before we
+        // build payloads, otherwise those fields are silently dropped on import.
+        try {
+            \App\Http\Controllers\AppDataController::ensureEmployeeColumns();
+        } catch (\Throwable $e) {
+            // best-effort; import still runs on whatever columns exist
+        }
+        self::$empCols = null;   // re-read the (now complete) column list
         $dupMode = in_array($dupMode, ['skip', 'update', 'create'], true) ? $dupMode : 'update';
 
         $job = DB::table('employee_import_jobs')->where('token', $token)
@@ -271,7 +304,11 @@ class EmployeeImportService
             $existing = null;
             if ($code !== '' && Schema::hasTable('employees')) {
                 $existing = DB::table('employees')->when($tid, fn ($q) => $q->where('tenant_id', $tid))
-                    ->where('emp_code', $code)->first();
+                    ->where('emp_code', $code)
+                    // rev190 — prefer a live row over a soft-deleted ghost of the
+                    // same code, so we update/restore the right one (no duplicate).
+                    ->when(Schema::hasColumn('employees', 'deleted_at'), fn ($q) => $q->orderByRaw('deleted_at IS NULL DESC'))
+                    ->first();
             }
 
             if ($existing && $dupMode === 'skip') {
@@ -314,7 +351,20 @@ class EmployeeImportService
             $updated = 0;
             DB::transaction(function () use ($toCreate, $toUpdate, &$created, &$updated) {
                 foreach ($toUpdate as $u) {
-                    DB::table('employees')->where('id', $u['id'])->update($u['payload'] + ['updated_at' => now()]);
+                    $patch = $u['payload'] + ['updated_at' => now()];
+                    // rev190 — an import must yield a VISIBLE employee. If this
+                    // emp_code matched a row that was soft-deleted or moved to
+                    // "Old data" (archived) in an earlier test cycle, the update
+                    // would silently touch that hidden ghost and the person would
+                    // never appear. Restore visibility so re-importing brings them
+                    // back to the active Directory / export.
+                    if (Schema::hasColumn('employees', 'deleted_at')) {
+                        $patch['deleted_at'] = null;
+                    }
+                    if (Schema::hasColumn('employees', 'archived_at')) {
+                        $patch['archived_at'] = null;
+                    }
+                    DB::table('employees')->where('id', $u['id'])->update($patch);
                     $updated++;
                 }
                 foreach ($toCreate as $c) {
@@ -361,10 +411,17 @@ class EmployeeImportService
             $out['emp_code'] = $v['emp_code'];
         }
         foreach (['email', 'mobile', 'whatsapp', 'address', 'pan', 'uan', 'bank_acc', 'ifsc',
-            'department', 'designation', 'branch', 'team', 'shift', 'device_user_id'] as $f) {
+            'department', 'designation', 'branch', 'team', 'shift', 'device_user_id',
+            'gender', 'marital_status', 'blood_group', 'father', 'mother', 'spouse',
+            'national_id', 'bank_name', 'bank_branch',
+            'permanent_address', 'category', 'esic_no', 'emergency_name', 'emergency_phone', 'account_holder'] as $f) {
             if (! empty($v[$f])) {
                 $out[$f] = $v[$f];
             }
+        }
+        // office / field employment type — same normalisation as the one-shot importer.
+        if (! empty($v['type'])) {
+            $out['type'] = stripos((string) $v['type'], 'field') !== false ? 'field' : 'office';
         }
         foreach (['doj', 'dob'] as $d) {
             if (! empty($v[$d]) && ($x = self::date($v[$d]))) {
@@ -527,6 +584,11 @@ class EmployeeImportService
         }
         if (in_array($z, ['no', 'n', 'false', '0'], true)) {
             return false;
+        }
+        // rev190 (item C) — the DRA/PCC dropdown offers "NA"; treat it (and blanks)
+        // as "no declaration", not an error.
+        if (in_array($z, ['na', 'n/a', 'notapplicable', 'not applicable', '-'], true)) {
+            return null;
         }
 
         return 'invalid';

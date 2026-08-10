@@ -35,11 +35,54 @@ class Edition
         } catch (\Throwable $e) {
         }
 
-        // config-first so `php artisan config:cache` can never blank the flag
-        // (env() returns null once the config is cached).
-        $e = strtolower(trim((string) (config('smartprs.edition') ?? env('SMARTPRS_EDITION', 'saas'))));
+        static $base = null;
+        if ($base !== null) {
+            return $base;
+        }
+        // 8 Aug 2026 (Ejaz — single product): editions are unified (see hiddenNavIds
+        // / blockedPatterns below), so this value only needs to tell SaaS apart from
+        // an on-prem client. Read the build's OWN .env DIRECTLY:
+        // `config('smartprs.edition')` is frozen at `php artisan config:cache` time,
+        // so a client build whose cache was ever made under a different edition (e.g.
+        // cloned from another folder) would report the wrong one forever — no .env
+        // edit fixing it until config:clear. Reading .env is the reliable source.
+        $e = self::envEdition() ?? strtolower(trim((string) (config('smartprs.edition') ?? env('SMARTPRS_EDITION', 'saas'))));
 
-        return in_array($e, ['saas', 'l1', 'l2', 'l3'], true) ? $e : 'saas';
+        return $base = (in_array($e, ['saas', 'l1', 'l2', 'l3'], true) ? $e : 'saas');
+    }
+
+    /** SMARTPRS_EDITION read straight from the build's .env file (bypasses the
+     *  cached config). Null if the file/line is absent. Cached per request. */
+    private static function envEdition(): ?string
+    {
+        static $done = false;
+        static $val = null;
+        if ($done) {
+            return $val;
+        }
+        $done = true;
+        try {
+            $path = base_path('.env');
+            if (is_file($path)) {
+                foreach (file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $ln) {
+                    $ln = trim($ln);
+                    if ($ln === '' || $ln[0] === '#' || stripos($ln, 'SMARTPRS_EDITION') !== 0) {
+                        continue;
+                    }
+                    $eq = strpos($ln, '=');
+                    if ($eq !== false) {
+                        $v = strtolower(trim(substr($ln, $eq + 1), " \t\"'"));
+                        if (in_array($v, ['saas', 'l1', 'l2', 'l3'], true)) {
+                            $val = $v;
+                        }
+                        break;
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+        }
+
+        return $val;
     }
 
     public static function isOnPrem(): bool
@@ -47,10 +90,10 @@ class Edition
         return self::current() !== 'saas';
     }
 
-    /** Feature level: saas behaves as full (3). */
+    /** Feature level. 8 Aug 2026 (Ejaz — single product): every edition is full. */
     public static function level(): int
     {
-        return ['saas' => 3, 'l1' => 1, 'l2' => 2, 'l3' => 3][self::current()];
+        return 3;
     }
 
     // ---- Module → nav-id sets (mirrors the licensing decision document) ----
@@ -75,16 +118,12 @@ class Edition
 
     public static function hiddenNavIds(): array
     {
-        switch (self::current()) {
-            case 'l1':
-                return array_values(array_unique(array_merge(self::SAAS_ONLY, self::DNA, self::L2_MODULES)));
-            case 'l2':
-                return array_values(array_unique(array_merge(self::SAAS_ONLY, self::DNA)));
-            case 'l3':
-                return self::SAAS_ONLY;
-            default:
-                return [];
-        }
+        // 8 Aug 2026 (Ejaz — FINAL: single product, all features, licensed by user
+        // count). Every on-prem edition (l1/l2/l3) now shows ALL modules; only the
+        // SaaS-platform surfaces (tenant billing + Super Admin) stay hidden on a
+        // client install. The old per-edition DNA / L2_MODULES gating is retired
+        // (constants kept for reference / easy revert).
+        return self::current() === 'saas' ? [] : self::SAAS_ONLY;
     }
 
     // ---- Server-side endpoint blocking (regex on relative path) ------------
@@ -129,21 +168,14 @@ class Edition
 
     public static function blockedPatterns(): array
     {
-        switch (self::current()) {
-            case 'l1':
-                return array_merge(self::BLOCK_SAAS, self::BLOCK_DNA, self::BLOCK_L2);
-            case 'l2':
-                return array_merge(self::BLOCK_SAAS, self::BLOCK_DNA);
-            case 'l3':
-                return self::BLOCK_SAAS;
-            default:
-                return [];
-        }
+        // 8 Aug 2026 (Ejaz — single product): on-prem clients block only the SaaS
+        // platform / Super-Admin endpoints; every product module is reachable.
+        return self::current() === 'saas' ? [] : self::BLOCK_SAAS;
     }
 
-    /** Friendly label for the 403 message / About screens. */
+    /** Friendly label. 8 Aug 2026 (Ejaz — single product): one name, no L1/L2/L3. */
     public static function label(): string
     {
-        return ['saas' => 'SmartPRS SaaS', 'l1' => 'SmartPRS-L1 (Core HR)', 'l2' => 'SmartPRS-L2 (Advanced)', 'l3' => 'SmartPRS-L3 (Collections DNA)'][self::current()];
+        return 'SmartPRS';
     }
 }

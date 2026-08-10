@@ -28,50 +28,72 @@ class EmployeeExportController extends Controller
     // Blood Group, Government ID (SSN), Shift, Salary Schedule, Bank Branch.
     // Columns that do not exist on a given install are silently skipped (see
     // effectiveMap()), so a header appears the moment its field is added.
+    // 10 Aug 2026 (Ejaz) — the FIRST block mirrors the Employee Import template
+    // EXACTLY (same ALL-CAPS headers, same order, re-importable values), so an
+    // exported file can be edited and re-imported without remapping. The second
+    // block adds read-only reference columns the import template does not carry.
     private const MAP = [
-        'Employee Code' => 'emp_code',
-        'Name' => 'name',
-        'Gender' => 'gender',
-        'Date of Birth' => 'dob',
-        'Marital Status' => 'marital_status',
-        'Father Name' => 'father',
-        'Mother Name' => 'mother',
-        'Spouse' => 'spouse',
-        'Blood Group' => 'blood_group',
-        'Mobile' => 'mobile',
-        'WhatsApp' => 'whatsapp',
-        'Email' => 'email',
-        'Government ID / SSN' => 'national_id',
-        'Address' => 'address',
-        'Department' => 'department',
-        'Designation' => 'designation',
-        'Branch' => 'branch',
-        'Team' => 'team',
-        'Company' => '__company',
-        'Type' => 'type',
-        'Shift' => 'shift',
-        'Employment Stage' => 'employment_stage',
-        'Reporting Manager' => 'reporting_manager',
-        'Date of Joining' => 'doj',
-        'CTC (annual ₹)' => 'ctc',
-        'Salary Type' => 'salary_type',
-        'Salary Schedule' => 'salary_schedule',
+        // ---- import-template columns (header + order match the template) ----
+        'EMPLOYEE CODE' => 'emp_code',
+        'NAME' => 'name',
+        'TYPE' => 'type',
+        'COMPANY' => '__company',
+        'DEPARTMENT' => 'department',
+        'DESIGNATION' => 'designation',
+        'BRANCH' => 'branch',
+        'TEAM' => 'team',
+        'SHIFT' => 'shift',
+        'DOJ (DD-MM-YYYY)' => '__doj',
+        'DOB (DD-MM-YYYY)' => '__dob',
+        'GENDER' => 'gender',
+        'MARITAL STATUS' => 'marital_status',
+        'BLOOD GROUP' => 'blood_group',
+        'FATHER NAME' => 'father',
+        'MOTHER NAME' => 'mother',
+        'SPOUSE NAME' => 'spouse',
+        'CATEGORY' => 'category',
+        'NATIONAL ID / SSN' => 'national_id',
+        'ESIC' => 'esic_no',
+        'MOBILE' => 'mobile',
+        'WHATSAPP' => 'whatsapp',
+        'EMERGENCY CONTACT PERSON' => 'emergency_name',
+        'EMERGENCY CONTACT NUMBER' => 'emergency_phone',
+        'PRESENT ADDRESS' => 'address',
+        'PERMANENT ADDRESS' => 'permanent_address',
+        'EMAIL' => 'email',
+        'CTC' => 'ctc',
+        'SALARY TYPE' => '__salaryType',
+        'PAN' => 'pan',
+        'UAN' => 'uan',
+        'BANK NAME' => 'bank_name',
+        'BANK ACCOUNT HOLDER' => 'account_holder',
+        'ACCOUNT NUMBER' => 'bank_acc',
+        'BANK BRANCH' => 'bank_branch',
+        'IFSC' => 'ifsc',
+        'BIOMETRIC ID' => 'device_user_id',
+        'DRA' => '__dra',
+        'PCC' => '__pcc',
+        // ---- extra reference columns (not part of the import template) ----
+        'Salary Schedule' => '__schedule',
         'Commission %' => 'comm_pct',
         'PF Applicable' => 'pf_applicable',
         'ESI Applicable' => 'esi_applicable',
         'PT State' => 'pt_state',
-        'UAN' => 'uan',
-        'PAN' => 'pan',
+        'Employment Stage' => 'employment_stage',
+        'Reporting Manager' => 'reporting_manager',
         'DRA Status' => 'dra_status',
         'DRA Expiry' => 'dra_expiry',
         'PCC Status' => 'pcc_status',
+        'PCC Deadline' => 'pcc_deadline',
         'PCC Expiry' => 'pcc_expiry',
-        'Biometric ID' => 'device_user_id',
-        'Bank Name' => 'bank_name',
-        'Bank Branch' => 'bank_branch',
-        'Bank A/C' => 'bank_acc',
-        'IFSC' => 'ifsc',
         'Status' => 'status',
+    ];
+
+    /** Column code (only_salary…) → the label used by the import template + form. */
+    private const SALARY_TYPE_LABEL = [
+        'only_salary' => 'Only Salary',
+        'salary_commission' => 'Salary + Commission',
+        'only_commission' => 'Only Commission',
     ];
 
     /** MAP filtered to columns that actually exist on this install (denormalised
@@ -79,10 +101,21 @@ class EmployeeExportController extends Controller
      *  with no backing column from showing a permanently blank column. */
     private static function effectiveMap(): array
     {
-        $keepAlways = ['__company', 'department', 'designation', 'branch', 'team', 'reporting_manager'];
+        $keepAlways = ['department', 'designation', 'branch', 'team', 'reporting_manager'];
         $out = [];
         foreach (self::MAP as $header => $prop) {
-            if (in_array($prop, $keepAlways, true) || Schema::hasColumn('employees', $prop)) {
+            // __schedule resolves employees.schedule_id → the schedule's name, so
+            // it is only meaningful when that column exists on this install.
+            if ($prop === '__schedule') {
+                if (Schema::hasColumn('employees', 'schedule_id')) {
+                    $out[$header] = $prop;
+                }
+
+                continue;
+            }
+            // Every other synthetic (__company / __salaryType / __dra / __pcc /
+            // __doj / __dob) is always computed in rows(), so always keep it.
+            if (str_starts_with($prop, '__') || in_array($prop, $keepAlways, true) || Schema::hasColumn('employees', $prop)) {
                 $out[$header] = $prop;
             }
         }
@@ -94,6 +127,15 @@ class EmployeeExportController extends Controller
     {
         if ($deny = ApprovalService::denyUnlessRole($request, ['admin', 'hr_manager'])) {
             return $deny;
+        }
+
+        // rev190 — guarantee the personal/bank/compliance columns exist so every
+        // header (ESIC, Category, Emergency contacts, Permanent Address, Account
+        // Holder, …) is emitted, not silently dropped by effectiveMap().
+        try {
+            AppDataController::ensureEmployeeColumns();
+        } catch (\Throwable $e) {
+            // best-effort; export still runs on whatever columns exist
         }
 
         $format = strtolower(trim((string) $request->query('format', 'csv')));
@@ -140,6 +182,19 @@ class EmployeeExportController extends Controller
             // companies table optional
         }
 
+        // schedule_id → "Name — Company" label, matching the Directory display.
+        $scheduleNames = [];
+        try {
+            if (Schema::hasTable('salary_schedules')) {
+                foreach (DB::table('salary_schedules')->get(['id', 'name', 'company_name']) as $s) {
+                    $scheduleNames[$s->id] = trim((string) $s->name)
+                        .($s->company_name ? ' — '.trim((string) $s->company_name) : '');
+                }
+            }
+        } catch (\Throwable $e) {
+            // salary_schedules table optional
+        }
+
         $q = DB::table('employees')
             ->when($tid, fn ($x) => $x->where('tenant_id', $tid))
             ->when($companyId, fn ($x) => $x->where('company_id', $companyId))
@@ -158,6 +213,20 @@ class EmployeeExportController extends Controller
             foreach ($map as $header => $prop) {
                 if ($prop === '__company') {
                     $val = $companyNames[$r['company_id'] ?? 0] ?? '';
+                } elseif ($prop === '__schedule') {
+                    $val = $scheduleNames[$r['schedule_id'] ?? 0] ?? '';
+                } elseif ($prop === '__salaryType') {
+                    // Emit the import-template label, not the raw column code.
+                    $val = self::SALARY_TYPE_LABEL[$r['salary_type'] ?? ''] ?? '';
+                } elseif ($prop === '__dra') {
+                    $val = $r['dra_declared'] ?? '';   // Yes / No, matching the import DRA column
+                } elseif ($prop === '__pcc') {
+                    $val = $r['pcc_declared'] ?? '';
+                } elseif ($prop === '__doj' || $prop === '__dob') {
+                    // Import accepts DD-MM-YYYY; convert the stored Y-m-d so the value
+                    // matches its header hint and re-imports cleanly.
+                    $raw = trim((string) ($r[$prop === '__doj' ? 'doj' : 'dob'] ?? ''));
+                    $val = preg_match('/^(\d{4})-(\d{2})-(\d{2})/', $raw, $m) ? ($m[3].'-'.$m[2].'-'.$m[1]) : $raw;
                 } else {
                     $val = $r[$prop] ?? '';
                 }

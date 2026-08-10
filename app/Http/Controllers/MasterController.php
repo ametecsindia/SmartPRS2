@@ -165,8 +165,8 @@ class MasterController extends Controller
             'salary-schedules' => [
                 'table' => 'salary_schedules',
                 'cols' => ['name' => 'string', 'company_name' => 'string', 'pay_cycle' => 'string',
-                    'pay_day' => 'string', 'applicable_to' => 'string', 'status' => 'string'],
-                'fields' => ['name', 'company_name', 'pay_cycle', 'pay_day', 'applicable_to', 'status'],
+                    'cutoff_day' => 'int', 'pay_day' => 'string', 'applicable_to' => 'string', 'status' => 'string'],
+                'fields' => ['name', 'company_name', 'pay_cycle', 'cutoff_day', 'pay_day', 'applicable_to', 'status'],
                 'label' => 'Schedule',
                 'order' => 'name',
                 'required' => ['name', 'company_name'],

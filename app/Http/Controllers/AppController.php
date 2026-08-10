@@ -486,6 +486,7 @@ CSS;
                 if (Array.isArray(live.designations)) { DB.designations = live.designations; }
                 if (Array.isArray(live.teams)) { DB.teams = live.teams; }
                 if (Array.isArray(live.shifts)) { DB.shifts = live.shifts; }   // rev173 - Working Shifts
+                if (Array.isArray(live.salarySchedules)) { DB.salarySchedules = live.salarySchedules; }   // rev190 - Salary Schedule dropdown
                 if (Array.isArray(live.tenants) && live.tenants.length) { DB.tenants = live.tenants; }
                 if (Array.isArray(live.payrollRuns) && live.payrollRuns.length) { DB.payrollRuns = live.payrollRuns; }
                 if (Array.isArray(live.payslips)) { window.__PAYSLIPS = live.payslips; }
@@ -501,7 +502,7 @@ CSS;
         // the live feed was unavailable. Empty is fine; the data overlay + master
         // save sync fill them. This prevents the "form blows up" class of errors.
         try {
-            ['companies', 'branchesC', 'departments', 'designations', 'teams', 'shifts'].forEach(function (k) {
+            ['companies', 'branchesC', 'departments', 'designations', 'teams', 'shifts', 'salarySchedules'].forEach(function (k) {
                 if (!Array.isArray(DB[k])) { DB[k] = []; }
             });
         } catch (e) {}
@@ -517,6 +518,7 @@ CSS;
         safe(function () { wireStatePersist(cfg); });
         safe(function () { if (seedState && typeof DB === 'object') { syncState(cfg); } });
         safe(function () { wireEmployeeSave(cfg); });
+        safe(function () { wireEmpFormExtras(); });
         safe(function () { wireGenericEdit(); });
         safe(function () { wireCustomScreens(); });
         safe(function () { wireImport(cfg); });
@@ -533,6 +535,17 @@ CSS;
         safe(function () { injectMobileDevNav(cfg); });
         safe(function () { injectTransfersNav(); });
         safe(function () { injectLiveSalaryNav(cfg); });
+        safe(function () { hideAiForEmployee(cfg); });
+        // 10 Aug 2026 (Ejaz) — the Directory "Export" button used the prototype's
+        // client-side expCsv(), which dumped only ~17 in-browser columns. Point it
+        // at the full server export (all import-template columns + extras).
+        safe(function () {
+            window.expCsv = function () {
+                var a = document.createElement('a');
+                a.href = cfg.empExportUrl + '?format=csv';
+                document.body.appendChild(a); a.click(); a.remove();
+            };
+        });
         safe(function () { injectPayLedgerNav(); });
         safe(function () { injectWaTplNav(); });
         // rev 107: on-prem "Updates & Licence" under Administration.
@@ -1221,6 +1234,15 @@ CSS;
         }
         card.__wired = true;
     }
+    // rev190 (Ejaz): the plain Employee login must NOT have the AI Assistant —
+    // it answered queries using the full in-browser DB (every employee's data),
+    // leaking all-staff info to a single employee. Hide the nav item for the
+    // Employee role (same approach as Live Salary; no UI path reaches it once
+    // the sidebar entry is gone).
+    function hideAiForEmployee(cfg) {
+        if (!cfg || (cfg.role !== 'Employee' && cfg.role !== 'Field Agent')) { return; }
+        document.querySelectorAll('.nav-item[data-id="ai-assistant"]').forEach(function (nv) { nv.style.display = 'none'; });
+    }
     // rev 79c (Ejaz): Live Salary belongs in MAIN, right under Dashboard —
     // moved out of Payroll (his explicit choice: "remove from payroll, your wish").
     function injectLiveSalaryNav(cfg) {
@@ -1366,11 +1388,175 @@ CSS;
             }
         } catch (eAud) {}
     }
+    // 10 Aug 2026 (Ejaz) — Add/Edit Employee form: (1) a sticky "Emp ID \u00b7 Name"
+    // header on EVERY tab so it is always clear which employee is being edited;
+    // (2) block letters/symbols in Mobile / WhatsApp at the source (server also rejects).
+    function empHdrUpdate() {
+        var bar = document.getElementById('empHdrBar');
+        if (!bar) { return; }
+        var t = bar.querySelector('.ehb-txt');
+        if (!t) { return; }
+        var idv = (document.getElementById('f_id') || {}).value || '';
+        var nmv = (document.getElementById('f_name') || {}).value || '';
+        t.textContent = (nmv || 'New employee') + (idv ? ('   ·   ' + idv) : '');
+    }
+    // 10 Aug 2026 (Ejaz) — FIELD-LEVEL validation: reject an invalid Mobile /
+    // WhatsApp / PAN / UAN / Email / IFSC the moment the user leaves the field,
+    // with a blocking stop-alert + refocus, so a bad value can NEVER reach save
+    // (where a raw column error used to lose the whole record). Blank is always
+    // allowed (optional fields). Regexes use explicit [0-9] ranges and avoid
+    // backslash escape sequences, which the boot heredoc would convert.
+    // Every form field with an OBJECTIVE format is validated on blur. Free-text
+    // (name, father, address, id marks…) and dropdowns (gender, marital, salary
+    // type, pf/esi…) have no "invalid" state, so they are not listed. Blank is
+    // always allowed — a field left empty is fine; only a filled-in value that is
+    // the wrong shape is rejected, so invalid data can never be captured.
+    var EMP_VALID_IDS = ['f_mobile', 'f_whatsapp', 'f_pan', 'f_uan', 'f_email', 'f_ifsc',
+        'f_dob', 'f_doj', 'f_pccDeadline', 'f_ctc', 'f_commPct', 'f_homeLat', 'f_homeLng',
+        'f_geoRadius', 'f_bankAcc', 'f_deviceUserId', 'f_aadhaar'];
+    // Parse a date from YYYY-MM-DD or DD-MM-YYYY (any separator) into a real
+    // calendar Date, or null. Rejects impossible dates like 31-02-2020.
+    function empParseDate(v) {
+        v = String(v).trim().replace(/[^0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+        var p = v.split('-');
+        if (p.length !== 3) { return null; }
+        var y, mo, d;
+        if (p[0].length === 4) { y = +p[0]; mo = +p[1]; d = +p[2]; }
+        else { d = +p[0]; mo = +p[1]; y = +p[2]; }
+        if (!y || y < 1900 || y > 3000 || mo < 1 || mo > 12 || d < 1 || d > 31) { return null; }
+        var dt = new Date(y, mo - 1, d);
+        if (dt.getFullYear() !== y || dt.getMonth() !== (mo - 1) || dt.getDate() !== d) { return null; }
+        return dt;
+    }
+    function empFieldError(id, valRaw) {
+        var v = (valRaw == null ? '' : String(valRaw)).trim();
+        if (v === '') { return null; }   // blank is always acceptable
+        if (id === 'f_mobile' || id === 'f_whatsapp') {
+            // Reject letters/symbols outright (don't silently strip them, which
+            // was making "9391024484rrr" pass as valid).
+            if (/[^0-9+() -]/.test(v)) { return 'Mobile number is invalid — remove letters/symbols and enter a 10-digit number (starting 6-9).'; }
+            var d = v.replace(/[^0-9]/g, '');
+            if (d.length === 12 && d.slice(0, 2) === '91') { d = d.slice(2); }
+            else if (d.length === 11 && d.charAt(0) === '0') { d = d.slice(1); }
+            if (!/^[6-9][0-9]{9}$/.test(d)) { return 'Enter a valid 10-digit mobile number (starting 6-9).'; }
+        } else if (id === 'f_pan') {
+            if (!/^[A-Za-z]{5}[0-9]{4}[A-Za-z]$/.test(v)) { return 'PAN must be 10 characters in the format ABCDE1234F.'; }
+        } else if (id === 'f_uan') {
+            if (!/^[0-9]{12}$/.test(v.replace(/ /g, ''))) { return 'UAN must be exactly 12 digits.'; }
+        } else if (id === 'f_aadhaar') {
+            if (!/^[0-9]{12}$/.test(v.replace(/ /g, ''))) { return 'Aadhaar must be exactly 12 digits.'; }
+        } else if (id === 'f_email') {
+            if (!/^[^ @]+@[^ @]+\.[^ @]+$/.test(v)) { return 'Enter a valid email address.'; }
+        } else if (id === 'f_ifsc') {
+            if (!/^[A-Za-z]{4}0[A-Za-z0-9]{6}$/.test(v)) { return 'IFSC must be 11 characters like SBIN0001234.'; }
+        } else if (id === 'f_bankAcc') {
+            if (!/^[0-9]{6,20}$/.test(v.replace(/ /g, ''))) { return 'Bank account number must be 6 to 20 digits (no letters).'; }
+        } else if (id === 'f_deviceUserId') {
+            if (!/^[A-Za-z0-9]+$/.test(v)) { return 'Biometric ID must be letters/numbers only — no spaces or symbols.'; }
+        } else if (id === 'f_ctc') {
+            if (!/^[0-9]+(\.[0-9]+)?$/.test(v.replace(/[, ]/g, ''))) { return 'CTC must be a number (no letters or symbols).'; }
+        } else if (id === 'f_commPct') {
+            var pc = parseFloat(v);
+            if (isNaN(pc) || pc < 0 || pc > 100) { return 'Commission % must be a number between 0 and 100.'; }
+        } else if (id === 'f_homeLat') {
+            var la = parseFloat(v);
+            if (isNaN(la) || la < -90 || la > 90) { return 'Latitude must be a number between -90 and 90.'; }
+        } else if (id === 'f_homeLng') {
+            var lo = parseFloat(v);
+            if (isNaN(lo) || lo < -180 || lo > 180) { return 'Longitude must be a number between -180 and 180.'; }
+        } else if (id === 'f_geoRadius') {
+            var gr = parseFloat(v);
+            if (isNaN(gr) || gr < 0) { return 'Geo-fence radius must be a positive number.'; }
+        } else if (id === 'f_dob') {
+            var db = empParseDate(v);
+            if (!db) { return 'Date of Birth is not a valid date — use DD-MM-YYYY.'; }
+            if (db.getTime() > Date.now()) { return 'Date of Birth cannot be in the future.'; }
+        } else if (id === 'f_doj') {
+            if (!empParseDate(v)) { return 'Date of Joining is not a valid date — use DD-MM-YYYY.'; }
+        } else if (id === 'f_pccDeadline') {
+            if (!empParseDate(v)) { return 'PCC Deadline is not a valid date — use DD-MM-YYYY.'; }
+        }
+        return null;
+    }
+    function empMarkField(el, bad) {
+        if (!el) { return; }
+        el.style.borderColor = bad ? '#ef4444' : '';
+        el.style.background = bad ? '#fef2f2' : '';
+    }
+    function wireEmpFormExtras() {
+        if (typeof renderEmpForm === 'function' && !renderEmpForm.__extra) {
+            var _origEF = renderEmpForm;
+            window.renderEmpForm = function () {
+                var html = _origEF.apply(this, arguments);
+                var bar = '<div id="empHdrBar" style="display:flex;align-items:center;gap:11px;margin-bottom:16px;padding:11px 16px;background:linear-gradient(135deg,#0f1d33,#1e3a5f);color:#fff;border-radius:12px">'
+                    + '<i class="fas fa-user-tag" style="opacity:.85"></i>'
+                    + '<span style="font-size:11px;letter-spacing:1px;text-transform:uppercase;opacity:.7">Editing</span>'
+                    + '<span class="ehb-txt" style="font-size:14.5px;font-weight:800">New employee</span>'
+                    + '</div>';
+                return html.replace('<div id="tab-ep"', bar + '<div id="tab-ep"');
+            };
+            window.renderEmpForm.__extra = true;
+        }
+        if (typeof prefillEmp === 'function' && !prefillEmp.__extra) {
+            var _origPF = prefillEmp;
+            prefillEmp = function () { var r = _origPF.apply(this, arguments); try { empHdrUpdate(); } catch (e) {} return r; };
+            prefillEmp.__extra = true;
+        }
+        if (!window.__empExtraWired) {
+            window.__empExtraWired = true;
+            document.addEventListener('input', function (e) {
+                var t = e.target;
+                if (!t || !t.id) { return; }
+                if (t.id === 'f_id' || t.id === 'f_name') { empHdrUpdate(); }
+                else if (t.id === 'f_pan' || t.id === 'f_ifsc') {
+                    var u = t.value.toUpperCase();
+                    if (u !== t.value) { var p = t.selectionStart; t.value = u; try { t.setSelectionRange(p, p); } catch (e2) {} }
+                }
+            });
+            // Field-level STOP validation: on leaving a tracked field, if the value
+            // is invalid, alert and pull focus back so the user cannot move on.
+            document.addEventListener('focusout', function (e) {
+                var t = e.target;
+                if (!t || !t.id || EMP_VALID_IDS.indexOf(t.id) < 0) { return; }
+                if (window.__empValAlerting) { return; }   // no re-entrant loop
+                var err = empFieldError(t.id, t.value);
+                empMarkField(t, !!err);
+                if (err) {
+                    window.__empValAlerting = true;
+                    try { alert('Invalid entry — ' + err); } catch (e3) {}
+                    window.__empValAlerting = false;
+                    setTimeout(function () { try { t.focus(); t.select && t.select(); } catch (e4) {} }, 0);
+                }
+            });
+        }
+    }
     // Intercept the prototype's save -> persist to the real employees table (add or edit).
     function wireEmployeeSave(cfg) {
         if (typeof saveEmp !== 'function' || saveEmp.__wired) { return; }
         var original = saveEmp;
         window.saveEmp = function () {
+            // STOP GATE — never send an invalid Mobile / WhatsApp / PAN / UAN /
+            // Email / IFSC to the server (a bad value would fail the DB write and
+            // lose the whole record). Reveal the offending field's tab, focus it.
+            var _badId = null, _badMsg = null;
+            EMP_VALID_IDS.forEach(function (id) {
+                if (_badId) { return; }
+                var el = document.getElementById(id);
+                if (el) { var m = empFieldError(id, el.value); if (m) { _badId = id; _badMsg = m; } }
+            });
+            if (_badId) {
+                var be = document.getElementById(_badId);
+                empMarkField(be, true);
+                try {
+                    var pane = be && be.closest ? be.closest('[id^="tab-"]') : null;
+                    if (pane && typeof showTab === 'function') {
+                        showTab(pane.id, document.querySelector('.tab[onclick*="' + pane.id + '"]'));
+                    }
+                } catch (eT) {}
+                try { alert('Cannot save — ' + _badMsg + '  Please correct the highlighted field, then save again.'); } catch (eA) {}
+                setTimeout(function () { try { be.focus(); be.select && be.select(); } catch (eF) {} }, 0);
+                return;
+            }
             var refs = collectRefs();
             // F5 — DRA & PCC self-declaration (Yes/No) are MANDATORY when onboarding
             // a NEW hire. Not enforced on edit so pre-existing records aren't blocked.
@@ -5880,7 +6066,25 @@ CSS;
         x.style.display = open ? '' : 'none';
         if (ic) { ic.className = open ? 'fas fa-chevron-up' : 'fas fa-chevron-down'; }
     };
+    function lsDashAllCard() {
+        var d = window.__LSALL;
+        if (!d) {
+            setTimeout(function () { if (!window.__LSALL) { lsAllLoad(); } }, 10);
+            return '<div class="card" style="margin-bottom:16px;color:var(--text3);font-size:13px">Loading live salary…</div>';
+        }
+        if (!d.ok) { return ''; }
+        return '<div class="card" style="margin-bottom:16px;background:linear-gradient(135deg,#0f1d33,#1e3a5f);color:#fff;overflow:hidden">'
+            + '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">'
+            + '<div><div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;opacity:.7"><i class="fas fa-bolt" style="margin-right:6px"></i>Live Salary &mdash; All Employees (' + d.count + ')</div>'
+            + '<div style="font-size:32px;font-weight:800;margin-top:2px">' + inr(d.totEarned) + '</div>'
+            + '<div style="font-size:12px;opacity:.75">earned till ' + d.today + ' &middot; ' + d.monthLabel + ' &middot; projection ' + inr(d.totFull) + ' net</div></div>'
+            + '<div style="display:flex;gap:10px;align-items:center">'
+            + '<button class="btn btn-sm" style="background:#f97316;color:#fff;border:none" onclick="go(&#39;live-salary&#39;)">Open Live Salary</button>'
+            + '</div></div>'
+            + '</div>';
+    }
     function lsDashCard() {
+        if (window.__LSMODE === 'all') { return lsDashAllCard(); }
         var d = window.__LS;
         if (!d) {
             setTimeout(function () { if (!window.__LS) { lsLoad(); } }, 10);
@@ -8188,17 +8392,9 @@ CSS;
             });
         };
         apply(); setTimeout(apply, 900); setTimeout(apply, 2600);   // injected nav items arrive late
-        if (!document.getElementById('sp-demo-bar')) {
-            var bar = document.createElement('div');
-            bar.id = 'sp-demo-bar';
-            bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:8300;background:#0c1929;color:#e2e8f0;padding:7px 14px;text-align:center;font-size:12.5px';
-            // rev 103: on-prem demo instances pitch the edition, not /signup.
-            var demoCta = (cfg.edition && cfg.edition !== 'saas')
-                ? '<span style="color:#f97316;font-weight:700">This is the ' + (cfg.edition || '').toUpperCase() + ' edition demonstration.</span>'
-                : '<a href="/signup" style="color:#f97316;font-weight:700">Get your own workspace &rarr;</a>';
-            bar.innerHTML = '<i class="fas fa-flask" style="color:#f97316"></i> You are exploring the LIVE DEMO — play freely; settings, logins and deletions are disabled here. ' + demoCta + ' <i class="fas fa-xmark" onclick="this.parentNode.remove()" style="margin-left:10px;cursor:pointer;color:#94a3b8"></i>';
-            document.body.appendChild(bar);
-        }
+        // 10 Aug 2026 (Ejaz) — the bottom "You are exploring the LIVE DEMO …" bar
+        // was removed: it confused users on local / on-prem installs. The nav-hide
+        // above (and the server DemoWriteGuard) still protect the public demo.
     }
     // rev 103: ON-PREMISE EDITION lockdown (SmartPRS-L1/L2/L3). Modules outside
     // the licence vanish from the menu (server side: EditionGuard middleware
@@ -9754,13 +9950,13 @@ CSS;
         var d = window.__LSALL;
         if (!d) { setTimeout(function () { if (!window.__LSALL) { lsAllLoad(); } }, 10); return pghead('Live Salary', 'Loading all employees…', '') + '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">Calculating…</div></div>'; }
         if (!d.ok) { return pghead('Live Salary', 'Live earnings this month', '') + '<div class="card"><div style="padding:26px;color:var(--red)"><b>' + (d.error || 'Could not load') + '</b></div></div>'; }
-        var picker = '<select onchange="lsPick(this.value)" style="padding:9px 12px;border:1.5px solid var(--border);border-radius:9px;font-size:14px;background:#fff;min-width:240px"><option value="__all__" selected>All Employees</option>' + (d.rows || []).map(function (r) { return '<option value="' + r.code + '">' + r.name + ' (' + r.code + ')</option>'; }).join('') + '</select>';
+        var picker = '<select onchange="lsPick(this.value)" style="padding:9px 12px;border:1.5px solid var(--border);border-radius:9px;font-size:14px;background:#fff;min-width:240px"><option value="__all__" selected>All Employees</option>' + (d.rows || []).map(function (r) { return '<option value="' + r.id + '">' + r.name + ' (' + r.code + ')</option>'; }).join('') + '</select>';
         var head = '<div class="card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px"><div><div style="font-size:19px;font-weight:800">All Employees <span style="color:var(--text3);font-weight:500;font-size:13px">&middot; ' + d.count + ' shown</span></div><div style="font-size:12.5px;color:var(--text3);margin-top:3px">' + d.monthLabel + ' &middot; as of ' + d.today + '</div></div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' + picker + '</div></div>';
         var totCard = '<div class="card" style="text-align:center;margin-bottom:14px;background:linear-gradient(135deg,#0f1d33,#1e3a5f);color:#fff"><div style="font-size:12px;letter-spacing:1px;text-transform:uppercase;opacity:.75">Total base salary earned till today (all employees)</div><div style="font-size:34px;font-weight:800;margin:6px 0">' + inr(d.totEarned) + '</div><div style="font-size:12.5px;opacity:.8">Full-month projection: ' + inr(d.totFull) + ' net</div></div>';
         var th2 = 'padding:10px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3)';
         var rowsHtml = (d.rows || []).map(function (r) {
             var c2 = 'padding:9px 12px;font-size:13px;border-top:1px solid var(--border)';
-            return '<tr style="cursor:pointer" onclick="lsPick(&#39;' + r.code + '&#39;)" title="Open detailed Live Salary">'
+            return '<tr style="cursor:pointer" onclick="lsPick(&#39;' + r.id + '&#39;)" title="Open detailed Live Salary">'
                 + '<td style="' + c2 + ';font-weight:600">' + r.name + ' <span style="color:var(--text3);font-weight:400">(' + r.code + ')</span></td>'
                 + '<td style="' + c2 + ';color:var(--text2)">' + (r.company || '') + '</td>'
                 + '<td style="' + c2 + ';text-align:center">' + (r.note ? '<span style="color:var(--text3);font-size:11px">' + r.note + '</span>' : (r.factorPct + '%')) + '</td>'

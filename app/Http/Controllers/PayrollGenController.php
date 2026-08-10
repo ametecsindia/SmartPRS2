@@ -125,34 +125,43 @@ class PayrollGenController extends Controller
         return Carbon::createFromFormat('Y-m-d', $month.'-01')->subMonthNoOverflow()->day($c)->addDay()->toDateString();
     }
 
-    /** Cut-off day (2..28) for a company from the Pay Cycle master; 0 = calendar month.
-     *  Company-specific pay-cycle row wins over an all-company / blank one. */
+    /** Cut-off day (2..28) for a company; 0 = calendar month. The assigned Salary
+     *  Schedule drives it (rev190), falling back to the Pay Cycle master — same
+     *  table precedence as AppDataController::payDateFor so the attendance window
+     *  and the pay date always agree. A company-specific row wins over an
+     *  all-company / blank one; salary_schedules is consulted before pay_cycles. */
     private function resolveCutoffDay($tid, object $company): int
     {
         try {
-            if (! Schema::hasTable('pay_cycles') || ! Schema::hasColumn('pay_cycles', 'cutoff_day')) {
-                return 0;
-            }
-            $rows = DB::table('pay_cycles')
-                ->when($tid && Schema::hasColumn('pay_cycles', 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
-                ->when(Schema::hasColumn('pay_cycles', 'status'), fn ($q) => $q->where(fn ($x) => $x->where('status', 'active')->orWhereNull('status')))
-                ->orderByDesc('id')->limit(50)->get();
-            $best = 0;
-            foreach ($rows as $row) {
-                $cn = strtolower(trim((string) ($row->company_name ?? '')));
-                if ($cn !== '' && $cn !== 'all' && $cn !== strtolower(trim((string) $company->name))) {
+            $cn = strtolower(trim((string) $company->name));
+            $bestGeneric = 0;
+            foreach (['salary_schedules', 'pay_cycles'] as $table) {
+                if (! Schema::hasTable($table) || ! Schema::hasColumn($table, 'cutoff_day')) {
                     continue;
                 }
-                $cd = (int) ($row->cutoff_day ?? 0);
-                if ($cd >= 2 && $cd <= 28) {
-                    if ($cn !== '' && $cn !== 'all') {
-                        return $cd;
+                $rows = DB::table($table)
+                    ->when($tid && Schema::hasColumn($table, 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
+                    ->when(Schema::hasColumn($table, 'status'), fn ($q) => $q->where(fn ($x) => $x->where('status', 'active')->orWhereNull('status')))
+                    ->orderByDesc('id')->limit(50)->get();
+                foreach ($rows as $row) {
+                    $rcn = strtolower(trim((string) ($row->company_name ?? '')));
+                    if ($rcn !== '' && $rcn !== 'all' && $rcn !== $cn) {
+                        continue;
                     }
-                    $best = $best ?: $cd;
+                    $cd = (int) ($row->cutoff_day ?? 0);
+                    if ($cd < 2 || $cd > 28) {
+                        continue;
+                    }
+                    if ($rcn !== '' && $rcn !== 'all') {
+                        return $cd;   // company-specific row wins (schedules scanned first)
+                    }
+                    if ($bestGeneric === 0) {
+                        $bestGeneric = $cd;
+                    }
                 }
             }
 
-            return $best;
+            return $bestGeneric;
         } catch (\Throwable $e) {
             return 0;
         }
@@ -2003,7 +2012,7 @@ class PayrollGenController extends Controller
                 }
                 $company = $companyCache[$cid];
                 if ($ctc <= 0 || ! $company) {
-                    $rows[] = ['code' => $e->emp_code, 'name' => $e->name, 'company' => $company->name ?? '—', 'fullMonthNet' => 0, 'earnedNet' => 0, 'factorPct' => 0, 'present' => 0, 'note' => $ctc <= 0 ? 'No CTC set' : 'No company'];
+                    $rows[] = ['id' => $e->id, 'code' => $e->emp_code, 'name' => $e->name, 'company' => $company->name ?? '—', 'fullMonthNet' => 0, 'earnedNet' => 0, 'factorPct' => 0, 'present' => 0, 'note' => $ctc <= 0 ? 'No CTC set' : 'No company'];
                     continue;
                 }
                 if (! array_key_exists($company->id, $compCache)) {
@@ -2034,7 +2043,7 @@ class PayrollGenController extends Controller
                         : max(0.0, min(1.0, ($dayOfMonth - $absent) / max(1, $daysInMonth)));
                 }
                 $earned = round($fullNet * $factor, 2);
-                $rows[] = ['code' => $e->emp_code, 'name' => $e->name, 'company' => $company->name ?? '—', 'fullMonthNet' => round($fullNet, 2), 'earnedNet' => $earned, 'factorPct' => (int) round($factor * 100), 'present' => $present];
+                $rows[] = ['id' => $e->id, 'code' => $e->emp_code, 'name' => $e->name, 'company' => $company->name ?? '—', 'fullMonthNet' => round($fullNet, 2), 'earnedNet' => $earned, 'factorPct' => (int) round($factor * 100), 'present' => $present];
                 $totFull += $fullNet;
                 $totEarned += $earned;
             }

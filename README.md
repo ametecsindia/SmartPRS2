@@ -84,4 +84,3 @@ On-prem deployments run single-tenant; the scope is a harmless safeguard.
 - [ ] Overlay fresh Laravel skeleton & `composer install` (run on Windows)
 - [ ] `migrate --seed` succeeds; login + Employees list verified end-to-end
 - [ ] De-brand + strip retail modules from reference (harvest only)
-"# SmartPRS2" 

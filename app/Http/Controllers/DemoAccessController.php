@@ -53,6 +53,19 @@ class DemoAccessController extends Controller
         if (! $tenantId) {
             return false;
         }
+        // 10 Aug 2026 (Ejaz) — a LOCAL / on-prem install (served from localhost)
+        // that happens to carry demo seed data must NOT behave like the PUBLIC
+        // demo: the demo lockdown otherwise hides the Administration menus (Users,
+        // Roles, Branding, Settings, …) and blocks settings/deletions. Only the
+        // hosted demo (a real public host) enforces the lockdown.
+        try {
+            $host = strtolower((string) (request()?->getHost() ?? ''));
+            if ($host === 'localhost' || $host === '127.0.0.1' || $host === '::1' || str_ends_with($host, '.test') || str_ends_with($host, '.local')) {
+                return false;
+            }
+        } catch (\Throwable $e) {
+            // no request context (console/cron) — fall through to the normal check
+        }
         $demo = self::demoTenantId();
 
         return $demo !== null && (int) $tenantId === (int) $demo;
