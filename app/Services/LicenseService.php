@@ -293,12 +293,20 @@ class LicenseService
     public static function recordOffline(int $clientId, string $edition, ?string $expiresOn, string $expiryMode, string $token): void
     {
         self::ensureTables();
+        // $token may be a signed .lic OR already a plain SPRS key. Online activation
+        // finds a licence by hashKey(EMBEDDED KEY), so index the row by the plain key
+        // — never the whole token — or a .lic generated here can never activate online.
+        // (key_enc keeps the original token so the .lic can be re-downloaded.)
+        $plainKey = self::keyInsideToken($token);
+        if ($plainKey === '') {
+            $plainKey = $token;
+        }
         try {
             $vals = [
                 'edition' => $edition,
-                'key_hash' => self::hashKey($token),
+                'key_hash' => self::hashKey($plainKey),
                 'key_enc' => Crypt::encryptString($token),
-                'key_last4' => substr(self::normalize($token), -4),
+                'key_last4' => substr(self::normalize($plainKey), -4),
                 'status' => 'active',
                 'amc_expires_on' => $expiresOn,
                 'expiry_mode' => in_array($expiryMode, ['renew', 'notify'], true) ? $expiryMode : 'renew',
@@ -315,6 +323,20 @@ class LicenseService
             }
         } catch (\Throwable $e) {
         }
+    }
+
+    /** Pull the embedded SPRS key out of a signed .lic token; '' when not a token. */
+    public static function keyInsideToken(string $token): string
+    {
+        if (! str_contains($token, '.')) {
+            return '';
+        }
+        $b64 = explode('.', trim($token))[0] ?? '';
+        $b64 = strtr($b64, '-_', '+/');
+        $b64 .= str_repeat('=', (4 - strlen($b64) % 4) % 4);
+        $p = json_decode((string) base64_decode($b64, true), true);
+
+        return is_array($p) ? trim((string) ($p['key'] ?? '')) : '';
     }
 
     public static function hashKey(string $key): string

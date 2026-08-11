@@ -210,10 +210,20 @@ class AppDataController extends Controller
         $desigNames = DB::table('designations')->pluck('name', 'id');
         // 10 Aug 2026 — Salary Schedule labels (id -> "Name — Company") so the
         // employee's assigned pay schedule shows in the Add/Edit form dropdown.
-        $scheduleLabels = Schema::hasTable('salary_schedules')
-            ? DB::table('salary_schedules')->get(['id', 'name', 'company_name'])
-                ->mapWithKeys(fn ($s) => [$s->id => trim((string) $s->name).' — '.trim((string) ($s->company_name ?? ''))])
-            : collect();
+        // 11 Aug 2026 — column-safe + wrapped. A fresh on-prem schema may not yet
+        // have salary_schedules.company_name; selecting it explicitly threw
+        // "Unknown column" and 500'd all of /app/data, which blanked the whole
+        // Directory (the employees list rides on this response). ->get() + ?? ''
+        // is column-safe, and the try/catch matches the payroll block below so a
+        // schema mismatch can never take the app's data feed down again.
+        try {
+            $scheduleLabels = Schema::hasTable('salary_schedules')
+                ? DB::table('salary_schedules')->get()
+                    ->mapWithKeys(fn ($s) => [$s->id => trim((string) ($s->name ?? '')).' — '.trim((string) ($s->company_name ?? ''))])
+                : collect();
+        } catch (\Throwable $e) {
+            $scheduleLabels = collect();
+        }
         $compNames = DB::table('companies')->pluck('name', 'id');   // company_id -> NAME (Directory shows the name, never the raw id)
         $branchNames = DB::table('branches')->pluck('name', 'id');
         $teamRows = DB::table('teams')->get(['id', 'name', 'leader_id']);

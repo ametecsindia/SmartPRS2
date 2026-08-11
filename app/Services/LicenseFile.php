@@ -152,9 +152,17 @@ PEM;
             return ['ok' => false, 'reason' => 'malformed'];
         }
 
-        // Node-lock: the token must be for THIS machine (when a fingerprint is present).
+        // Node-lock: the token MUST be for THIS machine. 11 Aug 2026 (flowchart
+        // integrity) — a .lic with NO fingerprint is a FLOATING licence that would
+        // run on any PC, breaking "one licence <-> one machine". Refuse it. Genuine
+        // fresh installs activate ONLINE (the server binds the hardware fingerprint)
+        // and never reach this offline check, so they are unaffected; only an
+        // air-gapped .lic must carry its target machine's fingerprint.
         $fp = (string) ($p['fingerprint'] ?? '');
-        if ($fp !== '' && ! hash_equals($fp, $this->machineFingerprint())) {
+        if ($fp === '') {
+            return ['ok' => false, 'reason' => 'not_locked', 'payload' => $p];
+        }
+        if (! hash_equals($fp, $this->machineFingerprint())) {
             return ['ok' => false, 'reason' => 'wrong_machine', 'payload' => $p];
         }
 

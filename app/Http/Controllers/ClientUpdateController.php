@@ -428,6 +428,7 @@ class ClientUpdateController extends Controller
         if (empty($v['ok'])) {
             $map = [
                 'wrong_machine' => 'This licence file is locked to a different computer and cannot be used on this server. Ask Ametecs to re-issue it for this machine (WhatsApp 9000098877).',
+                'not_locked' => 'This licence file is not tied to a computer, so it cannot be used (one licence works on one machine only). Send Ametecs this server\'s fingerprint from the Activation screen and we will re-issue it (WhatsApp 9000098877).',
                 'invalid_signature' => 'This licence file is invalid or has been tampered with. Please use the exact .lic file Ametecs sent you.',
                 'malformed' => 'This does not look like a SmartPRS licence file. Please paste the whole code or upload the .lic file Ametecs sent you.',
                 'bad_public_key' => 'This SmartPRS build cannot read its licence key. Please contact Ametecs (WhatsApp 9000098877).',
@@ -532,6 +533,22 @@ class ClientUpdateController extends Controller
     /** Stable installation fingerprint (server identity, not hardware-fragile). */
     public static function fingerprint(): string
     {
+        // 11 Aug 2026 (integrity / activation flowchart) — bind to the HARDWARE
+        // machine id (SMBIOS / OS UUID), NOT hostname+path. The old
+        // hash(hostname|edition|base_path) collided across PCs that shared a
+        // hostname or the same install folder, so the update server could not tell
+        // two machines apart and a licence bound on one PC validated on another.
+        // This is the SAME hardware fingerprint shown on the /activate screen, so
+        // what the admin sees is exactly what the server binds: one licence, one PC.
+        try {
+            $fp = (new \App\Services\LicenseFile())->machineFingerprint();
+            if (is_string($fp) && $fp !== '') {
+                return $fp;
+            }
+        } catch (\Throwable $e) {
+            // fall through to the legacy value so activation never hard-fails
+        }
+
         return hash('sha256', (gethostname() ?: 'host').'|'.Edition::current().'|'.base_path());
     }
 
