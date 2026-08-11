@@ -250,11 +250,22 @@ class ClientUpdateController extends Controller
     {
         $key = trim($key);
 
-        // AS-DL — RSA-signed offline .lic token (base64url.base64url), verified
-        // locally against the embedded public key. Takes precedence over the
-        // older SPRSX1 HMAC path (which is 3 dot-parts with an SPRSX1 prefix).
+        // RSA-signed .lic token (base64url.base64url).
         if (self::looksLikeLicenceFile($key)) {
-            return self::activateLicenceFile($key);
+            // 10 Aug 2026 (activation flowchart) — INTERNET IS MANDATORY for initial
+            // activation so the server captures the machine fingerprint. Local/offline
+            // .lic verification is only used when explicitly enabled (air-gapped).
+            if (filter_var(config('smartprs.offline_lic', false), FILTER_VALIDATE_BOOLEAN)) {
+                return self::activateLicenceFile($key);
+            }
+            // Offline disabled: pull the embedded licence key out of the .lic and
+            // activate ONLINE (below), so Central checks + captures THIS machine's
+            // fingerprint. With no internet the online call fails and activation stops.
+            $embedded = self::keyFromLicenceFile($key);
+            if ($embedded === '') {
+                return ['ok' => false, 'error' => 'This PC must be connected to the Internet to activate. Offline licence files are disabled — connect to the Internet and try again.'];
+            }
+            $key = $embedded;
         }
 
         // AS-DL cutover: the legacy SPRSX1 HMAC offline path is retired — offline
@@ -385,6 +396,23 @@ class ClientUpdateController extends Controller
             && strlen($parts[0]) >= 40
             && preg_match('/^[A-Za-z0-9_-]+$/', $parts[0]) === 1
             && preg_match('/^[A-Za-z0-9_-]+$/', $parts[1]) === 1;
+    }
+
+    /** Pull the embedded licence key out of a .lic token's base64url payload, so an
+     *  offline-disabled install can activate it ONLINE. The server re-validates the
+     *  key, so we only need to decode (not signature-verify) the payload here. */
+    private static function keyFromLicenceFile(string $token): string
+    {
+        try {
+            $b64 = explode('.', trim($token))[0] ?? '';
+            $b64 = strtr($b64, '-_', '+/');
+            $b64 .= str_repeat('=', (4 - strlen($b64) % 4) % 4);
+            $p = json_decode((string) base64_decode($b64, true), true);
+
+            return is_array($p) ? trim((string) ($p['key'] ?? '')) : '';
+        } catch (\Throwable $e) {
+            return '';
+        }
     }
 
     /**

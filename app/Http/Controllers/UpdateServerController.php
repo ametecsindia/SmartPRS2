@@ -53,14 +53,20 @@ class UpdateServerController extends Controller
 
             return response()->json(['ok' => false, 'error' => 'This key is for SmartPRS-'.strtoupper($lic->edition).' but this installation is SmartPRS-'.strtoupper($edition).'. Please install the matching edition or contact Ametecs.'], 422);
         }
-        // Idempotent on the SAME server; a different server needs a panel
+        // Idempotent on the SAME machine; a different machine needs a panel
         // deactivation first (Q5: self-service moves are limited).
-        if ($lic->status === 'active' && $lic->fingerprint && ! hash_equals($lic->fingerprint, $fp)) {
+        // 10 Aug 2026 (flowchart step 4/5) — enforce "one .lic ↔ one machine
+        // fingerprint" STRICTLY: block a different machine whenever this licence is
+        // already bound, regardless of status. The old check only fired on
+        // status==='active', so a licence bound while still 'pending' (e.g. via an
+        // early heartbeat) could be hijacked by another PC. The heartbeat already
+        // blocks on any mismatch — activate now matches it.
+        if ($lic->fingerprint && ! hash_equals($lic->fingerprint, $fp)) {
             // Anti-fraud tripwire: a DIFFERENT machine tried to activate this key.
             // Logged to History + sales alerted (deduped once/day).
             LicenseService::logRejection($lic, 'server_mismatch', $fp, $request->ip());
 
-            return response()->json(['ok' => false, 'error' => 'This licence is already activated on another server. To move servers, contact Ametecs and we will release it (takes a minute).'], 422);
+            return response()->json(['ok' => false, 'error' => 'This licence is already activated on another machine. To move it, contact Ametecs and we will release it (takes a minute).'], 422);
         }
         $wasUnbound = ! $lic->fingerprint;
 

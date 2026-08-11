@@ -44,6 +44,13 @@ return [
     'update_url' => env('SMARTPRS_UPDATE_URL', 'https://smartprs.com/update'),
     'licence_enforce' => env('SMARTPRS_LICENCE_ENFORCE', true),
 
+    // 10 Aug 2026 (Ejaz, per activation flowchart) — OFFLINE .lic activation is
+    // DISABLED by default: initial activation must be ONLINE so the server captures
+    // the machine fingerprint. When false, a .lic is routed through the online
+    // server flow (its embedded key is used); with no internet the activation stops.
+    // Set SMARTPRS_OFFLINE_LIC=true only for genuinely air-gapped installs.
+    'offline_lic' => env('SMARTPRS_OFFLINE_LIC', false),
+
     /*
     | Shared secret for OFFLINE self-contained License Codes (rev146). The
     | Super Admin signs a key with it; the client verifies the signature
