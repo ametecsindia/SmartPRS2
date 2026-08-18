@@ -1,0 +1,200 @@
+ 
+============================================================ 
+ SmartPRS - SBB ingest path - test run                       
+ Folder : C:\laragon\www\smartprs2                                               
+ Date   : 17-08-2026 17:02:55.94                                      
+============================================================ 
+ 
+PHP binary: php 
+PHP 8.3.30 (cli) (built: Jan 13 2026 22:50:40) (ZTS Visual C++ 2019 x64)
+Copyright (c) The PHP Group
+Zend Engine v4.3.30, Copyright (c) Zend Technologies
+ 
+ 
+------------------------------------------------------------ 
+ 1 of 2 : SBB ingest tests (tests/Feature/SbbIngestTest.php)  
+------------------------------------------------------------ 
+ 
+
+   PASS  Tests\Feature\SbbIngestTest
+  ✓ it identifies the customer on ping so an installer can confirm the right client                                                                              1.22s  
+  ✓ it ingests a punch for a mapped employee and stores it in attendance_logs                                                                                    0.16s  
+  ✓ it accepts an external_id once and calls the re-send a duplicate, leaving exactly one row                                                                    0.08s  
+  ✓ it treats the same employee, moment and source as one punch even under a fresh external_id                                                                   0.06s  
+  ✓ it holds a punch for an unmapped PIN instead of discarding it, and says so                                                                                   0.04s  
+  ✓ it releases held punches into attendance when the device ID is finally mapped                                                                                0.17s  
+  ✓ it rejects a punch_at carrying a timezone offset rather than guessing what it meant                                                                          0.06s  
+  ✓ it rejects other zone-bearing and malformed timestamps with ('2026-08-16T09:41:00Z')                                                                         0.06s  
+  ✓ it rejects other zone-bearing and malformed timestamps with ('2026-08-16T09:41:00+05:30')                                                                    0.04s  
+  ✓ it rejects other zone-bearing and malformed timestamps with ('2026-08-16 09:41:00 UTC')                                                                      0.04s  
+  ✓ it rejects other zone-bearing and malformed timestamps with ('16/08/2026 09:41:00')                                                                          0.04s  
+  ✓ it rejects other zone-bearing and malformed timestamps with ('2026-02-30 09:41:00')                                                                          0.04s  
+  ✓ it rejects other zone-bearing and malformed timestamps with ('2026-08-16 09:41')                                                                             0.04s  
+  ✓ it stores the wall clock literally, never shifting it into UTC                                                                                               0.05s  
+  ✓ it cannot write a punch attributed to another tenant                                                                                                         0.04s  
+  ✓ it ignores a tenant_id supplied in the request body                                                                                                          0.04s  
+  ✓ it holds a punch for an employee who belongs to a different tenant                                                                                           0.05s  
+  ✓ it rejects a missing key with 401 and the documented body                                                                                                    0.04s  
+  ✓ it rejects an unknown key with 401                                                                                                                           0.04s  
+  ✓ it rejects an expired key with 401                                                                                                                           0.04s  
+  ✓ it rejects a revoked key with 401                                                                                                                            0.04s  
+  ✓ it rejects a key without the ingest scope with 403                                                                                                           0.04s  
+  ✓ it accepts the key as an Authorization Bearer header too                                                                                                     0.04s  
+  ✓ it records last_used_at when a key is used                                                                                                                   0.04s  
+  ✓ it reports a verdict for every punch in a mixed batch and never silently drops one                                                                           0.06s  
+  ✓ it rejects a malformed punch individually instead of failing the whole batch                                                                                 0.06s  
+  ✓ it rejects an empty or oversized batch with 422                                                                                                              0.07s  
+  ✓ it leaves the unauthenticated ZKTeco push endpoint working                                                                                                   0.07s  
+
+  Tests:    28 passed (141 assertions)
+  Duration: 3.40s
+
+ 
+EXIT CODE (SBB suite): 0 
+ 
+------------------------------------------------------------ 
+ 2 of 2 : Full test suite (regression check)                  
+------------------------------------------------------------ 
+ 
+
+   PASS  Tests\Unit\AbsenceServiceTest
+  ✓ it flags a working-day no-show with no leave as absent                                                                                                       0.30s  
+  ✓ it does not flag someone who punched in                                                                                                                      0.04s  
+  ✓ it does not flag someone on approved leave                                                                                                                   0.04s  
+  ✓ it does not flag a weekly-off day from the working_days fallback                                                                                             0.03s  
+  ✓ it honours an explicit shift off-flag over the working_days fallback                                                                                         0.03s  
+
+   PASS  Tests\Unit\AttendanceCorrectionServiceTest
+  ✓ it exposes seven correction sub-types and five statuses                                                                                                      0.06s  
+  ✓ it normalises times to H:i and rejects nonsense                                                                                                              0.05s  
+  ✓ it normalises dates to Y-m-d                                                                                                                                 0.04s  
+
+   PASS  Tests\Unit\EmployeeImportServiceTest
+  ✓ it auto-maps common header spellings to canonical fields                                                                                                     0.04s  
+  ✓ it treats DRA and DPA headers as the same declaration column                                                                                                 0.04s  
+  ✓ it parses Yes/No the same way the CSV importer does                                                                                                          0.03s  
+  ✓ it reads Indian day-first dates and rejects impossible ones                                                                                                  0.03s  
+
+   PASS  Tests\Unit\ExampleTest
+  ✓ that true is true
+
+   PASS  Tests\Unit\GreetingServiceTest
+  ✓ it substitutes known template tokens                                                                                                                         0.05s  
+  ✓ it leaves unknown tokens blank rather than printing them                                                                                                     0.04s  
+  ✓ it derives first name and falls back to sensible defaults                                                                                                    0.03s  
+  ✓ it ships with birthday and anniversary templates and is opt-in by default                                                                                    0.03s  
+
+   PASS  Tests\Unit\PayrollMathTest
+  ✓ computeSlip splits a ₹6,00,000 CTC into the right monthly components                                                                                         0.06s  
+  ✓ ESI applies when gross is at/under the threshold                                                                                                             0.04s  
+  ✓ a zero CTC yields a zero slip                                                                                                                                0.04s  
+  ✓ PT follows the state slab, not a single national figure                                                                                                      0.03s  
+  ✓ states that levy no Professional Tax deduct nothing                                                                                                          0.03s  
+  ✓ Maharashtra adds the February uplift only where PT is already at the top slab                                                                                0.03s  
+  ✓ Maharashtra exempts women up to the threshold                                                                                                                0.03s  
+
+   PASS  Tests\Unit\PeriodResolverTest
+  ✓ it describes a plain calendar month when nothing is configured                                                                                               0.05s  
+  ✓ it resolves the 21st-to-20th retention window                                                                                                                0.04s  
+  ✓ it crosses the year boundary correctly                                                                                                                       0.03s  
+  ✓ it clamps a cutoff day that does not exist to the last day of the month                                                                                      0.03s  
+  ✓ it pays on the first occurrence of the pay day on or after the period end                                                                                    0.03s  
+  ✓ it maps a calendar date to the payroll month that will pay it                                                                                                0.03s  
+  ✓ it keeps consecutive periods continuous — no gaps, no overlaps                                                                                               0.04s  
+  ✓ it produces a one-off bridging period when a company switches cycle                                                                                          0.03s  
+  ✓ it flags a pay gap wider than the statutory week                                                                                                             0.03s  
+
+   PASS  Tests\Unit\ProbationServiceTest
+  ✓ it detects probation only from the employment_stage flag                                                                                                     0.04s  
+  ✓ it prefers an explicit probation_end over the derived date                                                                                                   0.06s  
+  ✓ it derives the end date from doj + per-employee months, else the company default                                                                             0.04s  
+  ✓ it returns null when there is no joining date to derive from                                                                                                 0.03s  
+  ✓ it treats an employee as confirmed once confirmed_on is stamped                                                                                              0.03s  
+  ✓ it defaults to sensible reminder milestones                                                                                                                  0.03s  
+
+   PASS  Tests\Unit\StatutoryConfigTest
+  ✓ no override rows leave the rates untouched (the safety invariant)                                                                                            0.04s  
+  ✓ a PT row does not shadow a PF row (per-kind resolution)                                                                                                      0.04s  
+  ✓ the newest in-force row of a kind wins (effective dating)                                                                                                    0.03s  
+  ✓ scope precedence: company beats state beats tenant                                                                                                           0.03s  
+  ✓ scope precedence: branch beats location beats company beats tenant                                                                                           0.04s  
+  ✓ PT slab maps merge per state, not wholesale                                                                                                                  0.03s  
+  ✓ cleanSlabs rejects bad input and sorts bands with the open band last                                                                                         0.03s  
+  ✓ looseMatch compares human-typed state names leniently                                                                                                        0.04s  
+
+   PASS  Tests\Feature\AuthAccessTest
+  ✓ guests are redirected from the app to the login page                                                                                                         0.49s  
+  ✓ the public landing page renders                                                                                                                              0.04s  
+  ✓ an authenticated admin can load the app data endpoint                                                                                                        0.13s  
+
+   PASS  Tests\Feature\BillingTest
+  ✓ super admin sets a subscription and the amount is computed                                                                                                   0.10s  
+  ✓ an invoice can be generated and marked paid                                                                                                                  0.16s  
+  ✓ a company admin cannot reach platform billing                                                                                                                0.05s  
+  ✓ the gateway secret is encrypted at rest and live-readiness is reported                                                                                       0.07s  
+  ✓ the razorpay webhook captures a payment with a valid signature (idempotent)                                                                                  0.07s  
+  ✓ the razorpay webhook rejects a bad signature                                                                                                                 0.06s  
+  ✓ the invoice PDF renders for super admin                                                                                                                      0.44s  
+  ✓ auto-renewal raises an invoice for a due subscription and advances the period                                                                                0.08s  
+
+   PASS  Tests\Feature\ExampleTest
+  ✓ the application returns a successful response                                                                                                                0.05s  
+
+   PASS  Tests\Feature\MasterCrudTest
+  ✓ an admin can create a department                                                                                                                             0.09s  
+  ✓ a plain employee cannot create a department                                                                                                                  0.09s  
+  ✓ a holiday saves with its date                                                                                                                                0.06s  
+  ✓ a team resolves manager + leader names to FK ids (emp_map)                                                                                                   0.06s  
+  ✓ an offer letter is pinned to letter_type=offer (fixed)                                                                                                       0.07s  
+  ✓ a letter template saves with a title + body (no employee)                                                                                                    0.06s  
+  ✓ an issued offer letter generates a merged PDF from its template                                                                                              0.26s  
+
+   PASS  Tests\Feature\PayrollTest
+  ✓ an admin generates a real payroll run with one payslip per employee                                                                                          0.11s  
+  ✓ the generated run shows up in Salary Approval                                                                                                                0.22s  
+  ✓ generating the same month twice needs confirmation (no duplicate)                                                                                            0.18s  
+
+   PASS  Tests\Feature\ReportTest
+  ✓ reports preview returns the employees dataset with columns                                                                                                   0.13s  
+  ✓ reports export streams a CSV                                                                                                                                 0.06s  
+
+   PASS  Tests\Feature\SbbIngestTest
+  ✓ it identifies the customer on ping so an installer can confirm the right client                                                                              0.05s  
+  ✓ it ingests a punch for a mapped employee and stores it in attendance_logs                                                                                    0.06s  
+  ✓ it accepts an external_id once and calls the re-send a duplicate, leaving exactly one row                                                                    0.09s  
+  ✓ it treats the same employee, moment and source as one punch even under a fresh external_id                                                                   0.07s  
+  ✓ it holds a punch for an unmapped PIN instead of discarding it, and says so                                                                                   0.10s  
+  ✓ it releases held punches into attendance when the device ID is finally mapped                                                                                0.15s  
+  ✓ it rejects a punch_at carrying a timezone offset rather than guessing what it meant                                                                          0.06s  
+  ✓ it rejects other zone-bearing and malformed timestamps with ('2026-08-16T09:41:00Z')                                                                         0.11s  
+  ✓ it rejects other zone-bearing and malformed timestamps with ('2026-08-16T09:41:00+05:30')                                                                    0.10s  
+  ✓ it rejects other zone-bearing and malformed timestamps with ('2026-08-16 09:41:00 UTC')                                                                      0.10s  
+  ✓ it rejects other zone-bearing and malformed timestamps with ('16/08/2026 09:41:00')                                                                          0.10s  
+  ✓ it rejects other zone-bearing and malformed timestamps with ('2026-02-30 09:41:00')                                                                          0.09s  
+  ✓ it rejects other zone-bearing and malformed timestamps with ('2026-08-16 09:41')                                                                             0.10s  
+  ✓ it stores the wall clock literally, never shifting it into UTC                                                                                               0.11s  
+  ✓ it cannot write a punch attributed to another tenant                                                                                                         0.11s  
+  ✓ it ignores a tenant_id supplied in the request body                                                                                                          0.12s  
+  ✓ it holds a punch for an employee who belongs to a different tenant                                                                                           0.12s  
+  ✓ it rejects a missing key with 401 and the documented body                                                                                                    0.11s  
+  ✓ it rejects an unknown key with 401                                                                                                                           0.10s  
+  ✓ it rejects an expired key with 401                                                                                                                           0.09s  
+  ✓ it rejects a revoked key with 401                                                                                                                            0.10s  
+  ✓ it rejects a key without the ingest scope with 403                                                                                                           0.14s  
+  ✓ it accepts the key as an Authorization Bearer header too                                                                                                     0.10s  
+  ✓ it records last_used_at when a key is used                                                                                                                   0.13s  
+  ✓ it reports a verdict for every punch in a mixed batch and never silently drops one                                                                           0.16s  
+  ✓ it rejects a malformed punch individually instead of failing the whole batch                                                                                 0.14s  
+  ✓ it rejects an empty or oversized batch with 422                                                                                                              0.20s  
+  ✓ it leaves the unauthenticated ZKTeco push endpoint working                                                                                                   0.13s  
+
+  Tests:    99 passed (375 assertions)
+  Duration: 8.56s
+
+ 
+EXIT CODE (full suite): 0 
+ 
+============================================================ 
+ SBB SUITE  : PASS 
+ FULL SUITE : PASS 
+============================================================ 

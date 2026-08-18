@@ -139,6 +139,8 @@ class AppController extends Controller
             'masterBase' => url('/app/master'),       // + /{type}, /{type}/{id}/delete
             'cocUrl' => url('/app/code-of-conduct'),   // Code of Conduct read + acknowledge (+ /ack)
             'bioUrl' => url('/app/biometric-config'),   // rev157: Biometric Device Setup screen (test + sync)
+            'apiKeysUrl' => url('/app/api-keys'),        // SBB — issue/revoke API keys (standalone page)
+            'pendingUrl' => url('/app/pending-punches'), // SBB — punches held until their device ID is mapped
             'docBase' => url('/app/documents-mgr'),   // rev161: Documents — list (+?q=), /upload, /{id}/download, /{id}/delete
             'incentiveBase' => url('/app/incentive'),   // commission/incentive calc: /template /calculate /commit
             'finYearBase' => url('/app/fin-year'),       // financial year: GET + /set
@@ -2750,12 +2752,33 @@ CSS;
             d.textContent = label;
             anchor.parentNode.insertBefore(d, anchor.nextSibling);
         }
+        // Same as addNav, but the item is a real link to a standalone page
+        // instead of an SPA screen. Used by the SBB settings pages, which are
+        // ordinary Blade pages rather than screens rendered inside the SPA.
+        function addNavLink(afterIds, id, label, href) {
+            if (!href) { return; }
+            if (document.querySelector('.nav-item[data-id="' + id + '"]')) { return; }
+            var anchor = null;
+            for (var i = 0; i < afterIds.length && !anchor; i++) {
+                anchor = document.querySelector('.nav-item[data-id="' + afterIds[i] + '"]');
+            }
+            if (!anchor || !anchor.parentNode) { return; }
+            var a = document.createElement('a');
+            a.className = 'nav-item';
+            a.setAttribute('data-id', id);
+            a.setAttribute('href', href);
+            a.textContent = label;
+            anchor.parentNode.insertBefore(a, anchor.nextSibling);
+        }
         var role = cfg.role || '';
         var isAdmin = (role === 'Super Admin' || role === 'Admin' || role === 'HR Manager');
         // Everyone can regularise their own attendance.
         addNav(['att-manual', 'att-report', 'att-daily'], 'att-correction', 'Attendance Correction');
         if (isAdmin) {
             addNav(['att-correction', 'late-policy'], 'absence-config', 'Absence Alerts');
+            // SBB — Smart Biometric Bridge, sat next to Biometric Device Setup.
+            addNavLink(['biometric-setup', 'biometric-devices'], 'api-keys', 'API Keys', cfg.apiKeysUrl);
+            addNavLink(['api-keys', 'biometric-setup'], 'pending-punches', 'Pending Punches', cfg.pendingUrl);
             addNav(['emp-list', 'teams'], 'probation', 'Probation');
             addNav(['emp-add', 'emp-list'], 'emp-import', 'Import Employees');
             addNav(['settings', 'fin-year', 'users'], 'probation-config', 'Probation Settings');

@@ -6,6 +6,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 
 /**
@@ -318,8 +319,22 @@ class ETimeOfficeService
                 $q = DB::table('employees')
                     ->whereRaw('LOWER('.$col.') = ?', [$c])
                     ->whereNull('deleted_at');
-                if ($tid && Schema::hasColumn('employees', 'tenant_id')) {
-                    $q->where('tenant_id', $tid);
+                if (Schema::hasColumn('employees', 'tenant_id')) {
+                    // 18 Aug 2026 HOTFIX — SYMMETRIC tenant filter.
+                    // Previously: if ($tid && ...) { $q->where('tenant_id', $tid); }
+                    // With $tid null the filter never ran, so the lookup matched
+                    // emp_code across EVERY tenant on the server. $tid is null
+                    // routinely, not rarely: PushController::rowForSn() auto-creates
+                    // a biometric_configs row for any unknown serial with
+                    // tenant_id = null, and cfgForSn() passes that null straight
+                    // through — so the FIRST punch from a newly installed bridge
+                    // was matched against every customer's employee table. Two
+                    // customers both holding EMP001 could file a punch against the
+                    // wrong company's payroll.
+                    // A null tenant must now match ONLY null-tenant employees —
+                    // never "any tenant". Fail-closed. Same idiom already used in
+                    // this file by configForTenant() and recordUnmapped().
+                    $tid ? $q->where('tenant_id', $tid) : $q->whereNull('tenant_id');
                 }
                 $emp = $q->first(['id', 'emp_code', 'name', 'tenant_id', 'company_id']);
                 if ($emp) {
@@ -379,6 +394,150 @@ class ETimeOfficeService
     }
 
     /**
+     * 18 Aug 2026 HOTFIX — hold a punch whose device code maps to nobody.
+     *
+     * device_code is the code the mapping card works in (prefix applied), i.e.
+     * the same value recordUnmapped() writes to biometric_unmapped.device_code,
+     * so the admin's Map action lines up with what is held here.
+     * device_user_id keeps the RAW code the device sent, for diagnosis.
+     *
+     * updateOrInsert rather than insertOrIgnore on purpose: the unique index
+     * cannot protect a null tenant (NULL never collides), and the three
+     * self-hosted customers all run with tenant_id null. Fail-soft throughout —
+     * quarantining a punch must never break an import.
+     */
+    private static function quarantine(array $p, array $cfg, string $full): void
+    {
+        try {
+            if (! Schema::hasTable('attendance_pending')) {
+                return;
+            }
+
+            // PushController::importAttlog puts the device serial in 'machine'.
+            $sn = trim((string) ($p['machine'] ?? $cfg['serial_number'] ?? ''));
+
+            $match = [
+                'tenant_id' => $cfg['tenant_id'] ?? null,
+                'device_code' => $full,
+                'punch_at' => $p['punch_at']->format('Y-m-d H:i:s'),
+                'source' => (string) ($cfg['source'] ?? ($cfg['provider'] ?? 'device')),
+            ];
+
+            DB::table('attendance_pending')->updateOrInsert($match, [
+                'company_id' => $cfg['company_id'] ?? null,
+                'device_sn' => $sn !== '' ? $sn : null,
+                'device_user_id' => (string) ($p['emp_code'] ?? ''),
+                'direction' => (string) ($p['direction'] ?? 'in'),
+                'updated_at' => now(),
+                'created_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            report($e);
+        }
+    }
+
+    /**
+     * 18 Aug 2026 HOTFIX — replay held punches once the code is mapped.
+     *
+     * Called from BiometricConfigController::mapEmployee. Scoped by tenant AND,
+     * when the caller knows it, device_sn: two devices can both have PIN 5 and
+     * they are different people.
+     *
+     * Writes with the SAME $match / updateOrInsert shape the import loop uses,
+     * which is what makes a re-import or a second mapping idempotent WITHOUT
+     * relying on a unique index on attendance_logs (that index is deliberately
+     * not being added in this hotfix).
+     *
+     * @param  object  $emp  employee row: emp_code, name, tenant_id, company_id
+     * @return int rows promoted
+     */
+    public static function promotePending(?int $tid, string $deviceCode, $emp, ?string $deviceSn = null): int
+    {
+        $deviceCode = trim($deviceCode);
+        if ($deviceCode === '' || ! $emp) {
+            return 0;
+        }
+
+        $promoted = 0;
+        $touched = [];
+
+        try {
+            if (! Schema::hasTable('attendance_pending') || ! Schema::hasTable('attendance_logs')) {
+                return 0;
+            }
+
+            $lc = strtolower($deviceCode);
+
+            $q = DB::table('attendance_pending')
+                ->whereNull('resolved_at')
+                // Matches punches held by either ingest path: the /iclock import
+                // records device_code (prefixed), the SBB path records the raw PIN.
+                ->where(function ($w) use ($lc) {
+                    $w->whereRaw('LOWER(device_code) = ?', [$lc])
+                        ->orWhereRaw('LOWER(device_user_id) = ?', [$lc]);
+                });
+
+            // Symmetric, exactly as in matchEmployee.
+            $tid ? $q->where('tenant_id', $tid) : $q->whereNull('tenant_id');
+
+            if ($deviceSn !== null && trim($deviceSn) !== '') {
+                $q->whereRaw('LOWER(device_sn) = ?', [strtolower(trim($deviceSn))]);
+            }
+
+            foreach ($q->orderBy('id')->get() as $row) {
+                $when = Carbon::parse($row->punch_at);
+
+                $match = [
+                    'emp_code' => $emp->emp_code,
+                    'punch_at' => $when->format('Y-m-d H:i:s'),
+                    'source' => $row->source ?: 'device',
+                ];
+                if (! empty($emp->tenant_id)) {
+                    $match['tenant_id'] = $emp->tenant_id;
+                }
+
+                DB::table('attendance_logs')->updateOrInsert($match, [
+                    'direction' => $row->direction ?: 'in',
+                    'emp_name' => $emp->name ?? null,
+                    'log_date' => $when->toDateString(),
+                    'tenant_id' => $emp->tenant_id ?? null,
+                    'company_id' => $emp->company_id ?? null,
+                    'updated_at' => now(),
+                    'created_at' => now(),
+                ]);
+
+                // Stamped whether the row was inserted or matched an existing
+                // punch: either way it is in attendance_logs and must not replay.
+                DB::table('attendance_pending')->where('id', $row->id)->update([
+                    'resolved_at' => now(),
+                    'updated_at' => now(),
+                ]);
+
+                $promoted++;
+                if (($row->direction ?: 'in') === 'in') {
+                    $touched[$emp->emp_code][$when->toDateString()] = true;
+                }
+            }
+        } catch (\Throwable $e) {
+            report($e);
+
+            return $promoted;
+        }
+
+        if ($promoted > 0) {
+            Log::info('attendance.pending.promoted', [
+                'tenant' => $tid,
+                'device_code' => $deviceCode,
+                'device_sn' => $deviceSn,
+                'emp_code' => $emp->emp_code,
+                'promoted' => $promoted,
+            ]);
+        }
+
+        return $promoted;
+    }
+
+    /**
      * Write parsed punches into attendance_logs, matching employees by
      * (emp_prefix . device_code) and, failing that, by the Biometric Mapping
      * field (employees.device_user_id). Returns counts + unmatched device codes.
@@ -403,6 +562,15 @@ class ETimeOfficeService
             $emp = $cache[$full];
             if (! $emp) {
                 $unmatched[$full] = ($unmatched[$full] ?? 0) + 1;
+
+                // 18 Aug 2026 HOTFIX — QUARANTINE instead of discard.
+                // This used to be a bare `continue`: the punch was destroyed and
+                // only a counter survived via recordUnmapped(), while the endpoint
+                // still answered 200. That fires hardest at go-live, when nobody
+                // is mapped yet, and SBB does not keep a copy either — it forwards
+                // the raw PIN and trusts SmartPRS to map it. The punch is now held
+                // and replayed the moment an admin maps the code.
+                self::quarantine($p, $cfg, $full);
 
                 continue;
             }

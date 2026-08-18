@@ -161,10 +161,97 @@ class BiometricConfigController extends Controller
             // branches master optional
         }
 
+        // 18 Aug 2026 HOTFIX — UNASSIGNED devices.
+        // PushController::rowForSn() auto-registers any unknown serial with
+        // tenant_id = null. The query above is tenant-scoped, so on a
+        // multi-tenant server those rows were invisible to every admin and
+        // could not be corrected through the UI at all. Surface them
+        // separately, for a tenanted admin only: on a single-tenant install
+        // tenant_id is null everywhere and they are already in $rows.
+        $unassigned = [];
+        if ($tid) {
+            try {
+                $unassigned = DB::table('biometric_configs')
+                    ->whereNull('tenant_id')
+                    ->orderByDesc('id')
+                    ->limit(100)
+                    ->get()
+                    ->map(fn ($r) => $this->present($r) + [
+                        'lastStatus' => $r->last_status ?? '',
+                        'serial_number' => $r->serial_number ?? '',
+                    ])
+                    ->values()
+                    ->all();
+            } catch (\Throwable $e) {
+                $unassigned = [];
+            }
+        }
+
         return response()->json([
             'ok' => true,
             'devices' => $rows->map(fn ($r) => $this->present($r))->values(),
+            'unassigned' => $unassigned,
             'branches' => $branches,
+        ]);
+    }
+
+    /**
+     * POST /app/biometric-config/{id}/assign — claim an auto-registered device.
+     *
+     * 18 Aug 2026 HOTFIX. A device that dialled in before anyone configured it
+     * sits with tenant_id = null and, since Fix 1, can now only ever match
+     * null-tenant employees — correct, but useless until somebody claims it.
+     * This is that action. Only an UNASSIGNED row can be claimed, so one tenant
+     * can never take a device that already belongs to another.
+     */
+    public function assign(Request $request, int $id)
+    {
+        if ($deny = ApprovalService::denyUnlessRole($request, ['admin', 'hr_manager'])) {
+            return $deny;
+        }
+        self::ensureTable();
+
+        $tid = self::tid($request);
+        if (! $tid) {
+            return response()->json(['ok' => false, 'error' => 'Your login is not attached to a workspace, so it cannot claim a device.'], 422);
+        }
+
+        $row = DB::table('biometric_configs')->where('id', $id)->whereNull('tenant_id')->first();
+        if (! $row) {
+            return response()->json(['ok' => false, 'error' => 'That device is not available to claim — it may already belong to a workspace.'], 404);
+        }
+
+        $data = ['tenant_id' => $tid, 'updated_at' => now()];
+
+        $companyId = (int) $request->input('company_id', 0);
+        if ($companyId > 0) {
+            $owns = DB::table('companies')->where('id', $companyId)->where('tenant_id', $tid)->exists();
+            if (! $owns) {
+                return response()->json(['ok' => false, 'error' => 'That company does not belong to your workspace.'], 422);
+            }
+            if (Schema::hasColumn('biometric_configs', 'company_id')) {
+                $data['company_id'] = $companyId;
+            }
+        }
+        if (($branch = trim((string) $request->input('branch', ''))) !== '') {
+            $data['branch'] = $branch;
+        }
+        if (($label = trim((string) $request->input('label', ''))) !== '') {
+            $data['label'] = $label;
+        }
+
+        DB::table('biometric_configs')->where('id', $row->id)->update($data);
+
+        \Illuminate\Support\Facades\Log::info('biometric.device.assigned', [
+            'id' => $row->id,
+            'serial' => $row->serial_number ?? null,
+            'tenant' => $tid,
+            'by' => $request->user()?->email,
+        ]);
+
+        return response()->json([
+            'ok' => true,
+            'message' => 'Device '.($row->serial_number ?: '#'.$row->id).' is now assigned to your workspace. Its punches will match your employees from the next upload.',
         ]);
     }
 
@@ -552,6 +639,32 @@ class BiometricConfigController extends Controller
         } catch (\Throwable $e) {
         }
 
+        // SBB — REPLAY the quarantine. Punches that arrived for this device ID
+        // before it was mapped were held in attendance_pending instead of being
+        // discarded; mapping the ID is the event that makes them attributable,
+        // so promote them now and stamp resolved_at. This is what stops every
+        // go-live window from silently losing its first days of attendance.
+        $promoted = 0;
+        try {
+            // Scope by the EMPLOYEE's tenant, not the acting user's: a super_admin
+            // mapping on a customer's behalf has no tenant of their own.
+            //
+            // device_sn is optional and comes from the "Punches waiting for a
+            // mapping" panel, which lists one row per (code, device). When it is
+            // supplied the promotion is confined to THAT device — two devices can
+            // both have PIN 5 and they are different people. Called without it
+            // (e.g. the older mapping card), every held punch for the code is
+            // promoted, which is the previous behaviour.
+            $promoted = ETimeOfficeService::promotePending(
+                $emp->tenant_id ? (int) $emp->tenant_id : $tid,
+                $deviceId,
+                $emp,
+                trim((string) $request->input('device_sn', '')) ?: null
+            );
+        } catch (\Throwable $e) {
+            report($e);
+        }
+
         // The ID is mapped now — drop it from the unmapped list.
         try {
             if (Schema::hasTable('biometric_unmapped')) {
@@ -564,8 +677,10 @@ class BiometricConfigController extends Controller
 
         return response()->json([
             'ok' => true,
+            'promoted' => $promoted,
             'message' => 'Mapped '.$deviceId.' → '.$emp->name.' ('.$emp->emp_code.').'
-                .($backfilled ? ' '.$backfilled.' earlier punch(es) re-linked.' : ''),
+                .($backfilled ? ' '.$backfilled.' earlier punch(es) re-linked.' : '')
+                .($promoted ? ' '.$promoted.' held punch(es) released from the pending queue.' : ''),
         ]);
     }
 

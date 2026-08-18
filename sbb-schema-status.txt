@@ -1,0 +1,142 @@
+ 
+Date: 17-08-2026 17:15:54.77 
+Folder: C:\laragon\www\smartprs2 
+ 
+============================================================ 
+ migrate:status  (SBB rows only)                             
+============================================================ 
+PHP Deprecated:  Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\vendor\laravel\framework\config\database.php on line 61
+
+Deprecated: Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\vendor\laravel\framework\config\database.php on line 61
+PHP Deprecated:  Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\vendor\laravel\framework\config\database.php on line 81
+
+Deprecated: Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\vendor\laravel\framework\config\database.php on line 81
+PHP Deprecated:  Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\config\database.php on line 58
+
+Deprecated: Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\config\database.php on line 58
+PHP Deprecated:  Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\config\database.php on line 78
+
+Deprecated: Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\config\database.php on line 78
+
+  Migration name ...................................................................................... Batch / Status  
+  0001_01_01_000000_create_users_table ....................................................................... [1] Ran  
+  0001_01_01_000001_create_cache_table ....................................................................... [1] Ran  
+  0001_01_01_000002_create_jobs_table ........................................................................ [1] Ran  
+  2026_01_01_000001_create_companies_table ................................................................... [1] Ran  
+  2026_01_01_000002_add_company_id_to_users_table ............................................................ [1] Ran  
+  2026_01_01_000100_create_employees_table ................................................................... [1] Ran  
+  2026_01_01_000200_create_departments_table ................................................................. [1] Ran  
+  2026_01_01_000300_create_attendances_table ................................................................. [1] Ran  
+  2026_01_01_000400_create_leave_applications_table .......................................................... [1] Ran  
+  2026_01_01_000500_create_loans_table ....................................................................... [1] Ran  
+  2026_01_01_000600_create_salary_runs_table ................................................................. [1] Ran  
+  2026_01_01_000700_create_salary_slips_table ................................................................ [1] Ran  
+  2026_01_01_000800_create_devices_table ..................................................................... [1] Ran  
+  2026_01_01_000900_create_kb_topics_table ................................................................... [1] Ran  
+  2026_05_30_025615_create_permission_tables ................................................................. [1] Ran  
+  2026_05_30_025626_create_activity_log_table ................................................................ [1] Ran  
+  2026_05_30_025627_add_event_column_to_activity_log_table ................................................... [1] Ran  
+  2026_05_30_025628_add_batch_uuid_column_to_activity_log_table .............................................. [1] Ran  
+  2026_05_30_025638_create_personal_access_tokens_table ...................................................... [1] Ran  
+  2026_06_02_120000_make_letters_employee_nullable ........................................................... [1] Ran  
+  2026_06_03_120000_fix_late_policy_addl_late ................................................................ [1] Ran  
+  2026_06_24_000000_ensure_runtime_feature_tables ............................................................ [2] Ran  
+  2026_06_24_000100_widen_payroll_runs_status ................................................................ [2] Ran  
+  2026_06_25_000000_create_biometric_configs_table ........................................................... [2] Ran  
+  2026_07_07_000000_ensure_shifts_table ...................................................................... [3] Ran  
+  2026_07_15_000000_widen_employees_status ................................................................... [4] Ran  
+  2026_07_15_000100_add_employee_archive ..................................................................... [5] Ran  
+  2026_07_15_000200_add_backup_schedule ...................................................................... [6] Ran  
+  2026_07_22_000000_add_dra_pcc_declared ..................................................................... [8] Ran  
+  2026_07_22_000001_create_self_onboarding_tables ............................................................ [7] Ran  
+  2026_07_22_000002_add_selfonboard_cols_to_employees ........................................................ [7] Ran  
+  2026_07_22_000100_create_late_notifications ................................................................ [8] Ran  
+  2026_07_22_000200_add_biometric_device_mapping ............................................................. [8] Ran  
+  2026_07_26_000000_p0_create_notification_log ............................................................... [9] Ran  
+  2026_07_26_000100_probation_tracking ....................................................................... [9] Ran  
+  2026_07_26_000200_create_attendance_corrections ............................................................ [9] Ran  
+  2026_07_26_000300_create_employee_import_jobs .............................................................. [9] Ran  
+  2026_07_26_000400_add_payroll_period_columns ............................................................... [9] Ran  
+  2026_07_26_000500_create_statutory_configs ................................................................. [9] Ran  
+  2026_08_07_000100_fix_escalations_priority ................................................................ [10] Ran  
+  2026_08_16_000100_create_api_keys_table ................................................................... [11] Ran  
+  2026_08_16_000200_extend_attendance_logs_for_sbb .......................................................... [11] Ran  
+  2026_08_16_000300_create_attendance_pending_table ......................................................... [11] Ran  
+
+ 
+PHP Deprecated:  Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\vendor\laravel\framework\config\database.php on line 61
+
+Deprecated: Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\vendor\laravel\framework\config\database.php on line 61
+PHP Deprecated:  Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\vendor\laravel\framework\config\database.php on line 81
+
+Deprecated: Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\vendor\laravel\framework\config\database.php on line 81
+PHP Deprecated:  Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\config\database.php on line 58
+
+Deprecated: Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\config\database.php on line 58
+PHP Deprecated:  Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\config\database.php on line 78
+
+Deprecated: Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\config\database.php on line 78
+============================================================
+ SBB schema verification (read-only)
+============================================================
+
+Connection      : mysql
+Host / port     : 127.0.0.1 : 3306
+Database        : smartprs
+App timezone    : Asia/Kolkata
+App URL         : http://localhost:8000
+
+Connected       : YES
+
+--- migrations table -----------------------------------------
+recorded: 2026_08_16_000100_create_api_keys_table   (batch 11)
+recorded: 2026_08_16_000200_extend_attendance_logs_for_sbb   (batch 11)
+recorded: 2026_08_16_000300_create_attendance_pending_table   (batch 11)
+
+--- tables ---------------------------------------------------
+api_keys exists            : YES
+attendance_pending exists  : YES
+attendance_logs exists     : YES
+
+--- attendance_logs new columns ------------------------------
+device_sn                  : YES
+device_user_id             : YES
+external_id                : YES
+verify_mode                : YES
+
+--- attendance_logs unique indexes ---------------------------
+attlog_tenant_external_unique    : YES (unique)
+attlog_natural_unique            : YES (unique)
+
+--- direction column width -----------------------------------
+direction type : varchar(8)   (expected varchar(8) after migration)
+
+--- data ------------------------------------------------------
+total punch rows           : 1254
+  source=etimeoffice      rows=420
+  source=demo             rows=798
+  source=web              rows=11
+  source=manual           rows=14
+  source=mobile           rows=11
+
+   Illuminate\Database\QueryException 
+
+  SQLSTATE[42S22]: Column not found: 1054 Unknown column 'resolved_at' in 'where clause' (Connection: mysql, SQL: select count(*) as aggregate from `attendance_pending` where `resolved_at` is null)
+
+  at vendor\laravel\framework\src\Illuminate\Database\Connection.php:825
+    821▕                     $this->getName(), $query, $this->prepareBindings($bindings), $e
+    822▕                 );
+    823▕             }
+    824▕ 
+  ➜ 825▕             throw new QueryException(
+    826▕                 $this->getName(), $query, $this->prepareBindings($bindings), $e
+    827▕             );
+    828▕         }
+    829▕     }
+
+  1   vendor\laravel\framework\src\Illuminate\Database\Connection.php:407
+      PDOException::("SQLSTATE[42S22]: Column not found: 1054 Unknown column 'resolved_at' in 'where clause'")
+
+  2   vendor\laravel\framework\src\Illuminate\Database\Connection.php:407
+      PDO::prepare("select count(*) as aggregate from `attendance_pending` where `resolved_at` is null")
+

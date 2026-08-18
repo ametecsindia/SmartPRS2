@@ -526,6 +526,20 @@ Route::middleware(['auth', App\Http\Middleware\LicenseGate::class, App\Http\Midd
     Route::get('/app/biometric-config/mappings', [App\Http\Controllers\BiometricConfigController::class, 'mappings'])->name('app.bioconfig.mappings');   // Biometric Mapping (2026-08-05)
     Route::post('/app/biometric-config/map', [App\Http\Controllers\BiometricConfigController::class, 'mapEmployee'])->name('app.bioconfig.map');
     Route::post('/app/biometric-config/unmap', [App\Http\Controllers\BiometricConfigController::class, 'unmapEmployee'])->name('app.bioconfig.unmap');
+
+    // SBB (Smart Biometric Bridge) — Settings screens for the authenticated JSON
+    // ingest path. The API itself is stateless and lives in routes/api.php; these
+    // are the admin surfaces: issuing/revoking keys, and releasing punches that
+    // arrived before their device ID was mapped to an employee.
+    Route::get('/app/api-keys', [App\Http\Controllers\ApiKeyController::class, 'index'])->name('app.apikeys');
+    Route::post('/app/api-keys', [App\Http\Controllers\ApiKeyController::class, 'store'])->name('app.apikeys.store');
+    Route::post('/app/api-keys/{id}/revoke', [App\Http\Controllers\ApiKeyController::class, 'revoke'])->whereNumber('id')->name('app.apikeys.revoke');
+    Route::get('/app/pending-punches', [App\Http\Controllers\ApiKeyController::class, 'pending'])->name('app.pending');
+    Route::post('/app/pending-punches/map', [App\Http\Controllers\ApiKeyController::class, 'mapPending'])->name('app.pending.map');
+    // 18 Aug 2026 hotfix — claim a device that auto-registered with no tenant.
+    Route::post('/app/biometric-config/{id}/assign', [App\Http\Controllers\BiometricConfigController::class, 'assign'])->whereNumber('id')->name('app.bioconfig.assign');
+    Route::post('/app/pending-punches/assign-device', [App\Http\Controllers\ApiKeyController::class, 'assignDevice'])->name('app.pending.assign');
+
     // rev161: Employee Document Tracker — real file uploads (list / upload / download / delete).
     Route::get('/app/documents-mgr', [App\Http\Controllers\DocumentController::class, 'index'])->name('app.docmgr');
     Route::post('/app/documents-mgr/upload', [App\Http\Controllers\DocumentController::class, 'upload'])->name('app.docmgr.upload');
