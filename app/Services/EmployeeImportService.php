@@ -85,10 +85,35 @@ class EmployeeImportService
         'emergency_name' => ['emergencycontactperson', 'emergencyname', 'emergencyperson', 'emergencycontact'],
         'emergency_phone' => ['emergencycontactnumber', 'emergencyphone', 'emergencynumber', 'emergencymobile'],
         'account_holder' => ['bankaccountholder', 'accountholder', 'accountholdername', 'bankholder'],
+        // 19 Aug 2026 (Ejaz) — the sample template now carries every EXPORT column,
+        // so the wizard must accept them too or they'd be silently dropped (exactly
+        // the rev190 bug). The aliases match both the ALL-CAPS template and the
+        // mixed-case export ("Commission %" and "COMMISSION %" both normalise to
+        // "commission"), so an exported file re-imports as-is.
+        'schedule_id' => ['salaryschedule', 'schedule', 'payschedule'],
+        'comm_pct' => ['commission', 'commissionpct', 'commissionpercent', 'commpct'],
+        'pf_applicable' => ['pfapplicable'],
+        'esi_applicable' => ['esiapplicable'],
+        'pt_state' => ['ptstate', 'professionaltaxstate'],
+        'employment_stage' => ['employmentstage', 'stage'],
+        'reporting_manager' => ['reportingmanager', 'manager', 'reportsto'],
+        'dra_status' => ['drastatus'],
+        'dra_expiry' => ['draexpiry', 'draexpirydate'],
+        'pcc_status' => ['pccstatus'],
+        'pcc_deadline' => ['pccdeadline'],
+        'pcc_expiry' => ['pccexpiry', 'pccexpirydate'],
+        'status' => ['status', 'employeestatus'],
+        // Import-only (never exported): the person's first-time ESS login password.
+        // Optional — blank means no login is created. Applied to the users table
+        // after the employee write; never stored on the employees row.
+        'password' => ['defaultpassword', 'password', 'loginpassword', 'firsttimepassword'],
     ];
 
     /** Fields a row cannot be imported without. */
     public const REQUIRED = ['name'];
+
+    /** Minimum length accepted in the optional DEFAULT PASSWORD column. */
+    private const PASSWORD_MIN = 6;
 
     /** Cached employees column list (per request). */
     private static ?array $empCols = null;
@@ -285,6 +310,17 @@ class EmployeeImportService
                     $rowErr = strtoupper($yn).' "'.$v[$yn].'" — use Yes or No.';
                 }
             }
+            // 19 Aug 2026 — optional DEFAULT PASSWORD column. The EMAIL is the login
+            // ID, so a password with no email cannot work. Raised here so PREVIEW
+            // shows it and it is fixed before anything is written.
+            $pwd = trim((string) ($v['password'] ?? ''));
+            if ($rowErr === null && $pwd !== '') {
+                if (empty($v['email'])) {
+                    $rowErr = 'Default Password needs an EMAIL in the same row — the email is the login ID.';
+                } elseif (mb_strlen($pwd) < self::PASSWORD_MIN) {
+                    $rowErr = 'Default Password must be at least '.self::PASSWORD_MIN.' characters.';
+                }
+            }
             if ($rowErr !== null) {
                 $errors[] = ['row' => $lineNo, 'message' => $rowErr];
 
@@ -318,14 +354,17 @@ class EmployeeImportService
             }
 
             $payload = self::payload($v, $tid, $companyId);
+            // Kept OUT of the employees payload — applied to the users table after
+            // the import transaction (see applyLogin).
+            $login = $pwd !== '' ? ['email' => $v['email'], 'name' => $name, 'password' => $pwd] : null;
 
             if ($existing && $dupMode === 'update') {
-                $toUpdate[] = ['id' => $existing->id, 'payload' => $payload, 'row' => $lineNo];
+                $toUpdate[] = ['id' => $existing->id, 'payload' => $payload, 'row' => $lineNo, 'login' => $login];
             } else {
                 if ($code === '') {
                     $payload['emp_code'] = 'EMP-'.random_int(1000, 9999);
                 }
-                $toCreate[] = ['payload' => $payload, 'row' => $lineNo];
+                $toCreate[] = ['payload' => $payload, 'row' => $lineNo, 'login' => $login];
             }
         }
 
@@ -370,13 +409,24 @@ class EmployeeImportService
                 foreach ($toCreate as $c) {
                     $row = $c['payload'];
                     $row['uuid'] = (string) Str::uuid();
-                    $row['status'] = 'active';
+                    // 19 Aug 2026 — honour an imported STATUS column; default active.
+                    $row['status'] = $row['status'] ?? 'active';
                     $row['created_at'] = now();
                     $row['updated_at'] = now();
                     DB::table('employees')->insert($row);
                     $created++;
                 }
             });
+
+            // 19 Aug 2026 — optional first-time ESS logins from the DEFAULT PASSWORD
+            // column. Deliberately OUTSIDE the transaction: a users-table problem
+            // must never roll back a successful employee import.
+            $logins = 0;
+            foreach (array_merge($toUpdate, $toCreate) as $item) {
+                if (! empty($item['login']) && self::applyLogin($item['login'], $tid)) {
+                    $logins++;
+                }
+            }
 
             DB::table('employee_import_jobs')->where('token', $token)->update([
                 'status' => 'imported', 'dup_mode' => $dupMode,
@@ -390,6 +440,7 @@ class EmployeeImportService
             $summary['created'] = $created;
             $summary['updated'] = $updated;
             $summary['imported'] = $created + $updated;
+            $summary['logins'] = $logins;
 
             return $summary;
         } catch (\Throwable $e) {
@@ -441,6 +492,57 @@ class EmployeeImportService
         if ($decl) {
             $out['dra_pcc_declared'] = ! in_array(false, $decl, true);
         }
+        // ---- 19 Aug 2026 — export-parity columns ----
+        foreach (['pt_state', 'reporting_manager'] as $f) {
+            if (! empty($v[$f])) {
+                $out[$f] = $v[$f];
+            }
+        }
+        if (isset($v['comm_pct']) && trim((string) $v['comm_pct']) !== '') {
+            $out['comm_pct'] = (float) str_replace(['%', ',', ' '], '', (string) $v['comm_pct']);
+        }
+        if (isset($v['pf_applicable']) && trim((string) $v['pf_applicable']) !== '') {
+            $out['pf_applicable'] = self::yesNo($v['pf_applicable']) === true;
+        }
+        if (isset($v['esi_applicable']) && trim((string) $v['esi_applicable']) !== '') {
+            // employees.esi_applicable is the string 'auto' | 'yes' | 'no'.
+            $esiV = strtolower(trim((string) $v['esi_applicable']));
+            $out['esi_applicable'] = in_array($esiV, ['auto', 'yes', 'no'], true) ? $esiV : 'auto';
+        }
+        if (isset($v['employment_stage']) && trim((string) $v['employment_stage']) !== '') {
+            // Stored as '' (Permanent) | 'probation' | 'internship' — same values
+            // the Add/Edit form writes, so payroll reads them identically.
+            $stage = strtolower(trim((string) $v['employment_stage']));
+            $out['employment_stage'] = in_array($stage, ['probation', 'internship'], true) ? $stage : '';
+        }
+        foreach (['dra_status', 'pcc_status', 'status'] as $f) {
+            if (! empty($v[$f])) {
+                $out[$f] = strtolower(trim((string) $v[$f]));
+            }
+        }
+        foreach (['dra_expiry', 'pcc_deadline', 'pcc_expiry'] as $d) {
+            if (! empty($v[$d]) && ($x = self::date($v[$d]))) {
+                $out[$d] = $x;
+            }
+        }
+        // Salary Schedule arrives as a NAME (the export writes "Name — Company");
+        // resolve it to employees.schedule_id exactly like the Add/Edit form does.
+        if (isset($v['schedule_id']) && trim((string) $v['schedule_id']) !== '') {
+            try {
+                if (Schema::hasTable('salary_schedules')) {
+                    $schedName = trim(explode(' — ', trim((string) $v['schedule_id']))[0]);
+                    $schedId = DB::table('salary_schedules')
+                        ->when($tid && Schema::hasColumn('salary_schedules', 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
+                        ->where('name', $schedName)->orderByDesc('id')->value('id');
+                    if ($schedId) {
+                        $out['schedule_id'] = $schedId;
+                    }
+                }
+            } catch (\Throwable $e) {
+                // schedule lookup is best-effort — never fail an import over it
+            }
+        }
+
         // company name overrides the default company when it resolves
         if (! empty($v['company'])) {
             $cid = DB::table('companies')->when($tid, fn ($q) => $q->where('tenant_id', $tid))
@@ -461,6 +563,54 @@ class EmployeeImportService
         }
 
         return $out;
+    }
+
+    /**
+     * 19 Aug 2026 — create (or reset) the ESS login for one imported row from the
+     * template's DEFAULT PASSWORD column. Mirrors the one-shot importer's rev149
+     * behaviour: the row's EMAIL is the login ID, an existing user has their
+     * password reset, a new user is created with the "employee" role. Never
+     * throws — a login problem must not affect the employee import.
+     */
+    private static function applyLogin(array $login, ?int $tid): bool
+    {
+        try {
+            if (! Schema::hasTable('users')) {
+                return false;
+            }
+            $email = trim((string) ($login['email'] ?? ''));
+            $pwd = (string) ($login['password'] ?? '');
+            if ($email === '' || $pwd === '') {
+                return false;
+            }
+            $u = DB::table('users')->whereRaw('LOWER(email) = ?', [strtolower($email)])
+                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))->first();
+            if ($u) {
+                DB::table('users')->where('id', $u->id)
+                    ->update(['password' => bcrypt($pwd), 'updated_at' => now()]);
+
+                return true;
+            }
+            $uid = DB::table('users')->insertGetId([
+                'tenant_id' => $tid, 'name' => (string) ($login['name'] ?? $email), 'email' => $email,
+                'password' => bcrypt($pwd), 'status' => 'active',
+                'created_at' => now(), 'updated_at' => now(),
+            ]);
+            try {
+                $um = \App\Models\User::find($uid);
+                if ($um && method_exists($um, 'syncRoles')) {
+                    $um->syncRoles(['employee']);
+                }
+            } catch (\Throwable $e) {
+                // role package optional
+            }
+
+            return true;
+        } catch (\Throwable $e) {
+            Log::warning('EmployeeImportService::applyLogin skipped: '.$e->getMessage());
+
+            return false;
+        }
     }
 
     /** Past import jobs for the tenant. */

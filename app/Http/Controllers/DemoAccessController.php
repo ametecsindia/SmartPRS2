@@ -241,9 +241,30 @@ class DemoAccessController extends Controller
                 'company' => ['nullable', 'string', 'max:160'],
                 'entry' => ['required', 'in:demo,1,2,3,full'],
             ]);
-            $digits = substr(preg_replace('/\D+/', '', $v['mobile']), -10);
-            if (strlen($digits) < 10) {
-                return response()->json(['ok' => false, 'error' => 'Please enter a valid 10-digit mobile number.'], 422);
+            // 19 Aug 2026 (Ejaz) — the old rule kept only the LAST 10 digits of
+            // whatever was typed, so junk sailed through: "878667767377374" (15
+            // digits) became "7767377374" and was accepted, as was "93910244rrr".
+            // Same rule as the employee form's f_mobile check: reject letters and
+            // stray symbols outright, tolerate a +91 / 0091 / 0 prefix, then insist
+            // on a real 10-digit Indian mobile starting 6-9.
+            $rawMobile = trim((string) $v['mobile']);
+            $badMobile = fn () => response()->json([
+                'ok' => false,
+                'error' => 'Please enter a valid 10-digit mobile number (starting 6, 7, 8 or 9).',
+            ], 422);
+            if (preg_match('/[^0-9+() -]/', $rawMobile)) {
+                return $badMobile();
+            }
+            $digits = preg_replace('/\D+/', '', $rawMobile);
+            if (strlen($digits) === 13 && str_starts_with($digits, '091')) {
+                $digits = substr($digits, 3);
+            } elseif (strlen($digits) === 12 && str_starts_with($digits, '91')) {
+                $digits = substr($digits, 2);
+            } elseif (strlen($digits) === 11 && $digits[0] === '0') {
+                $digits = substr($digits, 1);
+            }
+            if (! preg_match('/^[6-9][0-9]{9}$/', $digits)) {
+                return $badMobile();
             }
 
             self::ensureGate();

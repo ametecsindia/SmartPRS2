@@ -56,7 +56,7 @@
                 <label>Your name*</label>
                 <input id="d_name" required maxlength="120" placeholder="Full name">
                 <label>Phone number (WhatsApp)*</label>
-                <input id="d_mobile" required maxlength="20" inputmode="tel" placeholder="10-digit mobile — passkey comes here">
+                <input id="d_mobile" type="tel" required maxlength="15" inputmode="tel" pattern="[0-9+() -]*" placeholder="10-digit mobile — passkey comes here">
                 <label>Email ID*</label>
                 <input id="d_email" type="email" required maxlength="160" placeholder="you@company.in — passkey also comes here">
                 <label>Company (optional)</label>
@@ -83,11 +83,28 @@
             headers:{ 'Content-Type':'application/json', 'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content, 'X-Requested-With':'XMLHttpRequest', 'Accept':'application/json' },
             body: JSON.stringify(body) }).then(function(r){ return r.json(); });
     }
+    // 19 Aug 2026 — same rule as the employee form: no letters/symbols, tolerate
+    // a +91 / 0091 / 0 prefix, then a real 10-digit mobile (6-9).
+    function dValidMobile(v){
+        if(/[^0-9+() -]/.test(v)){ return false; }
+        var d=v.replace(/[^0-9]/g,'');
+        if(d.length===13 && d.slice(0,3)==='091'){ d=d.slice(3); }
+        else if(d.length===12 && d.slice(0,2)==='91'){ d=d.slice(2); }
+        else if(d.length===11 && d.charAt(0)==='0'){ d=d.slice(1); }
+        return /^[6-9][0-9]{9}$/.test(d);
+    }
     function requestPin(ev){
         if(ev){ ev.preventDefault(); }
         var b=document.getElementById('d_btn'); b.disabled=true;
         var e=document.getElementById('d_err'), m=document.getElementById('d_msg');
         e.style.display='none'; m.style.display='none';
+        if(!dValidMobile(document.getElementById('d_mobile').value.trim())){
+            b.disabled=false;
+            e.textContent='Please enter a valid 10-digit mobile number (starting 6, 7, 8 or 9).';
+            e.style.display='block';
+            document.getElementById('d_mobile').focus();
+            return false;
+        }
         post('{{ route('demo.request') }}', {
             name:document.getElementById('d_name').value.trim(),
             mobile:document.getElementById('d_mobile').value.trim(),

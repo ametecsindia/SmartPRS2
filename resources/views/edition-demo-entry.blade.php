@@ -52,7 +52,7 @@
             <div style="font-size:13px; font-weight:700; color:#0c1929; margin-bottom:8px;"><i class="fas fa-paper-plane" style="color:#f97316;"></i> Step 1 — request your passkey</div>
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
                 <input type="text" id="rq_name" maxlength="120" placeholder="Name*" style="padding:11px 14px; border:1.5px solid #cbd5e1; border-radius:10px; font-size:14px;">
-                <input type="text" id="rq_mobile" maxlength="20" inputmode="tel" placeholder="Phone number (WhatsApp)*" style="padding:11px 14px; border:1.5px solid #cbd5e1; border-radius:10px; font-size:14px;">
+                <input type="tel" id="rq_mobile" maxlength="15" inputmode="tel" pattern="[0-9+() -]*" placeholder="10-digit mobile (WhatsApp)*" style="padding:11px 14px; border:1.5px solid #cbd5e1; border-radius:10px; font-size:14px;">
                 <input type="email" id="rq_email" maxlength="160" placeholder="Email ID*" style="grid-column:1 / -1; padding:11px 14px; border:1.5px solid #cbd5e1; border-radius:10px; font-size:14px;">
             </div>
             <button class="btn btn-primary" type="button" id="rq_btn" onclick="requestPin()" style="margin-top:12px;"><i class="fas fa-paper-plane"></i> Submit request</button>
@@ -71,10 +71,28 @@
             </div>
         </form>
         <script>
+        // 19 Aug 2026 — same rule as the employee form: no letters/symbols,
+        // tolerate a +91 / 0091 / 0 prefix, then a real 10-digit mobile (6-9).
+        function rqValidMobile(v){
+            if(/[^0-9+() -]/.test(v)){ return false; }
+            var d=v.replace(/[^0-9]/g,'');
+            if(d.length===13 && d.slice(0,3)==='091'){ d=d.slice(3); }
+            else if(d.length===12 && d.slice(0,2)==='91'){ d=d.slice(2); }
+            else if(d.length===11 && d.charAt(0)==='0'){ d=d.slice(1); }
+            return /^[6-9][0-9]{9}$/.test(d);
+        }
         function requestPin(){
             var b=document.getElementById('rq_btn'); b.disabled=true;
             var m=document.getElementById('rq_msg'), e=document.getElementById('rq_err');
             m.style.display='none'; e.style.display='none';
+            var mob=document.getElementById('rq_mobile').value.trim();
+            if(!rqValidMobile(mob)){
+                b.disabled=false;
+                e.textContent='Please enter a valid 10-digit mobile number (starting 6, 7, 8 or 9).';
+                e.style.display='block';
+                document.getElementById('rq_mobile').focus();
+                return;
+            }
             fetch('{{ $requestAction }}', { method:'POST', credentials:'same-origin',
                 headers:{ 'Content-Type':'application/json', 'X-CSRF-TOKEN':'{{ csrf_token() }}', 'X-Requested-With':'XMLHttpRequest', 'Accept':'application/json' },
                 body: JSON.stringify({ name:document.getElementById('rq_name').value.trim(), mobile:document.getElementById('rq_mobile').value.trim(), email:document.getElementById('rq_email').value.trim(), entry:'{{ $n }}' })

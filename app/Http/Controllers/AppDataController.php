@@ -785,6 +785,14 @@ class AppDataController extends Controller
         $tenantId = optional($request->user())->tenant_id;
 
         // Header labels (ALL CAPS). Order mirrors the Add/Edit tabs + Self-Onboarding.
+        // 19 Aug 2026 (Ejaz) — the sample file was missing EVERY column in the
+        // second block below, which the EXPORT has been emitting since 10 Aug. The
+        // template now carries the full export column set in the same order, so an
+        // exported file can be edited and re-imported with nothing lost, plus one
+        // column the export deliberately never contains: DEFAULT PASSWORD (the
+        // person's first-time ESS login password). It is OPTIONAL — leave it blank
+        // and no login is created; fill it and the employee can sign in with their
+        // EMAIL + that password.
         $headers = [
             'EMPLOYEE CODE', 'NAME', 'TYPE', 'COMPANY', 'DEPARTMENT', 'DESIGNATION', 'BRANCH', 'TEAM', 'SHIFT',
             'DOJ (DD-MM-YYYY)', 'DOB (DD-MM-YYYY)', 'GENDER', 'MARITAL STATUS', 'BLOOD GROUP',
@@ -792,19 +800,29 @@ class AppDataController extends Controller
             'MOBILE', 'WHATSAPP', 'EMERGENCY CONTACT PERSON', 'EMERGENCY CONTACT NUMBER',
             'PRESENT ADDRESS', 'PERMANENT ADDRESS', 'EMAIL', 'CTC', 'SALARY TYPE', 'PAN', 'UAN',
             'BANK NAME', 'BANK ACCOUNT HOLDER', 'ACCOUNT NUMBER', 'BANK BRANCH', 'IFSC', 'BIOMETRIC ID', 'DRA', 'PCC',
+            // ---- export-parity columns (same order as EmployeeExportController) ----
+            'SALARY SCHEDULE', 'COMMISSION %', 'PF APPLICABLE', 'ESI APPLICABLE', 'PT STATE',
+            'EMPLOYMENT STAGE', 'REPORTING MANAGER', 'DRA STATUS', 'DRA EXPIRY (DD-MM-YYYY)',
+            'PCC STATUS', 'PCC DEADLINE (DD-MM-YYYY)', 'PCC EXPIRY (DD-MM-YYYY)', 'STATUS',
+            // ---- import-only column (never exported) ----
+            'DEFAULT PASSWORD',
         ];
 
         $sample = [
             ['EMP100', 'Sample Name', 'Office', 'Acme Recovery Pvt Ltd', 'Operations', 'Executive', 'Head Office', 'Alpha Team', 'General Shift',
                 '01-04-2024', '15-06-1995', 'Male', 'Married', 'O+', 'Ramesh Sample', 'Sita Sample', 'Priya Sample', 'General', 'ABCDE1234F', '31001234567',
-                '+919999999999', '+919999999999', 'Ramesh Sample', '+919888888888',
+                '9999999999', '9999999999', 'Ramesh Sample', '9888888888',
                 '12 MG Road, Hyderabad', '12 MG Road, Hyderabad', 'sample@company.in', '600000', 'Salary', 'ABCDE1234F', '100200300400',
-                'State Bank of India', 'Sample Name', '12345678901', 'MG Road', 'SBIN0001234', '1043', 'Yes', 'Yes'],
+                'State Bank of India', 'Sample Name', '12345678901', 'MG Road', 'SBIN0001234', '1043', 'Yes', 'Yes',
+                '', '0', 'Yes', 'Auto', 'Telangana', 'Permanent', 'Reporting Manager Name', 'Verified', '31-03-2027',
+                'Verified', '30-06-2026', '30-06-2028', 'Active', 'Welcome@123'],
             ['EMP101', 'Field Agent Name', 'Field', 'Acme Recovery Pvt Ltd', 'Collections', 'Field Officer', 'Branch-2', 'Bravo Team', 'General Shift',
                 '10-05-2024', '20-02-1998', 'Female', 'Single', 'B+', 'Suresh Kumar', 'Latha Kumar', '', 'General', 'FGHIJ5678K', '',
-                '+918888888888', '+918888888888', 'Suresh Kumar', '+918777777777',
+                '8888888888', '8888888888', 'Suresh Kumar', '8777777777',
                 '45 Park Street, Pune', '45 Park Street, Pune', 'agent@company.in', '336000', 'Salary + Commission', 'FGHIJ5678K', '100200300401',
-                'HDFC Bank', 'Field Agent Name', '10987654321', 'Park Street', 'HDFC0005678', '1044', 'Yes', 'NA'],
+                'HDFC Bank', 'Field Agent Name', '10987654321', 'Park Street', 'HDFC0005678', '1044', 'Yes', 'NA',
+                '', '30', 'Yes', 'Yes', 'Maharashtra', 'Probation', 'Sample Name', 'Pending', '',
+                'Pending', '31-12-2026', '', 'Active', 'Welcome@123'],
         ];
 
         // Dynamic dropdown sources from the tenant's masters (names only).
@@ -828,6 +846,9 @@ class AppDataController extends Controller
             ['header' => 'BRANCHES', 'values' => $names('branches')],
             ['header' => 'TEAMS', 'values' => $names('teams')],
             ['header' => 'SHIFTS', 'values' => $names('shifts')],
+            // 19 Aug 2026 — Salary Schedule is now an import column, so offer the
+            // tenant's schedules as a dropdown instead of free text people mistype.
+            ['header' => 'SALARY SCHEDULES', 'values' => $names('salary_schedules')],
         ];
 
         $idx = array_flip($headers);
@@ -841,9 +862,16 @@ class AppDataController extends Controller
             ['col' => $idx['SALARY TYPE'], 'inline' => 'Salary,Salary + Commission,Commission'],
             ['col' => $idx['DRA'], 'inline' => 'Yes,No,NA'],
             ['col' => $idx['PCC'], 'inline' => 'Yes,No,NA'],
+            // 19 Aug 2026 — dropdowns for the new export-parity columns.
+            ['col' => $idx['PF APPLICABLE'], 'inline' => 'Yes,No'],
+            ['col' => $idx['ESI APPLICABLE'], 'inline' => 'Auto,Yes,No'],
+            ['col' => $idx['EMPLOYMENT STAGE'], 'inline' => 'Permanent,Probation,Internship'],
+            ['col' => $idx['DRA STATUS'], 'inline' => 'Pending,Submitted,Verified'],
+            ['col' => $idx['PCC STATUS'], 'inline' => 'Pending,Submitted,Verified'],
+            ['col' => $idx['STATUS'], 'inline' => 'Active,Inactive'],
         ];
         // Only wire a master dropdown when that master actually has rows.
-        foreach ([['DEPARTMENT', 0], ['DESIGNATION', 1], ['BRANCH', 2], ['TEAM', 3], ['SHIFT', 4]] as [$hdr, $lc]) {
+        foreach ([['DEPARTMENT', 0], ['DESIGNATION', 1], ['BRANCH', 2], ['TEAM', 3], ['SHIFT', 4], ['SALARY SCHEDULE', 5]] as [$hdr, $lc]) {
             $cnt = count($lists[$lc]['values']);
             if ($cnt > 0) {
                 $validations[] = ['col' => $idx[$hdr], 'ref' => $listRef($lc, $cnt)];
