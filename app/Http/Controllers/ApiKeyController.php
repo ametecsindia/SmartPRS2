@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\ApiKeys;
+use App\Services\SmarteptWebhook;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -10,14 +11,23 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 
 /**
- * Settings → API Keys, and Settings → Pending Punches.
+ * Time & Attendance → API Keys, and → Pending Punches.
  *
- * API Keys issues the credential Smart Biometric Bridge presents on
- * /api/v1/*. The secret is displayed ONCE, immediately after creation, and is
- * never recoverable afterwards — only its sha256 is stored. A key that is lost
- * is revoked and re-issued, not looked up.
+ * This screen carries two credentials, because SmartPRS accepts pushed
+ * attendance from two different kinds of sender:
  *
- * Pending Punches is the other half of the promise the ingest path makes: a
+ *   API keys        — for Smart Biometric Bridge and any other caller that can
+ *                     present a header on /api/v1/*. The secret is shown ONCE
+ *                     and only its sha256 is stored; a lost key is revoked and
+ *                     re-issued, never looked up.
+ *   SmartEPT hooks  — for SmartEPT, which pushes to us. Its OutboundPusher
+ *                     sends no key header at all, only an HMAC-SHA256 signature
+ *                     over the body, so its credential is a URL + shared secret
+ *                     pair instead. The secret has to be verifiable, so it is
+ *                     encrypted rather than hashed — and it is still only
+ *                     displayed at creation and at rotation.
+ *
+ * Pending Punches is the other half of the promise both ingest paths make: a
  * punch whose device PIN matches no employee is held, not discarded, and this
  * screen is where an admin sees what is waiting and maps it. Mapping releases
  * the held punches into attendance_logs (PunchIngestService::replayPending).
@@ -27,6 +37,8 @@ class ApiKeyController extends Controller
     private const ROLES = ['admin', 'hr_manager'];
 
     private const SCOPES = ['ingest', 'read'];
+
+    private const WEBHOOKS = 'smartept_webhook_endpoints';
 
     // ---- API keys --------------------------------------------------------
 
@@ -44,7 +56,7 @@ class ApiKeyController extends Controller
                 'scopes' => self::SCOPES,
                 'notReady' => true,
                 'conn' => self::connectionDetails(),
-            ]);
+            ] + $this->webhookViewData($request));
         }
 
         $keys = DB::table('api_keys')
@@ -67,25 +79,34 @@ class ApiKeyController extends Controller
             'scopes' => self::SCOPES,
             'notReady' => false,
             'conn' => self::connectionDetails(),
-        ]);
+        ] + $this->webhookViewData($request));
     }
 
     /**
-     * Everything an installer has to type into Smart Biometric Bridge.
+     * Everything an installer has to type into the sending system.
      *
      * Derived from the request host, so it is correct on every install — SaaS,
      * on-prem, custom domain — without anyone maintaining a setting. If this
      * shows http:// rather than https://, fix APP_URL before handing the
-     * address to a site: an API key must not travel in clear text.
+     * address to a site: neither an API key nor a webhook secret may travel in
+     * clear text.
      */
     private static function connectionDetails(): array
     {
         return [
+            // Smart Biometric Bridge — still live, no longer advertised on this
+            // screen; kept here because the keys card links to the base URL.
             'base' => url('/api/v1'),
             'ping' => url('/api/v1/ping'),
             'punches' => url('/api/v1/attendance/punches'),
             'header' => 'X-Api-Key: <your key>',
             'headerAlt' => 'Authorization: Bearer <your key>',
+
+            // SmartEPT webhook receiver.
+            'receiverBase' => url('/api/v1/webhooks/smartept'),
+            'sigHeader' => SmarteptWebhook::SIGNATURE_HEADER,
+            'eventHeader' => SmarteptWebhook::EVENT_HEADER,
+
             'timezone' => (string) config('app.timezone'),
             'version' => (string) config('smartprs.version', ''),
             'secure' => str_starts_with(strtolower(url('/')), 'https://'),
@@ -177,6 +198,184 @@ class ApiKeyController extends Controller
         return back()->with('key_notice', $n
             ? 'Key revoked. Any bridge still using it will start getting 401 immediately.'
             : 'That key was not found.');
+    }
+
+    // ---- SmartEPT webhook receivers --------------------------------------
+
+    /**
+     * The rows and copy-paste values the SmartEPT card needs.
+     *
+     * Returned as a plain array merged into whatever the caller is already
+     * passing, so the "api_keys table missing" branch above and the normal
+     * branch cannot drift apart on what the view is given.
+     */
+    private function webhookViewData(Request $request): array
+    {
+        if (! Schema::hasTable(self::WEBHOOKS)) {
+            return ['webhooks' => collect(), 'webhooksReady' => false];
+        }
+
+        $tid = $this->tid($request);
+
+        $rows = DB::table(self::WEBHOOKS)
+            ->when($tid, fn ($q, $t) => $q->where('tenant_id', $t), fn ($q) => $q->whereNull('tenant_id'))
+            ->orderByDesc('id')
+            ->get()
+            ->map(fn ($r) => [
+                'id' => $r->id,
+                'name' => $r->name,
+                'url' => url('/api/v1/webhooks/smartept/'.$r->slug),
+                'events' => implode(', ', self::decodeScopes($r->events)) ?: implode(', ', SmarteptWebhook::EVENTS),
+                'active' => (bool) $r->active,
+                'last_received_at' => $r->last_received_at ? substr((string) $r->last_received_at, 0, 16) : 'never',
+                'last_event' => $r->last_event ?: '—',
+                'last_status' => $r->last_status ?: '—',
+                'received_count' => (int) $r->received_count,
+                'accepted_count' => (int) $r->accepted_count,
+                'rejected_count' => (int) $r->rejected_count,
+                // A secret encrypted under a previous APP_KEY can never verify a
+                // signature again. Surface it here rather than letting the site
+                // discover it as a silent stream of 401s.
+                'unreadable' => SmarteptWebhook::decryptSecret($r->secret ?? null) === null,
+            ]);
+
+        return ['webhooks' => $rows, 'webhooksReady' => true];
+    }
+
+    /** POST /app/smartept-webhooks */
+    public function storeWebhook(Request $request)
+    {
+        $this->authorizeScreen($request);
+
+        if ($notReady = $this->webhooksNotReady()) {
+            return $notReady;
+        }
+
+        $name = trim((string) $request->input('name', ''));
+        if ($name === '') {
+            return back()->with('key_error', 'Give the receiver a name so you can tell your senders apart, e.g. "SmartEPT — Head Office".');
+        }
+
+        $events = array_values(array_intersect(
+            SmarteptWebhook::EVENTS,
+            array_map('strval', (array) $request->input('events', []))
+        ));
+        if (! $events) {
+            return back()->with('key_error', 'Pick at least one event. SmartEPT\'s live relay sends "attendance.punch".');
+        }
+
+        $tid = $this->tid($request);
+        if ($tid === null) {
+            // Refused here, not at 3 a.m. on the receiver: both attendance_logs
+            // unique indexes include tenant_id, and NULL never collides in a
+            // unique index, so a tenant-less receiver would re-insert every
+            // re-pushed punch instead of ignoring it.
+            return back()->with('key_error', 'Your account is not bound to a workspace, so this receiver could not de-duplicate punches. Sign in to the workspace it belongs to and create it there.');
+        }
+
+        $minted = SmarteptWebhook::mint();
+
+        DB::table(self::WEBHOOKS)->insert([
+            'tenant_id' => $tid,
+            'company_id' => $this->cid($request),
+            'name' => mb_substr($name, 0, 200),
+            'slug' => $minted['slug'],
+            'secret' => SmarteptWebhook::encryptSecret($minted['secret']),
+            'events' => json_encode($events),
+            'active' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        Log::info('smartept_webhook.created', [
+            'slug' => $minted['slug'],
+            'tenant' => $tid,
+            'events' => $events,
+            'by' => $request->user()?->email,
+        ]);
+
+        return $this->flashWebhook($minted['slug'], $minted['secret'], $name);
+    }
+
+    /**
+     * POST /app/smartept-webhooks/{id}/rotate
+     *
+     * The slug — and therefore the URL already configured in SmartEPT — is kept.
+     * Only the shared secret changes, so the operator re-pastes one field, and
+     * pushes signed with the old secret start failing immediately.
+     */
+    public function rotateWebhook(Request $request, int $id)
+    {
+        $this->authorizeScreen($request);
+
+        if ($notReady = $this->webhooksNotReady()) {
+            return $notReady;
+        }
+
+        $tid = $this->tid($request);
+        $row = DB::table(self::WEBHOOKS)
+            ->where('id', $id)
+            ->when($tid, fn ($q) => $q->where('tenant_id', $tid), fn ($q) => $q->whereNull('tenant_id'))
+            ->first();
+
+        if (! $row) {
+            return back()->with('key_error', 'That receiver was not found.');
+        }
+
+        $secret = SmarteptWebhook::mint()['secret'];
+
+        DB::table(self::WEBHOOKS)->where('id', $row->id)->update([
+            'secret' => SmarteptWebhook::encryptSecret($secret),
+            'active' => true,
+            'updated_at' => now(),
+        ]);
+
+        Log::info('smartept_webhook.rotated', ['id' => $row->id, 'tenant' => $tid, 'by' => $request->user()?->email]);
+
+        return $this->flashWebhook($row->slug, $secret, $row->name)
+            ->with('key_notice', 'Secret rotated. SmartEPT will get 401 until the new secret is pasted into its integration target.');
+    }
+
+    /** POST /app/smartept-webhooks/{id}/revoke */
+    public function revokeWebhook(Request $request, int $id)
+    {
+        $this->authorizeScreen($request);
+
+        if ($notReady = $this->webhooksNotReady()) {
+            return $notReady;
+        }
+
+        $tid = $this->tid($request);
+        $n = DB::table(self::WEBHOOKS)
+            ->where('id', $id)
+            ->when($tid, fn ($q) => $q->where('tenant_id', $tid), fn ($q) => $q->whereNull('tenant_id'))
+            ->update(['active' => false, 'updated_at' => now()]);
+
+        if ($n) {
+            Log::info('smartept_webhook.revoked', ['id' => $id, 'tenant' => $tid, 'by' => $request->user()?->email]);
+        }
+
+        return back()->with('key_notice', $n
+            ? 'Receiver revoked. SmartEPT starts getting 401 on its next push.'
+            : 'That receiver was not found.');
+    }
+
+    /** The one place the create-and-rotate reveal is assembled. */
+    private function flashWebhook(string $slug, string $secret, string $name)
+    {
+        return back()
+            ->with('new_webhook_secret', $secret)
+            ->with('new_webhook_url', url('/api/v1/webhooks/smartept/'.$slug))
+            ->with('new_webhook_name', $name);
+    }
+
+    private function webhooksNotReady()
+    {
+        if (Schema::hasTable(self::WEBHOOKS)) {
+            return null;
+        }
+
+        return back()->with('key_error', 'SmartEPT webhooks are not set up on this server yet. Run "php artisan migrate" to create the table, then reload this page.');
     }
 
     // ---- pending punches -------------------------------------------------

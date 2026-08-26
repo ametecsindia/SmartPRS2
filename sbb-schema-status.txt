@@ -1,5 +1,5 @@
  
-Date: 17-08-2026 17:15:54.77 
+Date: 22-08-2026 17:47:30.35 
 Folder: C:\laragon\www\smartprs2 
  
 ============================================================ 
@@ -62,6 +62,8 @@ Deprecated: Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mys
   2026_08_16_000100_create_api_keys_table ................................................................... [11] Ran  
   2026_08_16_000200_extend_attendance_logs_for_sbb .......................................................... [11] Ran  
   2026_08_16_000300_create_attendance_pending_table ......................................................... [11] Ran  
+  2026_08_17_000100_repair_sbb_schema ....................................................................... [12] Ran  
+  2026_08_18_000100_attendance_pending_device_code .......................................................... [13] Ran  
 
  
 PHP Deprecated:  Constant PDO::MYSQL_ATTR_SSL_CA is deprecated since 8.5, use Pdo\Mysql::ATTR_SSL_CA instead in C:\laragon\www\smartprs2\vendor\laravel\framework\config\database.php on line 61
@@ -118,25 +120,18 @@ total punch rows           : 1254
   source=web              rows=11
   source=manual           rows=14
   source=mobile           rows=11
+pending (unresolved)       : 0
+api keys (active)          : 0
 
-   Illuminate\Database\QueryException 
+--- duplicates still present on the natural key ---------------
+none — the natural unique index can be created safely.
 
-  SQLSTATE[42S22]: Column not found: 1054 Unknown column 'resolved_at' in 'where clause' (Connection: mysql, SQL: select count(*) as aggregate from `attendance_pending` where `resolved_at` is null)
+--- routes ----------------------------------------------------
+api/v1/ping                   : YES
+api/v1/attendance/punches     : YES
+app/api-keys                  : YES
+app/pending-punches           : YES
 
-  at vendor\laravel\framework\src\Illuminate\Database\Connection.php:825
-    821▕                     $this->getName(), $query, $this->prepareBindings($bindings), $e
-    822▕                 );
-    823▕             }
-    824▕ 
-  ➜ 825▕             throw new QueryException(
-    826▕                 $this->getName(), $query, $this->prepareBindings($bindings), $e
-    827▕             );
-    828▕         }
-    829▕     }
-
-  1   vendor\laravel\framework\src\Illuminate\Database\Connection.php:407
-      PDOException::("SQLSTATE[42S22]: Column not found: 1054 Unknown column 'resolved_at' in 'where clause'")
-
-  2   vendor\laravel\framework\src\Illuminate\Database\Connection.php:407
-      PDO::prepare("select count(*) as aggregate from `attendance_pending` where `resolved_at` is null")
-
+============================================================
+ Done. Nothing was modified.
+============================================================

@@ -496,7 +496,30 @@ class ETimeOfficeService
                     $match['tenant_id'] = $emp->tenant_id;
                 }
 
-                DB::table('attendance_logs')->updateOrInsert($match, [
+                // Provenance carried over from the held row: which device, which
+                // PIN on it, the sender's own id, how the person verified. These
+                // were lost when mapEmployee moved off PunchIngestService::
+                // replayPending (18 Aug 2026) — a released punch landed with a
+                // NULL external_id and no trace of where it came from.
+                //
+                // FILLED IN only, never overwritten. A row that already carries an
+                // external_id got it from a real ingest, and writing a second one
+                // onto it collides with attlog_tenant_external_unique, throws, and
+                // aborts the rest of the replay half-done.
+                $existing = DB::table('attendance_logs')->where($match)->first();
+
+                $provenance = [];
+                foreach (['external_id', 'device_sn', 'device_user_id', 'verify_mode'] as $col) {
+                    $held = $row->$col ?? null;
+                    if ($held === null || $held === '') {
+                        continue;
+                    }
+                    if ($existing === null || ($existing->$col ?? null) === null) {
+                        $provenance[$col] = $held;
+                    }
+                }
+
+                DB::table('attendance_logs')->updateOrInsert($match, $provenance + [
                     'direction' => $row->direction ?: 'in',
                     'emp_name' => $emp->name ?? null,
                     'log_date' => $when->toDateString(),

@@ -32,9 +32,17 @@ use Illuminate\Support\Facades\Schema;
  *               is reported to the sender, instead of being dropped.
  *   TOLD        Every punch gets a per-punch verdict. An at-least-once sender
  *               that is told only "200" cannot know what actually landed.
+ *
+ * A second authenticated sender now shares this path: the SmartEPT webhook
+ * receiver (App\Services\SmarteptWebhook). It passes its own $source so its
+ * punches stay distinguishable in attendance_logs, and it converts SmartEPT's
+ * ISO-8601 times to naive local BEFORE calling in. The TIME rule above is not
+ * relaxed for it and must not be — the conversion belongs to the adapter that
+ * knows the offset is trustworthy, not to this service.
  */
 class PunchIngestService
 {
+    /** Default source. A caller on another path passes its own to ingest(). */
     public const SOURCE = 'sbb';
 
     /** Cap on one batch, mirrored by the controller's validation. */
@@ -44,9 +52,13 @@ class PunchIngestService
      * Ingest one batch.
      *
      * @param  array<int,mixed>  $punches  raw, unvalidated punch payloads
+     * @param  string  $source  written to attendance_logs.source; part of
+     *                          attlog_natural_unique, so two senders reporting
+     *                          the same punch under different sources both store
+     *                          it. Reuse one value per real-world sender.
      * @return array{batch:array<string,int>,results:list<array<string,string|null>>}
      */
-    public static function ingest(array $punches, int $tenantId, ?int $companyId, string $keyPrefix): array
+    public static function ingest(array $punches, int $tenantId, ?int $companyId, string $keyPrefix, string $source = self::SOURCE): array
     {
         $results = [];
         $counts = ['received' => count($punches), 'accepted' => 0, 'duplicates' => 0, 'pending' => 0, 'rejected' => 0];
@@ -58,7 +70,7 @@ class PunchIngestService
         $devices = [];         // device_sn  => true              (for the log line)
 
         DB::transaction(function () use (
-            $punches, $tenantId, $companyId,
+            $punches, $tenantId, $companyId, $source,
             &$results, &$counts, &$empCache, &$prefixCache, &$touched, &$unmapped, &$devices
         ) {
             foreach ($punches as $raw) {
@@ -111,7 +123,7 @@ class PunchIngestService
                         'direction' => $direction,
                         'verify_mode' => $verifyMode,
                         'external_id' => $externalId,
-                        'source' => self::SOURCE,
+                        'source' => $source,
                         'resolved_at' => null,
                         'created_at' => now(),
                         'updated_at' => now(),
@@ -134,7 +146,7 @@ class PunchIngestService
                     'log_date' => $when->toDateString(),
                     'punch_at' => $when->format('Y-m-d H:i:s'),
                     'direction' => $direction,
-                    'source' => self::SOURCE,
+                    'source' => $source,
                     'device_sn' => $deviceSn,
                     'device_user_id' => $deviceUserId,
                     'external_id' => $externalId,
@@ -171,6 +183,7 @@ class PunchIngestService
         Log::info('sbb.ingest.batch', [
             'key' => $keyPrefix,
             'tenant' => $tenantId,
+            'source' => $source,
             'device_sn' => implode(',', array_slice(array_keys($devices), 0, 5)),
             'received' => $counts['received'],
             'accepted' => $counts['accepted'],
@@ -181,7 +194,7 @@ class PunchIngestService
 
         // Surface unknown device codes to the existing Employee Mapping card.
         if ($unmapped) {
-            ETimeOfficeService::recordUnmapped($tenantId, $unmapped, self::SOURCE);
+            ETimeOfficeService::recordUnmapped($tenantId, $unmapped, $source);
         }
 
         // Late-arrival mail is QUEUED. ETimeOfficeService::import sends it inline
