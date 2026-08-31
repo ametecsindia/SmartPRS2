@@ -20,81 +20,30 @@ use Illuminate\Support\Facades\Schema;
  */
 class EmployeeExportController extends Controller
 {
-    /** Export columns: [Header => employees-row property]. Denormalised name
-     *  columns (department/designation/branch/team/reporting_manager) are read
-     *  straight off the row, exactly like AppDataController::bootstrap. */
-    // 7 Aug 2026 test report (item 10d) — added the personal / statutory / bank
-    // columns the tester found missing: Marital Status, Father, Mother, Spouse,
-    // Blood Group, Government ID (SSN), Shift, Salary Schedule, Bank Branch.
-    // Columns that do not exist on a given install are silently skipped (see
-    // effectiveMap()), so a header appears the moment its field is added.
-    // 10 Aug 2026 (Ejaz) — the FIRST block mirrors the Employee Import template
-    // EXACTLY (same ALL-CAPS headers, same order, re-importable values), so an
-    // exported file can be edited and re-imported without remapping. The second
-    // block adds read-only reference columns the import template does not carry.
-    private const MAP = [
-        // ---- import-template columns (header + order match the template) ----
-        'EMPLOYEE CODE' => 'emp_code',
-        'NAME' => 'name',
-        'TYPE' => 'type',
-        'COMPANY' => '__company',
-        'DEPARTMENT' => 'department',
-        'DESIGNATION' => 'designation',
-        'BRANCH' => 'branch',
-        'TEAM' => 'team',
-        'SHIFT' => 'shift',
-        'DOJ (DD-MM-YYYY)' => '__doj',
-        'DOB (DD-MM-YYYY)' => '__dob',
-        'GENDER' => 'gender',
-        'MARITAL STATUS' => 'marital_status',
-        'BLOOD GROUP' => 'blood_group',
-        'FATHER NAME' => 'father',
-        'MOTHER NAME' => 'mother',
-        'SPOUSE NAME' => 'spouse',
-        'CATEGORY' => 'category',
-        'NATIONAL ID / SSN' => 'national_id',
-        'ESIC' => 'esic_no',
-        'MOBILE' => 'mobile',
-        'WHATSAPP' => 'whatsapp',
-        'EMERGENCY CONTACT PERSON' => 'emergency_name',
-        'EMERGENCY CONTACT NUMBER' => 'emergency_phone',
-        'PRESENT ADDRESS' => 'address',
-        'PERMANENT ADDRESS' => 'permanent_address',
-        'EMAIL' => 'email',
-        'CTC' => 'ctc',
-        'SALARY TYPE' => '__salaryType',
-        'PAN' => 'pan',
-        'UAN' => 'uan',
-        'BANK NAME' => 'bank_name',
-        'BANK ACCOUNT HOLDER' => 'account_holder',
-        'ACCOUNT NUMBER' => 'bank_acc',
-        'BANK BRANCH' => 'bank_branch',
-        'IFSC' => 'ifsc',
-        'BIOMETRIC ID' => 'device_user_id',
-        'DRA' => '__dra',
-        'PCC' => '__pcc',
-        // ---- extra reference columns (not part of the import template) ----
-        'Salary Schedule' => '__schedule',
-        'Commission %' => 'comm_pct',
-        'PF Applicable' => 'pf_applicable',
-        'ESI Applicable' => 'esi_applicable',
-        'PT State' => 'pt_state',
-        'Employment Stage' => 'employment_stage',
-        'Reporting Manager' => 'reporting_manager',
-        'DRA Status' => 'dra_status',
-        'DRA Expiry' => 'dra_expiry',
-        'PCC Status' => 'pcc_status',
-        'PCC Deadline' => 'pcc_deadline',
-        'PCC Expiry' => 'pcc_expiry',
-        'Status' => 'status',
-    ];
+    /**
+     * 28 Aug 2026 (Ejaz) — the export column list used to be a hand-kept copy of
+     * the sample file's column list, which is how the two drifted apart: the
+     * file gained CATEGORY / ESIC / PERMANENT ADDRESS while the export kept its
+     * own order and its own labels ("Only Salary" where the file said "Salary").
+     *
+     * Both are now derived from App\Services\EmployeeFieldRules::FIELDS, so the
+     * export IS the sample file minus DEFAULT PASSWORD — an exported file can be
+     * edited and re-imported with nothing renamed and nothing lost.
+     *
+     * Columns that do not exist on a given install are silently skipped (see
+     * effectiveMap()), so a header appears the moment its column does.
+     */
+    private static function map(): array
+    {
+        return \App\Services\EmployeeFieldRules::exportMap();
+    }
 
-    /** Column code (only_salary…) → the label used by the import template + form. */
-    private const SALARY_TYPE_LABEL = [
-        'only_salary' => 'Only Salary',
-        'salary_commission' => 'Salary + Commission',
-        'only_commission' => 'Only Commission',
-    ];
+    /** Column code → the label used by the form, the sample file and the export.
+     *  One definition, in EmployeeFieldRules — it read "Only Salary" here and
+     *  "Salary" in the file, and the importer only understood the file's
+     *  spelling, so a re-imported export downgraded every commission-only
+     *  employee to salary-only without a word. */
+    private const SALARY_TYPE_LABEL = \App\Services\EmployeeFieldRules::SALARY_TYPE;
 
     /** MAP filtered to columns that actually exist on this install (denormalised
      *  name columns + the synthetic __company are always kept). Prevents a header
@@ -103,7 +52,7 @@ class EmployeeExportController extends Controller
     {
         $keepAlways = ['department', 'designation', 'branch', 'team', 'reporting_manager'];
         $out = [];
-        foreach (self::MAP as $header => $prop) {
+        foreach (self::map() as $header => $prop) {
             // __schedule resolves employees.schedule_id → the schedule's name, so
             // it is only meaningful when that column exists on this install.
             if ($prop === '__schedule') {
@@ -232,6 +181,17 @@ class EmployeeExportController extends Controller
                 }
                 if (in_array($prop, $boolCols, true)) {
                     $val = ((int) $val === 1) ? 'Yes' : 'No';
+                }
+                // 28 Aug 2026 (Ejaz) — emit the value the sample file's dropdown
+                // offers, not the raw column code. These columns are stored
+                // lower-case ('office', 'auto', 'pending', 'active') and were
+                // exported that way, so Excel flagged every one of them against
+                // its own in-cell list and a re-imported file looked wrong even
+                // though it read back correctly.
+                if ($prop === 'employment_stage') {
+                    $val = \App\Services\EmployeeFieldRules::EMPLOYMENT_STAGE[(string) $val] ?? 'Permanent';
+                } elseif (in_array($prop, ['type', 'esi_applicable', 'status', 'dra_status', 'pcc_status'], true)) {
+                    $val = $val === '' || $val === null ? '' : ucfirst(strtolower((string) $val));
                 }
                 $line[$header] = $val === null ? '' : (string) $val;
             }

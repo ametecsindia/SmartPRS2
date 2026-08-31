@@ -190,6 +190,9 @@ class PushController extends Controller
             'emp_prefix' => $row->emp_prefix ?? '',
             'in_machine_id' => $row->in_machine_id ?? '',
             'out_machine_id' => $row->out_machine_id ?? '',
+            // 'single' makes ETimeOfficeService::import derive IN/OUT from the
+            // punch's rank in the day instead of the status byte below.
+            'device_mode' => $row->device_mode ?? null,
             'tenant_id' => $row->tenant_id ?? null,
         ];
     }
@@ -264,6 +267,7 @@ class PushController extends Controller
             'serial_number' => fn ($t) => $t->string('serial_number', 80)->nullable(),
             'in_machine_id' => fn ($t) => $t->string('in_machine_id', 40)->nullable(),
             'out_machine_id' => fn ($t) => $t->string('out_machine_id', 40)->nullable(),
+            'device_mode' => fn ($t) => $t->string('device_mode', 10)->nullable(),
             'label' => fn ($t) => $t->string('label', 120)->nullable(),
             'branch' => fn ($t) => $t->string('branch', 120)->nullable(),
             'sync_interval_min' => fn ($t) => $t->integer('sync_interval_min')->nullable(),

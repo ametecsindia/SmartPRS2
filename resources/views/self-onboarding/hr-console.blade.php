@@ -91,20 +91,40 @@
     var selfie=rec.selfie? '<img class="selfie" src="'+rec.selfie+'">' : '<div class="selfie"></div>';
     var flags=(rec.flags&&rec.flags.length)? '<div style="background:#fdecec;color:#c0392b;border-radius:9px;padding:8px 11px;font-size:12px;margin-bottom:8px">Awaiting correction: '+rec.flags.map(esc).join('; ')+'</div>' : '';
     function sel(id,label,opts,val){return '<div><label>'+label+'</label><select id="'+id+'">'+opts.map(function(o){var v=(typeof o==='object')?o.v:o,t=(typeof o==='object')?o.t:o;return '<option value="'+esc(v)+'"'+(String(val||'')===String(v)?' selected':'')+'>'+esc(t)+'</option>';}).join('')+'</select></div>';}
+    /* 28 Aug 2026 (Ejaz) — the HR-fields form now names and offers exactly what
+       the Employee form and the sample import file do.
+         * EMPLOYEE CODE added. injectOne() used to invent EMP0001, EMP0002 …
+           by counting rows, so a company importing EMP100-series codes ended up
+           with a second, permanently diverging numbering series it could not
+           control. Leave it blank and the old auto-numbering still applies.
+         * "Employment type" (Permanent / Contract / Probation / Intern) wrote
+           employees.employment_type, a column nothing else in the app reads —
+           HR's choice was silently thrown away. It is EMPLOYMENT STAGE, with
+           the same three values the file and the form offer.
+         * "Work type" is the file's EMPLOYEE TYPE column. Same name now.
+         * Team, Shift, Salary Type, Salary Schedule, Commission %, Reporting
+           Manager, Team Leader, Also Works For and Status were all sample-file
+           columns with nowhere for HR to set them.                            */
     var hrForm='<div class="hrf"><h3>HR fields (applied on approve)</h3>'+
-      '<div class="rr">'+hfInput('hf_designation','Designation',hr.designation)+hfInput('hf_department','Department',hr.department)+'</div>'+
-      '<div class="rr">'+hfInput('hf_branch','Branch',hr.branch)+'<div><label>Date of Joining</label><input type="date" id="hf_doj" value="'+esc(hr.doj||'')+'"></div></div>'+
-      '<div class="rr">'+sel('hf_employment_type','Employment type',['',{v:'Permanent',t:'Permanent'},{v:'Contract',t:'Contract'},{v:'Probation',t:'Probation'},{v:'Intern',t:'Intern'}],hr.employment_type)+sel('hf_work_type','Work type',['',{v:'office',t:'Office'},{v:'field',t:'Field'}],hr.work_type)+'</div>'+
-      '<div class="rr">'+hfInput('hf_ctc','CTC (annual)',hr.ctc)+hfInput('hf_pf_uan','PF / UAN No.',hr.pf_uan)+'</div>'+
-      '<div class="rr">'+sel('hf_pf_applicable','PF applicable',['',{v:'yes',t:'Yes'},{v:'no',t:'No'}],hr.pf_applicable)+hfInput('hf_esic_no','ESIC No.',hr.esic_no)+'</div>'+
-      '<div class="rr">'+sel('hf_esi_applicable','ESI applicable',['',{v:'auto',t:'Auto'},{v:'yes',t:'Yes'},{v:'no',t:'No'}],hr.esi_applicable)+hfInput('hf_pt_state','PT State',hr.pt_state)+'</div>'+
+      '<div class="rr">'+hfInput('hf_emp_code','Employee Code',hr.emp_code)+hfInput('hf_designation','Designation',hr.designation)+'</div>'+
+      '<div class="rr">'+hfInput('hf_department','Department',hr.department)+hfInput('hf_branch','Branch',hr.branch)+'</div>'+
+      '<div class="rr">'+hfInput('hf_team','Team',hr.team)+hfInput('hf_shift','Shift',hr.shift)+'</div>'+
+      '<div class="rr">'+hfInput('hf_reporting_manager','Reporting Manager',hr.reporting_manager)+hfInput('hf_team_leader','Team Leader',hr.team_leader)+'</div>'+
+      '<div class="rr"><div><label>Date of Joining</label><input type="date" id="hf_doj" value="'+esc(hr.doj||'')+'"></div>'+hfInput('hf_device_user_id','Biometric ID',hr.device_user_id)+'</div>'+
+      '<div class="rr">'+sel('hf_type','Employee Type',['',{v:'office',t:'Office'},{v:'field',t:'Field'}],hr.type||hr.work_type)+sel('hf_employment_stage','Employment Stage',['','Permanent','Probation','Internship'],hr.employment_stage||hr.employment_type)+'</div>'+
+      '<div class="rr">'+sel('hf_also_works_for','Also Works For',['','None','Multiple companies'],hr.also_works_for)+sel('hf_status','Status',['','Active','Inactive'],hr.status)+'</div>'+
+      '<div class="rr">'+sel('hf_salary_type','Salary Type',['','Salary','Salary + Commission','Commission'],hr.salary_type)+hfInput('hf_schedule_id','Salary Schedule',hr.schedule_id)+'</div>'+
+      '<div class="rr">'+hfInput('hf_ctc','CTC',hr.ctc)+hfInput('hf_comm_pct','Commission %',hr.comm_pct)+'</div>'+
+      '<div class="rr">'+sel('hf_pf_applicable','PF Applicable',['',{v:'yes',t:'Yes'},{v:'no',t:'No'}],hr.pf_applicable)+hfInput('hf_pf_uan','UAN',hr.pf_uan)+'</div>'+
+      '<div class="rr">'+sel('hf_esi_applicable','ESI Applicable',['',{v:'auto',t:'Auto'},{v:'yes',t:'Yes'},{v:'no',t:'No'}],hr.esi_applicable)+hfInput('hf_esic_no','ESIC',hr.esic_no)+'</div>'+
+      '<div class="rr">'+hfInput('hf_pt_state','PT State',hr.pt_state)+'<div></div></div>'+
       '<button class="btn ghost" id="saveHr" style="margin-top:10px">Save HR fields</button></div>';
     var html='<div class="dhead"><h2>'+esc(rec.name||'—')+'</h2><span class="code">'+esc(rec.temp_emp_code)+' · '+esc(rec.mode||'')+' · '+pill(rec.status)+'</span><div class="badges">'+badges+'</div></div>'+
       '<div class="dbody"><div class="col">'+flags+
-        kvB('Personal',d.personal,[['full_name','Full name'],['dob','Date of birth'],['gender','Gender'],['father_name','Father/Guardian'],['nationality','Nationality'],['blood_group','Blood group'],['marital','Marital status']])+
-        kvB('Contact',d.contact,[['current_address','Current address'],['permanent_address','Permanent address'],['emergency_name','Emergency name'],['emergency_phone','Emergency phone']])+
-        kvB('Statutory',d.statutory,[['pan','PAN'],['uan','UAN'],['aadhaar','Aadhaar/National ID'],['esic','ESIC'],['category','Category'],['dra_status','DRA (Yes/No)'],['pcc_status','PCC (Yes/No)']])+
-        kvB('Bank',d.bank,[['acc_name','A/c name'],['acc_no','A/c number'],['ifsc','IFSC'],['bank_name','Bank']])+
+        kvB('Personal',d.personal,[['full_name','Full name'],['dob','Date of birth'],['gender','Gender'],['father_name','Father Name'],['mother_name','Mother Name'],['spouse_name','Spouse Name'],['nationality','Nationality'],['category','Category'],['blood_group','Blood group'],['id_marks','Identification Marks'],['marital','Marital status']])+
+        kvB('Contact',d.contact,[['current_address','Present Address'],['permanent_address','Permanent Address'],['emergency_name','Emergency Contact Person'],['emergency_phone','Emergency Contact Number']])+
+        kvB('Statutory',d.statutory,[['pan','PAN'],['uan','UAN'],['aadhaar','National ID / SSN'],['esic','ESIC'],['dra_status','DRA Declared (Yes/No/NA)'],['pcc_status','PCC Declared (Yes/No/NA)']])+
+        kvB('Bank',d.bank,[['bank_name','Bank Name'],['acc_name','Bank Account Holder'],['acc_no','Account Number'],['bank_branch','Bank Branch'],['ifsc','IFSC']])+
       '</div><div class="col" style="max-width:200px"><h3>Selfie</h3>'+selfie+'<h3>Documents</h3>'+docs+'</div></div>'+
       hrForm+
       '<div class="actions"><button class="btn ghost" id="askCorr">Request Correction</button><button class="btn green" id="doVerify">Mark Verified</button><button class="btn primary" id="doApprove">Approve &amp; Inject</button></div>'+
@@ -114,7 +134,7 @@
     var st=rec.status;
     if(st==='verified'){dim($('#doVerify'),'Verified ✔');} else {dim($('#doApprove'));}
     if(st==='approved'||st==='injected'){dim($('#doVerify'),'Verified ✔');dim($('#doApprove'),'Injected ✔');}
-    $('#saveHr').onclick=function(){var b=this;b.disabled=true;var body={};['designation','department','branch','doj','employment_type','work_type','ctc','pf_uan','pf_applicable','esic_no','esi_applicable','pt_state'].forEach(function(k){body[k]=($('#hf_'+k)||{}).value||'';});jpost('/app/self-onboarding/'+rec.id+'/fields',body).then(function(r){b.disabled=false;toast(r.ok?'HR fields saved':(r.error||'Failed'));});};
+    $('#saveHr').onclick=function(){var b=this;b.disabled=true;var body={};['emp_code','designation','department','branch','team','shift','reporting_manager','team_leader','doj','device_user_id','type','employment_stage','also_works_for','status','salary_type','schedule_id','ctc','comm_pct','pf_applicable','pf_uan','esi_applicable','esic_no','pt_state'].forEach(function(k){body[k]=($('#hf_'+k)||{}).value||'';});jpost('/app/self-onboarding/'+rec.id+'/fields',body).then(function(r){b.disabled=false;toast(r.ok?'HR fields saved':(r.error||'Failed'));});};
     $('#askCorr').onclick=function(){$('#corrBox').classList.add('on');};
     $('#cancelCorr').onclick=function(){$('#corrBox').classList.remove('on');};
     $('#sendCorr').onclick=function(){var items=$('#corrItems').value.split('\n').map(function(s){return s.trim();}).filter(Boolean);if(!items.length){toast('Add at least one item');return;}this.disabled=true;jpost('/app/self-onboarding/'+rec.id+'/correction',{items:items,note:$('#corrNote').value}).then(function(r){if(!r.ok){toast(r.error||'Failed');return;}toast('Correction sent');loadList();select(rec.id);});};
@@ -146,7 +166,7 @@
   $('#bulkBtn').onclick=function(){$('#bulkResult').innerHTML='';$('#bulkCommit').style.display='none';$('#bulkMov').classList.add('on');};
   $('#bulkCancel').onclick=function(){$('#bulkMov').classList.remove('on');};
   $('#bulkUpload').onclick=function(){var f=$('#bulkFile').files[0];if(!f){toast('Choose a CSV file');return;}var fd=new FormData();fd.append('file',f);var b=this;b.disabled=true;b.textContent='Uploading…';api('{{ route('app.selfonboard.bulk.upload') }}',{method:'POST',body:fd}).then(function(r){b.disabled=false;b.textContent='Upload & match';if(!r.ok){toast(r.error||'Upload failed');return;}var pv=(r.preview||[]).map(function(x){return '<div class="kv"><span class="k">'+esc(x.name)+' · '+esc(x.temp)+'</span><span class="v">'+(x.match?('matched '+esc(x.match)):'new')+'</span></div>';}).join('');$('#bulkResult').innerHTML='<div class="okbox">Staged <b>'+r.total+'</b> · matched '+r.matched+' · new '+r.new+(r.errors?(' · errors '+r.errors):'')+'</div>'+pv;if(r.total>0)$('#bulkCommit').style.display='inline-block';loadList();});};
-  $('#bulkCommit').onclick=function(){var b=this;b.disabled=true;b.textContent='Committing…';jpost('{{ route('app.selfonboard.bulk.commit') }}',{}).then(function(r){b.disabled=false;b.textContent='Commit → create/link';if(!r.ok){toast(r.error||'Commit failed');return;}$('#bulkResult').innerHTML='<div class="okbox">✔ Created '+r.created+' new · updated '+r.updated+' existing.</div>';toast('Bulk committed');loadList();});};
+  $('#bulkCommit').onclick=function(){var b=this;b.disabled=true;b.textContent='Committing…';jpost('{{ route('app.selfonboard.bulk.commit') }}',{}).then(function(r){b.disabled=false;b.textContent='Commit → create/link';if(!r.ok){toast(r.error||'Commit failed');return;}var errs=(r.errors||[]).length?'<div style="background:#fdecec;color:#c0392b;border-radius:9px;padding:8px 11px;font-size:12px;margin-top:8px">Not created:<br>'+r.errors.map(esc).join('<br>')+'</div>':'';$('#bulkResult').innerHTML='<div class="okbox">✔ Created '+r.created+' new · updated '+r.updated+' existing.</div>'+errs;toast('Bulk committed');loadList();});};
 
   loadList();
 })();

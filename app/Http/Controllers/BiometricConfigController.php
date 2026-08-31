@@ -66,6 +66,7 @@ class BiometricConfigController extends Controller
         $add = [
             'in_machine_id' => fn ($t) => $t->string('in_machine_id', 40)->nullable(),
             'out_machine_id' => fn ($t) => $t->string('out_machine_id', 40)->nullable(),
+            'device_mode' => fn ($t) => $t->string('device_mode', 10)->nullable(),   // 'single' | 'dual'; NULL = legacy = dual
             'label' => fn ($t) => $t->string('label', 120)->nullable(),          // F3 — device / location label
             'branch' => fn ($t) => $t->string('branch', 120)->nullable(),        // F3 — mapped Branch (name)
             'serial_number' => fn ($t) => $t->string('serial_number', 80)->nullable(),   // eTimeTrackLite / push — device serial
@@ -129,6 +130,10 @@ class BiometricConfigController extends Controller
             'emp_prefix' => $r?->emp_prefix ?? '',
             'in_machine_id' => $r?->in_machine_id ?? '',
             'out_machine_id' => $r?->out_machine_id ?? '',
+            // A row saved before this feature existed carries NULL. It is shown —
+            // and behaves — as "2 Devices", which is exactly what it did before,
+            // so nothing changes until an admin deliberately picks "1 Device".
+            'device_mode' => ($r?->device_mode ?? '') === 'single' ? 'single' : 'dual',
             'hasPassword' => ! empty($r?->password),
             'lastSyncAt' => $r?->last_sync_at ?? null,
             'lastStatus' => $r?->last_status ?? null,
@@ -285,6 +290,12 @@ class BiometricConfigController extends Controller
         $r = $id ? $this->rowById($request, $id) : null;
 
         $provider = trim((string) $request->input('provider', 'etimeoffice')) ?: 'etimeoffice';
+        // Device setup. Absent from the payload (an older client, a scripted
+        // save) => keep whatever the row already has; a row that never had one
+        // stays 'dual', i.e. the pre-existing behaviour.
+        $mode = $request->has('device_mode')
+            ? (strtolower(trim((string) $request->input('device_mode'))) === 'single' ? 'single' : 'dual')
+            : (($r->device_mode ?? '') === 'single' ? 'single' : 'dual');
         // eTimeTrackLite stores the raw WebAPI URL as typed; eTimeOffice keeps the cloud default.
         $baseUrl = trim((string) $request->input('base_url', ''));
         if ($baseUrl === '' && $provider !== 'etimetracklite') {
@@ -305,8 +316,11 @@ class BiometricConfigController extends Controller
             'username' => trim((string) $request->input('username', '')) ?: null,
             'empcode' => trim((string) $request->input('empcode', '')) ?: 'ALL',
             'emp_prefix' => trim((string) $request->input('emp_prefix', '')) ?: null,
+            'device_mode' => $mode,
             'in_machine_id' => trim((string) $request->input('in_machine_id', '')) ?: null,
-            'out_machine_id' => trim((string) $request->input('out_machine_id', '')) ?: null,
+            // One reader has no OUT machine. Cleared so a later re-read of this
+            // row can never resurrect a stale second device.
+            'out_machine_id' => $mode === 'single' ? null : (trim((string) $request->input('out_machine_id', '')) ?: null),
             'updated_at' => now(),
         ];
         $pwd = (string) $request->input('password', '');
@@ -375,6 +389,7 @@ class BiometricConfigController extends Controller
             'emp_prefix' => trim((string) $request->input('emp_prefix', $r->emp_prefix ?? '')),
             'in_machine_id' => trim((string) $request->input('in_machine_id', $r->in_machine_id ?? '')),
             'out_machine_id' => trim((string) $request->input('out_machine_id', $r->out_machine_id ?? '')),
+            'device_mode' => strtolower(trim((string) $request->input('device_mode', $r->device_mode ?? ''))) === 'single' ? 'single' : 'dual',
             'tenant_id' => self::tid($request),
         ];
     }

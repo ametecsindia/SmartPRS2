@@ -252,8 +252,32 @@ class SelfOnboardingController extends Controller
         if (! in_array($section, self::SECTIONS, true)) {
             return response()->json(['ok' => false, 'error' => 'Unknown section.'], 422);
         }
+        $section_data = (array) $r->input('data', []);
+
+        // 28 Aug 2026 (Ejaz) — SERVER-SIDE VALIDATION, which this endpoint had
+        // none of: it took the posted array and wrote it straight into the JSON
+        // blob. A candidate could type "abc" as their PAN and it was accepted,
+        // stored, approved by HR, and pushed into employees.pan — a 10-character
+        // column — where a short bad value simply sat there and a long one threw
+        // a raw SQL error that failed the whole provisioning insert.
+        //
+        // EmployeeFieldRules::formatError holds the SAME rules the Employee form
+        // applies in the browser, so the portal can no longer accept what the
+        // Directory would reject. Keys are the portal's data-field names, mapped
+        // to their employees column first.
+        $portalMap = \App\Services\EmployeeFieldRules::portalMap();
+        $byColumn = [];
+        foreach ($section_data as $k => $v) {
+            if (isset($portalMap[$k])) {
+                $byColumn[$portalMap[$k]] = $v;
+            }
+        }
+        if ($fmtErrs = \App\Services\EmployeeFieldRules::formatErrors($byColumn)) {
+            return response()->json(['ok' => false, 'error' => reset($fmtErrs)], 422);
+        }
+
         $all = json_decode($rec->data ?: '{}', true) ?: [];
-        $all[$section] = (array) $r->input('data', []);
+        $all[$section] = $section_data;
         $progress = $this->calcProgress($all, $rec);
         DB::table('self_onboarding')->where('id', $rec->id)->update(['data' => json_encode($all), 'progress' => $progress, 'status' => in_array($rec->status, ['submitted', 'verified', 'approved', 'injected'], true) ? $rec->status : 'in_progress', 'updated_at' => now()]);
 
@@ -490,7 +514,20 @@ class SelfOnboardingController extends Controller
         if (! $rec) {
             return response()->json(['ok' => false, 'error' => 'Not found.'], 404);
         }
-        $keys = ['designation', 'department', 'branch', 'doj', 'employment_type', 'work_type', 'ctc', 'pf_uan', 'pf_applicable', 'esic_no', 'esi_applicable', 'pt_state'];
+        // 28 Aug 2026 (Ejaz) — the HR-fields set now covers every sample-file
+        // column an employer sets (rather than the candidate). 'emp_code' is the
+        // headline addition: injectOne() used to generate EMP0001, EMP0002 … by
+        // counting rows, so a company whose import file used EMP100-series codes
+        // ended up with a second numbering series it could not control.
+        // 'employment_stage' replaces 'employment_type', which wrote a column
+        // nothing in the app reads; 'type' replaces 'work_type' so it matches
+        // the file's EMPLOYEE TYPE column. Both old keys stay readable so
+        // records saved before today still carry their value forward.
+        $keys = ['emp_code', 'designation', 'department', 'branch', 'team', 'shift',
+            'reporting_manager', 'team_leader', 'doj', 'device_user_id',
+            'type', 'work_type', 'employment_stage', 'employment_type', 'also_works_for', 'status',
+            'salary_type', 'schedule_id', 'ctc', 'comm_pct',
+            'pf_applicable', 'pf_uan', 'esi_applicable', 'esic_no', 'pt_state'];
         $hr = [];
         foreach ($keys as $k) {
             $v = $r->input($k);
@@ -566,6 +603,12 @@ class SelfOnboardingController extends Controller
 
             return response()->json(['ok' => false, 'error' => 'Could not create the employee from this submission. Please re-check the HR fields and try again.'], 500);
         }
+        // 28 Aug 2026 (Ejaz) — a duplicate Employee Code / PAN / Biometric ID /
+        // email is now REFUSED with the reason, instead of silently creating a
+        // second employee that shares an identifier with someone else.
+        if (! empty($res['error'])) {
+            return response()->json(['ok' => false, 'error' => $res['error']], 422);
+        }
 
         return response()->json(['ok' => true, 'emp_code' => $res['emp_code'], 'employee_id' => $res['employee_id'], 'updated' => $res['updated']]);
     }
@@ -638,7 +681,25 @@ class SelfOnboardingController extends Controller
         }
     }
 
-    /** Build an employees-column patch from the HR-entered fields (resolving FKs). */
+    /**
+     * Build an employees-column patch from the HR-entered fields (resolving FKs).
+     *
+     * 28 Aug 2026 (Ejaz) — two of these used to write columns that NOTHING else
+     * in the app reads, so HR's choice was silently discarded:
+     *
+     *   'employment_type'  ->  employees.employment_type   (dead column)
+     *                          the Employee form and the import file both use
+     *                          employees.employment_stage, with a different
+     *                          value set again (Permanent / Probation /
+     *                          Internship, not Contract / Intern).
+     *   'work_type'        ->  employees.type, correct, but under a third name
+     *                          for a field the file calls EMPLOYEE TYPE.
+     *
+     * Both are normalised here now, and the rest of the sample file's
+     * employer-set columns are accepted too, so an employee provisioned from
+     * Self-Onboarding is the same shape as one typed into the Directory or
+     * loaded from the import file.
+     */
     private function hrPatch(array $hr, $tid): array
     {
         $this->ensureEmployeeCols();
@@ -649,17 +710,27 @@ class SelfOnboardingController extends Controller
                 $did = DB::table('designations')->insertGetId(ApprovalService::safeRow('designations', ['tenant_id' => $tid, 'name' => $hr['designation'], 'created_at' => now(), 'updated_at' => now()]));
             }
             $patch['designation_id'] = $did;
+            $patch['designation'] = $hr['designation'];   // the denormalised name the Directory + export read
         }
         if (! empty($hr['department'])) {
             $dep = DB::table('departments')->where('name', $hr['department'])->when($tid, fn ($q) => $q->where('tenant_id', $tid))->value('id');
             if ($dep) {
                 $patch['department_id'] = $dep;
             }
+            $patch['department'] = $hr['department'];
         }
         if (! empty($hr['branch'])) {
             $br = DB::table('branches')->where('name', $hr['branch'])->when($tid, fn ($q) => $q->where('tenant_id', $tid))->value('id');
             if ($br) {
                 $patch['branch_id'] = $br;
+            }
+            $patch['branch'] = $hr['branch'];
+        }
+        // Plain name columns — same ones the import file carries.
+        foreach (['team', 'shift', 'reporting_manager', 'team_leader', 'pt_state', 'esic_no',
+            'device_user_id', 'also_works_for'] as $k) {
+            if (! empty($hr[$k])) {
+                $patch[$k] = $hr[$k];
             }
         }
         if (! empty($hr['doj'])) {
@@ -668,8 +739,42 @@ class SelfOnboardingController extends Controller
         if (isset($hr['ctc']) && $hr['ctc'] !== '') {
             $patch['ctc'] = (float) $hr['ctc'];
         }
-        if (! empty($hr['work_type']) && in_array(strtolower($hr['work_type']), ['office', 'field'], true)) {
-            $patch['type'] = strtolower($hr['work_type']);
+        if (isset($hr['comm_pct']) && $hr['comm_pct'] !== '') {
+            $patch['comm_pct'] = (float) str_replace(['%', ',', ' '], '', (string) $hr['comm_pct']);
+        }
+        // EMPLOYEE TYPE (office / field). 'work_type' is the pre-28-Aug key.
+        $typeRaw = $hr['type'] ?? ($hr['work_type'] ?? '');
+        if ($typeRaw !== '' && $typeRaw !== null) {
+            $patch['type'] = stripos((string) $typeRaw, 'field') !== false ? 'field' : 'office';
+        }
+        // EMPLOYMENT STAGE. 'employment_type' is the pre-28-Aug key, and its old
+        // options included Contract and Intern — AppDataController::employmentStage
+        // maps Intern to internship and leaves Contract as Permanent rather than
+        // inventing a stage that does not exist.
+        $stageRaw = $hr['employment_stage'] ?? ($hr['employment_type'] ?? '');
+        if ($stageRaw !== '' && $stageRaw !== null) {
+            $patch['employment_stage'] = \App\Http\Controllers\AppDataController::employmentStage($stageRaw);
+        }
+        if (! empty($hr['status'])) {
+            $patch['status'] = strtolower(trim((string) $hr['status'])) === 'inactive' ? 'inactive' : 'active';
+        }
+        if (! empty($hr['salary_type'])) {
+            $patch['salary_type'] = \App\Services\EmployeeFieldRules::SALARY_TYPE_IN[strtolower(trim((string) $hr['salary_type']))] ?? 'only_salary';
+        }
+        if (! empty($hr['schedule_id'])) {
+            try {
+                if (Schema::hasTable('salary_schedules') && Schema::hasColumn('employees', 'schedule_id')) {
+                    $schedName = trim(explode(' — ', trim((string) $hr['schedule_id']))[0]);
+                    $sid = DB::table('salary_schedules')
+                        ->when($tid && Schema::hasColumn('salary_schedules', 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
+                        ->where('name', $schedName)->orderByDesc('id')->value('id');
+                    if ($sid) {
+                        $patch['schedule_id'] = $sid;
+                    }
+                }
+            } catch (\Throwable $e) {
+                // schedule lookup is best-effort — never block provisioning over it
+            }
         }
         if (! empty($hr['pf_uan'])) {
             $patch['uan'] = $hr['pf_uan'];
@@ -679,15 +784,6 @@ class SelfOnboardingController extends Controller
         }
         if (! empty($hr['esi_applicable'])) {
             $patch['esi_applicable'] = in_array(strtolower($hr['esi_applicable']), ['yes', 'no', 'auto'], true) ? strtolower($hr['esi_applicable']) : 'auto';
-        }
-        if (! empty($hr['esic_no'])) {
-            $patch['esic_no'] = $hr['esic_no'];   // applied only if the column exists (safeRow filters)
-        }
-        if (! empty($hr['pt_state'])) {
-            $patch['pt_state'] = $hr['pt_state'];
-        }
-        if (! empty($hr['employment_type'])) {
-            $patch['employment_type'] = $hr['employment_type']; // applied only if the column exists
         }
 
         return $patch;
@@ -717,7 +813,42 @@ class SelfOnboardingController extends Controller
         $hrPatch = $this->hrPatch(is_array($hr) ? $hr : [], $tid);
         // 7 Aug 2026 test report (item 12) — carry Mother's & Spouse's name from
         // onboarding into the employee record (columns ensured in AppDataController).
-        $candExtra = array_filter(['blood_group' => $p['blood_group'] ?? null, 'marital_status' => $p['marital'] ?? null, 'category' => $st['category'] ?? null, 'esic_no' => $st['esic'] ?? null, 'father' => $p['father_name'] ?? null, 'mother' => $p['mother_name'] ?? null, 'spouse' => $p['spouse_name'] ?? null, 'nationality' => $p['nationality'] ?? null, 'aadhaar' => $st['aadhaar'] ?? null, 'permanent_address' => $ct['permanent_address'] ?? null, 'emergency_name' => $ct['emergency_name'] ?? null, 'emergency_phone' => $ct['emergency_phone'] ?? null, 'dra_declared' => $st['dra_status'] ?? null, 'pcc_declared' => $st['pcc_status'] ?? null]);
+        // 28 Aug 2026 (Ejaz) — THE WRONG-COLUMN BUG.
+        // 'aadhaar' => employees.aadhaar wrote the candidate's National ID into
+        // a column created by this controller and read by NOTHING else: not the
+        // Employee form, not bootstrap(), not the export, not the importer —
+        // all of which use employees.national_id. So every self-onboarded hire
+        // showed a blank Government ID in the Directory and a blank
+        // NATIONAL ID / SSN in the export, while the number sat in the row the
+        // whole time. It maps to national_id now; the parity migration copies
+        // the values already stranded in `aadhaar` across.
+        // 'category' moved to the personal step and 'id_marks' is new — both
+        // are sample-file columns and Employee-form fields.
+        $candExtra = array_filter(['blood_group' => $p['blood_group'] ?? null, 'marital_status' => $p['marital'] ?? null, 'category' => $p['category'] ?? ($st['category'] ?? null), 'id_marks' => $p['id_marks'] ?? null, 'esic_no' => $st['esic'] ?? null, 'father' => $p['father_name'] ?? null, 'mother' => $p['mother_name'] ?? null, 'spouse' => $p['spouse_name'] ?? null, 'nationality' => $p['nationality'] ?? null, 'national_id' => $st['aadhaar'] ?? null, 'permanent_address' => $ct['permanent_address'] ?? null, 'emergency_name' => $ct['emergency_name'] ?? null, 'emergency_phone' => $ct['emergency_phone'] ?? null, 'dra_declared' => $st['dra_status'] ?? null, 'pcc_declared' => $st['pcc_status'] ?? null,
+            // 27 Aug 2026 (Ejaz) — import-file parity: the portal has always
+            // ASKED for the account holder name, and now asks for the bank
+            // branch, but neither was ever written to the employee row, so
+            // BANK ACCOUNT HOLDER / BANK BRANCH came out blank on export for
+            // every self-onboarded hire. (safeRow drops either if the column
+            // is absent on this install.)
+            'account_holder' => $bk['acc_name'] ?? null, 'bank_branch' => $bk['bank_branch'] ?? null]);
+
+        // 28 Aug 2026 (Ejaz) — the same uniqueness gate the Employee form and the
+        // import wizard use. Nothing checked anything here, so approving two
+        // candidates who had typed the same PAN — or been given the same
+        // Biometric ID, which is what punch ingestion matches on — created two
+        // employees sharing that identifier with no warning at all.
+        $uniqCheck = array_merge($candExtra, $hrPatch, [
+            'pan' => ! empty($st['pan']) ? strtoupper($st['pan']) : null,
+            'uan' => $st['uan'] ?? null,
+            'bank_acc' => $bk['acc_no'] ?? null,
+            'email' => $rec->email,
+            'mobile' => $rec->mobile,
+        ]);
+        $uniqErrs = \App\Services\EmployeeFieldRules::duplicateErrors($uniqCheck, $tid, $rec->employee_id ? (int) $rec->employee_id : null);
+        if ($uniqErrs) {
+            return ['error' => reset($uniqErrs)];
+        }
 
         if ($rec->employee_id) {
             $patch = ['email_verified' => (bool) $rec->email_verified, 'mobile_verified' => (bool) $rec->mobile_verified, 'wa_verified' => (bool) $rec->wa_verified, 'docs_status' => 'approved', 'updated_at' => now()];
@@ -732,11 +863,23 @@ class SelfOnboardingController extends Controller
             $empId = $rec->employee_id;
             $updated = true;
         } else {
-            $n = (int) DB::table('employees')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->count() + 1;
-            $code = 'EMP'.str_pad((string) $n, 4, '0', STR_PAD_LEFT);
-            while (DB::table('employees')->where('emp_code', $code)->when($tid, fn ($q) => $q->where('tenant_id', $tid))->exists()) {
-                $n++;
+            // 28 Aug 2026 (Ejaz) — "EMPLOYEE CODE field should be added [to the
+            // HR fields], which should map with the Sample file and Employee
+            // form." HR can now set the code; the counter below is only the
+            // fallback when they leave it blank. Without this, a company using
+            // EMP100-series codes in its import file got a parallel EMP0001
+            // series from every self-onboarded hire that drifted for good.
+            $code = trim((string) ($hr['emp_code'] ?? ''));
+            if ($code !== '' && DB::table('employees')->where('emp_code', $code)->when($tid, fn ($q) => $q->where('tenant_id', $tid))->exists()) {
+                return ['error' => 'Employee Code "'.$code.'" is already in use — set a different one in the HR fields.'];
+            }
+            if ($code === '') {
+                $n = (int) DB::table('employees')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->count() + 1;
                 $code = 'EMP'.str_pad((string) $n, 4, '0', STR_PAD_LEFT);
+                while (DB::table('employees')->where('emp_code', $code)->when($tid, fn ($q) => $q->where('tenant_id', $tid))->exists()) {
+                    $n++;
+                    $code = 'EMP'.str_pad((string) $n, 4, '0', STR_PAD_LEFT);
+                }
             }
             $base = ['uuid' => (string) Str::uuid(), 'tenant_id' => $tid, 'company_id' => $companyId, 'emp_code' => $code, 'name' => $p['full_name'] ?? $rec->name, 'dob' => $p['dob'] ?? null, 'gender' => $p['gender'] ?? null, 'email' => $rec->email, 'email_verified' => (bool) $rec->email_verified, 'mobile' => $rec->mobile, 'mobile_verified' => (bool) $rec->mobile_verified, 'whatsapp' => $rec->whatsapp, 'wa_verified' => (bool) $rec->wa_verified, 'address' => $ct['current_address'] ?? null, 'pan' => ! empty($st['pan']) ? strtoupper($st['pan']) : null, 'uan' => $st['uan'] ?? null, 'bank_name' => $bk['bank_name'] ?? null, 'bank_acc' => $bk['acc_no'] ?? null, 'ifsc' => ! empty($bk['ifsc']) ? strtoupper($bk['ifsc']) : null, 'docs_status' => 'approved', 'type' => 'office', 'salary_type' => 'only_salary', 'status' => 'active', 'doj' => now()->toDateString(), 'created_at' => now(), 'updated_at' => now()];
             $empId = DB::table('employees')->insertGetId(ApprovalService::safeRow('employees', array_merge($base, $candExtra, $hrPatch)));
@@ -951,15 +1094,22 @@ class SelfOnboardingController extends Controller
         $rows = DB::table('self_onboarding')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->where('mode', 'bulk')->whereNull('deleted_at')->where('status', '!=', 'injected')->get();
         $created = 0;
         $updated = 0;
+        $errors = [];
         foreach ($rows as $rec) {
             try {
                 $res = $this->injectOne($rec);
+                if (! empty($res['error'])) {
+                    $errors[] = ($rec->name ?: $rec->temp_emp_code).': '.$res['error'];
+
+                    continue;
+                }
                 $res['updated'] ? $updated++ : $created++;
             } catch (\Throwable $e) {
+                $errors[] = ($rec->name ?: $rec->temp_emp_code).': could not be created.';
             }
         }
 
-        return response()->json(['ok' => true, 'created' => $created, 'updated' => $updated]);
+        return response()->json(['ok' => true, 'created' => $created, 'updated' => $updated, 'errors' => $errors]);
     }
 
     /** Add optional master columns used by self-onboarding if they don't exist yet. */

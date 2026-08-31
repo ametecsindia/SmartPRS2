@@ -38,76 +38,41 @@ class EmployeeImportService
      * Canonical target field => accepted header aliases (lower-cased, compared
      * after stripping non-alphanumerics). First match wins.
      */
-    public const FIELDS = [
-        'emp_code' => ['empcode', 'employeecode', 'code', 'employeeid', 'empid'],
-        'name' => ['name', 'employeename', 'fullname'],
-        'email' => ['email', 'emailaddress', 'officialemail'],
-        'mobile' => ['mobile', 'phone', 'mobileno', 'contact', 'contactno'],
-        'whatsapp' => ['whatsapp', 'whatsappnumber'],
-        'company' => ['company', 'companyname'],
-        'department' => ['department', 'dept'],
-        'designation' => ['designation', 'title', 'role'],
-        'branch' => ['branch', 'location'],
-        'team' => ['team'],
-        'shift' => ['shift', 'workingshift'],
-        'doj' => ['doj', 'dateofjoining', 'joiningdate'],
-        'dob' => ['dob', 'dateofbirth', 'birthdate'],
-        'ctc' => ['ctc', 'annualctc', 'salary', 'grosssalary'],
-        'salary_type' => ['salarytype'],
-        'pan' => ['pan', 'panno', 'pannumber'],
-        'uan' => ['uan', 'pfnumber', 'pf', 'uannumber'],
-        'bank_acc' => ['bankacc', 'bankaccount', 'accountno', 'accountnumber'],
-        'ifsc' => ['ifsc', 'ifsccode'],
-        'address' => ['address', 'presentaddress', 'currentaddress'],
-        'device_user_id' => ['biometricid', 'deviceuserid', 'bioid', 'biometricemployeeid'],
-        'dpa' => ['dpa', 'dra', 'drapcc', 'dpapcc'],
-        'pcc' => ['pcc', 'policeclearance'],
-        // rev190 — the wizard was silently dropping every column below (present in
-        // the sample template but absent from this whitelist), so Gender / Marital /
-        // Blood group / parents / bank name etc. never imported. Brought to parity
-        // with the one-shot importer's mapping.
-        'type' => ['type', 'employmenttype', 'emptype'],
-        'gender' => ['gender', 'sex'],
-        'marital_status' => ['maritalstatus', 'marital'],
-        'blood_group' => ['bloodgroup', 'blood'],
-        'father' => ['father', 'fathername', 'fathersname'],
-        'mother' => ['mother', 'mothername', 'mothersname'],
-        'spouse' => ['spouse', 'spousename'],
-        'national_id' => ['nationalid', 'nationalidssn', 'ssn', 'governmentid', 'govtid', 'aadhaar', 'aadhar'],
-        'bank_name' => ['bankname', 'bank'],
-        'bank_branch' => ['bankbranch', 'branchname'],
-        // rev190 (item C) — the new sample-template columns. Field key = the real
-        // employees column so payload() writes it directly (present address is the
-        // legacy `address` column; permanent address is its own).
-        'permanent_address' => ['permanentaddress', 'permaddress'],
-        'category' => ['category'],
-        'esic_no' => ['esic', 'esicno', 'esicnumber'],
-        'emergency_name' => ['emergencycontactperson', 'emergencyname', 'emergencyperson', 'emergencycontact'],
-        'emergency_phone' => ['emergencycontactnumber', 'emergencyphone', 'emergencynumber', 'emergencymobile'],
-        'account_holder' => ['bankaccountholder', 'accountholder', 'accountholdername', 'bankholder'],
-        // 19 Aug 2026 (Ejaz) — the sample template now carries every EXPORT column,
-        // so the wizard must accept them too or they'd be silently dropped (exactly
-        // the rev190 bug). The aliases match both the ALL-CAPS template and the
-        // mixed-case export ("Commission %" and "COMMISSION %" both normalise to
-        // "commission"), so an exported file re-imports as-is.
-        'schedule_id' => ['salaryschedule', 'schedule', 'payschedule'],
-        'comm_pct' => ['commission', 'commissionpct', 'commissionpercent', 'commpct'],
-        'pf_applicable' => ['pfapplicable'],
-        'esi_applicable' => ['esiapplicable'],
-        'pt_state' => ['ptstate', 'professionaltaxstate'],
-        'employment_stage' => ['employmentstage', 'stage'],
-        'reporting_manager' => ['reportingmanager', 'manager', 'reportsto'],
-        'dra_status' => ['drastatus'],
-        'dra_expiry' => ['draexpiry', 'draexpirydate'],
-        'pcc_status' => ['pccstatus'],
-        'pcc_deadline' => ['pccdeadline'],
-        'pcc_expiry' => ['pccexpiry', 'pccexpirydate'],
-        'status' => ['status', 'employeestatus'],
-        // Import-only (never exported): the person's first-time ESS login password.
-        // Optional — blank means no login is created. Applied to the users table
-        // after the employee write; never stored on the employees row.
-        'password' => ['defaultpassword', 'password', 'loginpassword', 'firsttimepassword'],
-    ];
+    /**
+     * 28 Aug 2026 (Ejaz) — the accepted headers are now DERIVED from
+     * App\Services\EmployeeFieldRules::FIELDS, the one place employee fields are
+     * declared. A header with no entry here is silently ignored by the wizard,
+     * which is exactly how CATEGORY, ESIC, PERMANENT ADDRESS, EMERGENCY CONTACT
+     * and BANK ACCOUNT HOLDER came to be in the sample file and import as
+     * nothing (rev190, and again on 19 Aug). Because the registry's own header
+     * is always an accepted alias, that can no longer happen: a column cannot
+     * be added to the file without the importer already knowing it.
+     *
+     * suggestMapping() normalises a header the same way EmployeeFieldRules::norm
+     * does — lower-case, parentheticals dropped, non-alphanumerics stripped — so
+     * "Commission %", "COMMISSION %" and "commission" all reach the same field.
+     *
+     * NOTE the one alias deliberately REMOVED today: 'employmenttype' used to
+     * point at `type` (office/field), so a file with an EMPLOYMENT TYPE column
+     * holding "Permanent" imported every single row as Office. That column is
+     * EMPLOYMENT STAGE; a file still headed EMPLOYMENT TYPE is now left
+     * unmapped for the user to assign on the mapping screen instead of being
+     * silently mis-read.
+     */
+    public static function fields(): array
+    {
+        // Cached per request: suggestMapping() asks for this once per header,
+        // and a 57-column file would otherwise rebuild the whole alias table
+        // 57 times.
+        if (self::$fieldCache === null) {
+            self::$fieldCache = \App\Services\EmployeeFieldRules::importAliases();
+        }
+
+        return self::$fieldCache;
+    }
+
+    /** @var array<string,array<int,string>>|null */
+    private static ?array $fieldCache = null;
 
     /** Fields a row cannot be imported without. */
     public const REQUIRED = ['name'];
@@ -178,7 +143,7 @@ class EmployeeImportService
                 'token' => $token,
                 'headers' => $headers,
                 'mapping' => self::suggestMapping($headers),
-                'fields' => array_keys(self::FIELDS),
+                'fields' => array_keys(self::fields()),
                 'required' => self::REQUIRED,
                 'sample' => array_slice($rows, 0, 5),
                 'total' => count($rows),
@@ -198,7 +163,7 @@ class EmployeeImportService
             // rev190 (item C) — strip a parenthetical hint like "DOJ (DD-MM-YYYY)"
             // so the header still matches its field alias ("doj").
             $norm = self::norm(preg_replace('/\(.*?\)/', '', $h));
-            foreach (self::FIELDS as $field => $aliases) {
+            foreach (self::fields() as $field => $aliases) {
                 if (in_array($norm, $aliases, true)) {
                     $map[$h] = $field;
                     continue 2;
@@ -258,7 +223,7 @@ class EmployeeImportService
         // header => field, ignoring blanks and unknown targets
         $map = [];
         foreach ($mapping as $header => $field) {
-            if ($field && array_key_exists($field, self::FIELDS)) {
+            if ($field && array_key_exists($field, self::fields())) {
                 $map[$header] = $field;
             }
         }
@@ -273,6 +238,7 @@ class EmployeeImportService
         $toUpdate = [];
         $skipped = 0;
         $seenCodes = [];
+        $seenUnique = [];   // column => [lower-cased value => the row that used it first]
 
         foreach ($rows as $i => $raw) {
             $lineNo = $i + 2;   // +1 for zero-index, +1 for the header row
@@ -321,6 +287,18 @@ class EmployeeImportService
                     $rowErr = 'Default Password must be at least '.self::PASSWORD_MIN.' characters.';
                 }
             }
+            // 28 Aug 2026 (Ejaz) — the SAME format rules the Employee form
+            // applies in the browser and storeEmployee applies on the server.
+            // PAN, IFSC, UAN, bank account, Biometric ID, mobile and the
+            // compliance dates were previously unchecked on this path, so a
+            // malformed value either reached the column or blew up as a raw SQL
+            // error mid-transaction and rolled back the whole import.
+            if ($rowErr === null) {
+                $fmt = \App\Services\EmployeeFieldRules::formatErrors($v);
+                if ($fmt) {
+                    $rowErr = reset($fmt);
+                }
+            }
             if ($rowErr !== null) {
                 $errors[] = ['row' => $lineNo, 'message' => $rowErr];
 
@@ -349,6 +327,39 @@ class EmployeeImportService
 
             if ($existing && $dupMode === 'skip') {
                 $skipped++;
+
+                continue;
+            }
+
+            // 28 Aug 2026 (Ejaz) — "PAN will be unique to the individuals."
+            // Employee Code was the only thing this wizard deduplicated on, so a
+            // file could load ten people on one PAN, one Biometric ID (which is
+            // what punch ingestion matches on) or one email (which is the ESS
+            // login id, and whose DEFAULT PASSWORD would overwrite the other
+            // person's). Checked against the database AND against the rows
+            // already read from this same file — a duplicate inside one
+            // spreadsheet never reaches the database at all.
+            $dupErr = null;
+            foreach (\App\Services\EmployeeFieldRules::uniqueFields() as $uCol => $uLabel) {
+                $uVal = strtolower(trim((string) ($v[$uCol] ?? '')));
+                if ($uVal === '') {
+                    continue;
+                }
+                if (isset($seenUnique[$uCol][$uVal])) {
+                    $dupErr = $uLabel.' "'.trim((string) $v[$uCol]).'" is already used on row '
+                        .$seenUnique[$uCol][$uVal].' of this file. Every employee must have their own '.$uLabel.'.';
+                    break;
+                }
+                $seenUnique[$uCol][$uVal] = $lineNo;
+            }
+            if ($dupErr === null) {
+                $dbDup = \App\Services\EmployeeFieldRules::duplicateErrors($v, $tid, $existing->id ?? null);
+                if ($dbDup) {
+                    $dupErr = reset($dbDup);
+                }
+            }
+            if ($dupErr !== null) {
+                $errors[] = ['row' => $lineNo, 'message' => $dupErr];
 
                 continue;
             }
@@ -455,7 +466,15 @@ class EmployeeImportService
     /** Build the employees-table payload, only for columns that exist. */
     private static function payload(array $v, ?int $tid, $companyId): array
     {
-        $salaryMap = ['salary' => 'only_salary', 'salary + commission' => 'salary_commission', 'commission' => 'only_commission'];
+        // 28 Aug 2026 (Ejaz) — THE bug behind "Only Commission becomes Only
+        // Salary". This map used to know only the sample file's short labels,
+        // while the EXPORT wrote the long ones ("Only Commission"), and an
+        // unrecognised label fell through the `?? 'only_salary'` below. So
+        // exporting the directory and re-importing that same file moved every
+        // commission-only employee onto salary-only, silently, and their
+        // commission stopped being paid. One shared list of accepted spellings
+        // now — and the export and the file agree on the label besides.
+        $salaryMap = \App\Services\EmployeeFieldRules::SALARY_TYPE_IN;
 
         $out = ['tenant_id' => $tid, 'company_id' => $companyId, 'name' => $v['name']];
         if (! empty($v['emp_code'])) {
@@ -465,7 +484,13 @@ class EmployeeImportService
             'department', 'designation', 'branch', 'team', 'shift', 'device_user_id',
             'gender', 'marital_status', 'blood_group', 'father', 'mother', 'spouse',
             'national_id', 'bank_name', 'bank_branch',
-            'permanent_address', 'category', 'esic_no', 'emergency_name', 'emergency_phone', 'account_holder'] as $f) {
+            'permanent_address', 'category', 'esic_no', 'emergency_name', 'emergency_phone', 'account_holder',
+            // 28 Aug 2026 (Ejaz) — the last columns the file and the form did
+            // not share. `id_marks` was a form field with no column in the file;
+            // `nationality` was captured by Self-Onboarding and read by nothing;
+            // `team_leader` was saved by the form but had no file column;
+            // `also_works_for` was a form control that was never saved at all.
+            'id_marks', 'nationality', 'team_leader', 'also_works_for'] as $f) {
             if (! empty($v[$f])) {
                 $out[$f] = $v[$f];
             }
@@ -483,7 +508,7 @@ class EmployeeImportService
             $out['ctc'] = (float) str_replace([',', ' '], '', $v['ctc']);
         }
         if (! empty($v['salary_type'])) {
-            $out['salary_type'] = $salaryMap[strtolower($v['salary_type'])] ?? 'only_salary';
+            $out['salary_type'] = $salaryMap[strtolower(trim((string) $v['salary_type']))] ?? 'only_salary';
         }
         // DPA/PCC → the existing dra_pcc_declared boolean (same rule as F4)
         $dpa = isset($v['dpa']) && $v['dpa'] !== '' ? self::yesNo($v['dpa']) : null;
@@ -491,6 +516,20 @@ class EmployeeImportService
         $decl = array_values(array_filter([$dpa, $pcc], fn ($x) => is_bool($x)));
         if ($decl) {
             $out['dra_pcc_declared'] = ! in_array(false, $decl, true);
+        }
+        // 27 Aug 2026 (Ejaz) — the import wrote ONLY the combined
+        // dra_pcc_declared boolean, but the Directory → Employee → Documents tab
+        // reads the SEPARATE dra_declared / pcc_declared columns (that is what
+        // storeEmployee writes and what bootstrap() reads back). So an imported
+        // DRA/PCC declaration never appeared on the form. Write both columns in
+        // the same Yes/No/NA shape the form saves. (Columns the install does not
+        // have are dropped by the column filter at the end of this method.)
+        foreach ([['dpa', 'dra_declared'], ['pcc', 'pcc_declared']] as [$src, $dbCol]) {
+            if (! isset($v[$src]) || trim((string) $v[$src]) === '') {
+                continue;
+            }
+            $b = self::yesNo($v[$src]);
+            $out[$dbCol] = $b === true ? 'Yes' : ($b === false ? 'No' : 'NA');
         }
         // ---- 19 Aug 2026 — export-parity columns ----
         foreach (['pt_state', 'reporting_manager'] as $f) {
@@ -512,12 +551,18 @@ class EmployeeImportService
         if (isset($v['employment_stage']) && trim((string) $v['employment_stage']) !== '') {
             // Stored as '' (Permanent) | 'probation' | 'internship' — same values
             // the Add/Edit form writes, so payroll reads them identically.
-            $stage = strtolower(trim((string) $v['employment_stage']));
-            $out['employment_stage'] = in_array($stage, ['probation', 'internship'], true) ? $stage : '';
+            $out['employment_stage'] = \App\Http\Controllers\AppDataController::employmentStage($v['employment_stage']);
         }
-        foreach (['dra_status', 'pcc_status', 'status'] as $f) {
-            if (! empty($v[$f])) {
-                $out[$f] = strtolower(trim((string) $v[$f]));
+        if (! empty($v['status'])) {
+            $out['status'] = strtolower(trim((string) $v['status']));
+        }
+        // 27 Aug 2026 (Ejaz) — DRA Certificate / PCC Status go through the ONE
+        // canonical set (pending|submitted|verified), the same gate the Documents
+        // tab uses. Anything else — including the retired 'Overdue' — is left
+        // unset rather than written as a value the dropdown cannot display.
+        foreach (['dra_status', 'pcc_status'] as $f) {
+            if (! empty($v[$f]) && ($s = \App\Http\Controllers\AppDataController::complianceStatus($v[$f])) !== null) {
+                $out[$f] = $s;
             }
         }
         foreach (['dra_expiry', 'pcc_deadline', 'pcc_expiry'] as $d) {

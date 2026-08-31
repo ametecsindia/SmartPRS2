@@ -124,6 +124,17 @@ class AppController extends Controller
             'appLogo' => \App\Http\Controllers\ConfigController::appLogoUrlFor($user->tenant_id ?? null),   // rev184 — per-client sidebar logo (fallback: default product logo)
             'empImportUrl' => route('app.employees.import'),
             'empTemplateUrl' => route('app.employees.template'),
+            // 28 Aug 2026 (Ejaz) — the Add/Edit Employee form's Personal, Job,
+            // Statutory, Documents and Bank tabs are BUILT from this, the same
+            // registry that generates the sample import file, the export and the
+            // importer's accepted headers (App\Services\EmployeeFieldRules).
+            // Those five lists used to be maintained separately, which is how
+            // the file came to carry CATEGORY / ESIC / PERMANENT ADDRESS /
+            // BANK ACCOUNT HOLDER / BANK BRANCH with no matching input on the
+            // form, and the form came to carry "Also works for" with no column
+            // anywhere. There is now one list, and no way to change only part
+            // of it.
+            'empFields' => \App\Services\EmployeeFieldRules::formPanels(),
             'empExportUrl' => route('app.employees.export'),   // F6 — full employee export (CSV + XLSX)
             'stateUrl' => route('app.state'),
             'stateSaveUrl' => route('app.state.save'),
@@ -1414,8 +1425,13 @@ CSS;
     // always allowed — a field left empty is fine; only a filled-in value that is
     // the wrong shape is rejected, so invalid data can never be captured.
     var EMP_VALID_IDS = ['f_mobile', 'f_whatsapp', 'f_pan', 'f_uan', 'f_email', 'f_ifsc',
-        'f_dob', 'f_doj', 'f_pccDeadline', 'f_ctc', 'f_commPct', 'f_homeLat', 'f_homeLng',
-        'f_geoRadius', 'f_bankAcc', 'f_deviceUserId', 'f_aadhaar'];
+        'f_dob', 'f_doj', 'f_pccDeadline', 'f_draExpiry', 'f_pccExpiry', 'f_ctc', 'f_commPct', 'f_homeLat', 'f_homeLng',
+        'f_geoRadius', 'f_bankAcc', 'f_deviceUserId', 'f_aadhaar',
+        // 28 Aug 2026 (Ejaz) — the Emergency Contact Number is a new Personal-tab
+        // field and is a phone number like any other. The SAME rules now also run
+        // server-side for every one of these (EmployeeFieldRules::formatError) and
+        // in the Self-Onboarding portal, which validated nothing at all.
+        'f_emergencyPhone'];
     // Parse a date from YYYY-MM-DD or DD-MM-YYYY (any separator) into a real
     // calendar Date, or null. Rejects impossible dates like 31-02-2020.
     function empParseDate(v) {
@@ -1433,7 +1449,7 @@ CSS;
     function empFieldError(id, valRaw) {
         var v = (valRaw == null ? '' : String(valRaw)).trim();
         if (v === '') { return null; }   // blank is always acceptable
-        if (id === 'f_mobile' || id === 'f_whatsapp') {
+        if (id === 'f_mobile' || id === 'f_whatsapp' || id === 'f_emergencyPhone') {
             // Reject letters/symbols outright (don't silently strip them, which
             // was making "9391024484rrr" pass as valid).
             if (/[^0-9+() -]/.test(v)) { return 'Mobile number is invalid — remove letters/symbols and enter a 10-digit number (starting 6-9).'; }
@@ -1477,6 +1493,11 @@ CSS;
             if (!empParseDate(v)) { return 'Date of Joining is not a valid date — use DD-MM-YYYY.'; }
         } else if (id === 'f_pccDeadline') {
             if (!empParseDate(v)) { return 'PCC Deadline is not a valid date — use DD-MM-YYYY.'; }
+        } else if (id === 'f_draExpiry') {
+            // 27 Aug 2026 (Ejaz) — new Documents-tab dates, validated like the rest.
+            if (!empParseDate(v)) { return 'DRA Expiry is not a valid date — use DD-MM-YYYY.'; }
+        } else if (id === 'f_pccExpiry') {
+            if (!empParseDate(v)) { return 'PCC Expiry is not a valid date — use DD-MM-YYYY.'; }
         }
         return null;
     }
@@ -1485,7 +1506,115 @@ CSS;
         el.style.borderColor = bad ? '#ef4444' : '';
         el.style.background = bad ? '#fef2f2' : '';
     }
+    // 28 Aug 2026 (Ejaz) — THE EMPLOYEE FORM IS BUILT FROM THE FIELD REGISTRY.
+    //
+    // Ejaz's 28 Aug report: fields missing from the form that the sample file
+    // and Self-Onboarding both had (Category, ESIC, Permanent Address,
+    // Emergency Contact, Bank Account Holder, Bank Branch), fields on the form
+    // that no file carried (Identification Marks, Also Works For), and labels
+    // that named the same field two ways ("Government ID / SSN" vs "NATIONAL ID
+    // / SSN", "Only Salary" vs "Salary", "ESI (wage < 21,000)" vs "ESI
+    // APPLICABLE"). Every one of those was a hand-kept list drifting from
+    // another hand-kept list.
+    //
+    // The Personal / Job / Statutory / Documents / Bank panels are now
+    // GENERATED from cfg.empFields, which the server builds from
+    // the EmployeeFieldRules service — the same registry that produces the
+    // sample file's columns and dropdowns, the export's headers and the
+    // importer's accepted aliases. A field cannot exist in one and not the
+    // others any more.
+    //
+    // (Geo Location and References are untouched: they are form-only screens
+    // with no file columns, and the prototype builds them well.)
+    //
+    // Done in boot JS, not app.html, per the standing convention: the prototype
+    // file is replaced wholesale on deploys and this keeps the change in one
+    // reviewable place. fieldHTML() is the prototype's own field builder, so
+    // the markup and the f_* ids stay identical to every other tab.
+    var EMP_NOTES = {
+        ep: '<div class="note2"><i class="fas fa-shield-halved"></i><div>Mobile, WhatsApp &amp; Email must be <b>verified via OTP</b>. On save, any unverified contact is flagged &amp; logged.</div></div>',
+        ej: '',
+        es: '<div class="note2"><i class="fas fa-circle-info"></i><div>Pick the company&rsquo;s <b>Salary Schedule</b> (it drives the pay cycle and lot calculation) and the employee&rsquo;s <b>Salary Type</b>.</div></div>',
+        ed: '<div class="note2"><i class="fas fa-circle-info"></i><div>PAN and DRA Certificate are mandatory. Missing PCC within the deadline triggers an automatic ₹1,000 deduction. <b>These fields match the Employee Import sample file column for column</b> &mdash; Declared = the Yes/No/NA self-declaration, Certificate / Status = Pending, Submitted or Verified.</div></div>',
+        eb: ''
+    };
+    // Dropdown sources the registry refers to by name, resolved against the
+    // in-browser DB the prototype already keeps.
+    function empOptsFor(src) {
+        var pick = function (arr) {
+            return (arr || []).map(function (x) { return (x && x.name) ? x.name : x; })
+                .filter(function (n) { return n !== null && n !== undefined && String(n) !== ''; });
+        };
+        try {
+            if (src === '@companies') { return pick(DB.companies); }
+            if (src === '@departments') { return pick(DB.departments); }
+            if (src === '@designations') { return pick(DB.designations); }
+            if (src === '@branches') { return pick((DB.branchesC && DB.branchesC.length) ? DB.branchesC : DB.branches); }
+            if (src === '@teams') { return pick(DB.teams); }
+            if (src === '@employees') { return pick(DB.employees); }
+            if (src === '@shifts') { return pick(DB.shifts); }
+            if (src === '@schedules') {
+                return (DB.salarySchedules || []).map(function (sc) {
+                    return sc.companyId ? (sc.name + ' — ' + sc.companyId) : sc.name;
+                });
+            }
+            if (src === '@ptStates') { return (cfg.empFields && cfg.empFields.ptStates) || []; }
+        } catch (eO) {}
+        return [];
+    }
+    // One field. Contact fields keep the prototype's OTP "Verify" control, which
+    // fieldHTML does not know how to draw.
+    function empFieldMarkup(f) {
+        if (f.otp) {
+            return '<div class="fld2"><label>' + f.l + '</label>'
+                + '<div style="display:flex;gap:8px">'
+                + '<input id="f_' + f.k + '" type="' + (f.t || 'text') + '" style="flex:1">'
+                + '<button type="button" class="btn btn-outline btn-sm" id="vbtn_' + f.k + '" onclick="requestOtp(&#39;' + f.k + '&#39;)">'
+                + '<i class="fas fa-shield-halved"></i> Verify</button>'
+                + '</div><div class="hint" id="vst_' + f.k + '">Not verified — OTP required</div></div>';
+        }
+        var g = { k: f.k, l: f.l };
+        if (f.t) { g.t = f.t; }
+        if (f.hint) { g.hint = f.hint; }
+        if (f.opts && f.opts.length) { g.opts = f.opts; }
+        else if (f.src) { var o = empOptsFor(f.src); if (o.length) { g.opts = o; } }
+        return fieldHTML(g);
+    }
+    // Replace one tab's panel with the registry's version. `nextTab` is the
+    // panel that follows it in the prototype's markup; pass null for the LAST
+    // panel, where the only thing after it is the two closing tags.
+    function empReplacePanel(html, tab, nextTab) {
+        try {
+            if (typeof fieldHTML !== 'function') { return html; }
+            var list = (cfg.empFields && cfg.empFields[tab]) || [];
+            if (!list.length) { return html; }
+            var a = html.indexOf('<div id="tab-' + tab + '"');
+            if (a < 0) { return html; }
+            var panel = '<div id="tab-' + tab + '" class="tab-content' + (tab === 'ep' ? ' active' : '') + '">'
+                + (EMP_NOTES[tab] || '')
+                + '<div class="fgrid">' + list.map(empFieldMarkup).join('') + '</div>'
+                + '</div>';
+            if (nextTab) {
+                var b = html.indexOf('<div id="tab-' + nextTab + '"');
+                if (b <= a) { return html; }
+                return html.slice(0, a) + panel + html.slice(b);
+            }
+            // Last panel — refuse to touch it if anything else follows, so a
+            // future prototype that reorders the tabs cannot lose a panel here.
+            if (html.indexOf('<div id="tab-e', a + 1) >= 0) { return html; }
+            return html.slice(0, a) + panel + '</div></div>';
+        } catch (ePanel) { return html; }
+    }
     function wireEmpFormExtras() {
+        // The sample file's EMPLOYEE TYPE column offers Office / Field, so the
+        // form and the Directory read-back use those two words now. The
+        // prototype's badge palette is keyed on the old 'Field / FOS' label —
+        // register the new one so the Directory chip keeps its colour.
+        try {
+            if (typeof BADGE === 'object' && BADGE && !BADGE['Field']) {
+                BADGE['Field'] = BADGE['Field / FOS'] || 'amber';
+            }
+        } catch (eBadge) {}
         if (typeof renderEmpForm === 'function' && !renderEmpForm.__extra) {
             var _origEF = renderEmpForm;
             window.renderEmpForm = function () {
@@ -1495,6 +1624,13 @@ CSS;
                     + '<span style="font-size:11px;letter-spacing:1px;text-transform:uppercase;opacity:.7">Editing</span>'
                     + '<span class="ehb-txt" style="font-size:14.5px;font-weight:800">New employee</span>'
                     + '</div>';
+                // Last panel first, then upwards. Each call re-searches the
+                // string, so the order only reflects how the tabs read.
+                html = empReplacePanel(html, 'eb', null);
+                html = empReplacePanel(html, 'ed', 'er');
+                html = empReplacePanel(html, 'es', 'ed');
+                html = empReplacePanel(html, 'ej', 'eg');
+                html = empReplacePanel(html, 'ep', 'ej');
                 return html.replace('<div id="tab-ep"', bar + '<div id="tab-ep"');
             };
             window.renderEmpForm.__extra = true;
@@ -1566,7 +1702,7 @@ CSS;
                 var _draEl = document.getElementById('f_draDeclared');
                 var _pccEl = document.getElementById('f_pccDeclared');
                 if ((_draEl && !_draEl.value) || (_pccEl && !_pccEl.value)) {
-                    if (typeof toast === 'function') { toast('Please answer DRA Status and PCC Status (Yes/No) in the Documents tab — both are required.'); }
+                    if (typeof toast === 'function') { toast('Please answer DRA Declared and PCC Declared (Yes / No / NA) in the Documents tab — both are required.'); }
                     var _tb = document.querySelector('.tab[onclick*="tab-ed"]');
                     if (_tb && typeof showTab === 'function') { showTab('tab-ed', _tb); }
                     return;
@@ -1599,18 +1735,53 @@ CSS;
                 go('emp-list', document.querySelector('.nav-item[data-id="emp-list"]'));
                 return;
             }
+            // 27 Aug 2026 (Ejaz) — "it still generates an automatic Employee ID
+            // even when I type one in the Employee tab."
+            // ROOT CAUSE: every field below used to be read AFTER
+            // original.apply(). The prototype's own saveEmp() ends with
+            // go('emp-list'), which replaces host.innerHTML — so by the time we
+            // looked, f_id (and f_companyName, team, manager, …) no longer
+            // existed in the DOM, every lookup returned null, and the record
+            // posted to the server kept the prototype's throwaway
+            // 'EMP-' + random ID. The typed ID was never sent at all.
+            // Read the WHOLE form FIRST, while the form is still on screen, then
+            // let the prototype run.
+            // 28 Aug 2026 (Ejaz) — this used to be a HAND-LISTED subset of the
+            // form's fields, and every field added to the form after it was
+            // written was silently dropped on Add (Bank Branch is the clearest
+            // case: it was snapshotted, saved and read back, but had no input
+            // at all). Snapshot EVERY f_* field instead, exactly the way
+            // readEmpForm does on the Edit path, so a new field can never again
+            // be added to the form and quietly not save.
+            // Blank values are skipped so the prototype's own defaults
+            // (geo radius, salary type, …) still stand.
+            var snap = {};
+            document.querySelectorAll('[id^="f_"]').forEach(function (el) {
+                if (el && el.value) { snap[el.id.slice(2)] = el.value; }
+            });
+            var _fidEl = document.getElementById('f_id');
+            var _typedId = (_fidEl && _fidEl.value) ? _fidEl.value.trim() : '';
+            var _fcnEl = document.getElementById('f_companyName');
+            var _typedCompany = (_fcnEl && _fcnEl.value) ? _fcnEl.value : '';
+
             var before = (DB.employees || []).length;
             original.apply(this, arguments);
             if ((DB.employees || []).length > before) {
                 var emp = Object.assign({}, DB.employees[0], { refs: refs });
                 // The prototype's native saveEmp() doesn't copy team/manager/leader
-                // into the record — read them straight off the form so they persist.
-                ['team', 'teamManager', 'teamLeader', 'designation', 'branch', 'dept', 'shift', 'draDeclared', 'pccDeclared', 'deviceUserId'].forEach(function (k) {
-                    var el = document.getElementById('f_' + k); if (el && el.value) { emp[k] = el.value; }
-                });
-                var _fid = document.getElementById('f_id'); if (_fid && _fid.value && _fid.value.trim()) { emp.id = _fid.value.trim(); }
-                var _fcn = document.getElementById('f_companyName'); if (_fcn && _fcn.value) { emp.company = _fcn.value; }   // list shows the NAME
-                if (DB.employees[0]) { DB.employees[0].company = emp.company || DB.employees[0].company; DB.employees[0].deviceUserId = emp.deviceUserId || ''; }
+                // into the record — take them from the snapshot so they persist.
+                Object.keys(snap).forEach(function (k) { emp[k] = snap[k]; });
+                if (_typedId) { emp.id = _typedId; }
+                if (_typedCompany) { emp.company = _typedCompany; }   // list shows the NAME
+                if (DB.employees[0]) {
+                    // Keep the on-screen Directory row consistent with what was
+                    // actually posted — otherwise the list shows the throwaway
+                    // random code until the next refresh.
+                    if (_typedId) { DB.employees[0].id = _typedId; }
+                    DB.employees[0].company = emp.company || DB.employees[0].company;
+                    DB.employees[0].deviceUserId = emp.deviceUserId || '';
+                    if (typeof persist === 'function') { try { persist(); } catch (eP) {} }
+                }
                 postEmp(emp).then(function (d) {
                     if (d && d.ok) { if (typeof toast === 'function') { toast('Saved to database (' + d.emp_code + ')'); } }
                     else { if (typeof toast === 'function') { toast('NOT SAVED - ' + ((d && d.error) || 'the server rejected the record.')); } }
@@ -8984,13 +9155,18 @@ CSS;
         var ck = document.getElementById('bio-enabled');
         var f = window.__bioForm || {};
         var provider = g('bio-provider') || (f.provider || 'etimeoffice');
+        // Falls back to the form state when the input is not on the page: in
+        // 1-device mode the OUT Machine ID input does not exist, and a plain g()
+        // would blank the saved value just from toggling the selector.
+        var gf = function (id, key) { var el = document.getElementById(id); return el ? el.value : (f[key] || ''); };
         var out = {
             id: f.id || '',
             label: g('bio-label'), branch: g('bio-branch'),
             provider: provider, base_url: g('bio-base'), endpoint: g('bio-endpoint'),
             corp_id: g('bio-corp'), serial_number: g('bio-serial'), username: g('bio-user'), password: g('bio-pass'),
             empcode: g('bio-empcode'), emp_prefix: g('bio-prefix'),
-            in_machine_id: g('bio-inmc'), out_machine_id: g('bio-outmc'),
+            device_mode: g('bio-devmode') || (f.device_mode || 'dual'),
+            in_machine_id: gf('bio-inmc', 'in_machine_id'), out_machine_id: gf('bio-outmc', 'out_machine_id'),
             sync_interval_min: g('bio-interval'),
             enabled: (ck && ck.checked) ? 1 : 0
         };
@@ -9020,6 +9196,18 @@ CSS;
         var f = window.__bioForm || {};
         var cur = bioCollect();
         cur.provider = v;
+        cur._new = f._new;
+        cur.hasPassword = f.hasPassword;
+        if (!cur.id) { cur.id = f.id || ''; }
+        window.__bioForm = cur;
+        if (typeof render === 'function') { render(); }
+    };
+    // Same idea for the device setup: 1 Device shows one Machine ID field,
+    // 2 Devices shows IN and OUT. Re-render keeps everything already typed.
+    window.bioSetDeviceMode = function (v) {
+        var f = window.__bioForm || {};
+        var cur = bioCollect();
+        cur.device_mode = (v === 'single') ? 'single' : 'dual';
         cur._new = f._new;
         cur.hasPassword = f.hasPassword;
         if (!cur.id) { cur.id = f.id || ''; }
@@ -9299,6 +9487,25 @@ CSS;
                             + fld('Username', 'bio-user', c.username || '', 'text', 'API username')
                             + fld('Password', 'bio-pass', '', 'password', pwPh, '')
                             + fld('Employee code filter', 'bio-empcode', c.empcode || '', 'text', 'ALL', 'Usually ALL.'));
+            // ---- Device setup: 1 reader (alternating) vs 2 readers (IN + OUT) ----
+            // A row saved before this feature carries no device_mode; it shows as
+            // "2 Devices", which is exactly how it already behaves. New devices
+            // default to 1 Device, the common case.
+            var dmode = (c.device_mode === 'single') ? 'single' : ((c.device_mode === 'dual') ? 'dual' : (c._new ? 'single' : 'dual'));
+            var mcBlock = selFld('Device setup', 'bio-devmode',
+                [['single', '1 Device - one reader handles IN and OUT'],
+                 ['dual', '2 Devices (IN + OUT) - separate entry and exit readers']],
+                dmode,
+                (dmode === 'single'
+                    ? 'One reader. SmartPRS alternates automatically: 1st punch of the day IN, 2nd OUT, 3rd IN, and so on, counted per employee per attendance day.'
+                    : 'Two readers. Every punch from the IN Machine ID is an IN, every punch from the OUT Machine ID is an OUT. Leave both blank to keep using the IN/OUT flag the device sends.'),
+                'bioSetDeviceMode(this.value)')
+                + (dmode === 'single'
+                    ? fld('Machine ID', 'bio-inmc', c.in_machine_id || '', 'text', 'e.g. 101', 'Device number / serial of this reader. Optional - leave blank if this device setup has only one reader anyway.')
+                    : ('<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px">'
+                        + fld('IN Machine ID', 'bio-inmc', c.in_machine_id || '', 'text', 'e.g. 101', 'Entry device number/serial - its punches are IN.')
+                        + fld('OUT Machine ID', 'bio-outmc', c.out_machine_id || '', 'text', 'e.g. 102', 'Exit device number/serial - its punches are OUT.')
+                        + '</div>'));
             var buttons = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px">'
                 + '<button class="btn btn-primary" onclick="bioSave()"><i class="fas fa-floppy-disk"></i> Save device</button>'
                 + (prov === 'push' ? '' : ('<button class="btn btn-outline" onclick="bioTest()"><i class="fas fa-plug"></i> Test connection</button>'
@@ -9313,10 +9520,7 @@ CSS;
                 + provFields
                 + intervalFld
                 + fld('Employee ID prefix', 'bio-prefix', c.emp_prefix || '', 'text', 'e.g. A', 'If the device returns 12345 and your employees are A12345, enter A.')
-                + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px">'
-                + fld('In Machine ID', 'bio-inmc', c.in_machine_id || '', 'text', 'e.g. 1', 'Entry device number/serial — its punches are IN. Optional.')
-                + fld('Out Machine ID', 'bio-outmc', c.out_machine_id || '', 'text', 'e.g. 2', 'Exit device number/serial — its punches are OUT. Optional.')
-                + '</div>'
+                + mcBlock
                 + buttons
                 + '<div id="bio-result" style="margin-top:14px;font-size:13px"></div>'
                 + '</div>';
@@ -9331,7 +9535,10 @@ CSS;
             var status = v.lastSyncAt ? ('<i class="fas fa-clock"></i> Last sync: ' + esc(v.lastSyncAt) + ' — ' + esc(v.lastStatus || '')) : '<span style="color:var(--text3)">Never synced</span>';
             var badge = v.enabled ? '<span style="background:#dcfce7;color:#166534;border-radius:20px;padding:2px 10px;font-size:12px;font-weight:600">Auto-sync ON</span>' : '<span style="background:var(--bg2);color:var(--text3);border-radius:20px;padding:2px 10px;font-size:12px">Auto-sync off</span>';
             var title = esc(v.label || v.corp_id || v.provider || ('Device #' + v.id));
-            var sub = (v.branch ? esc(v.branch) : '<span style="color:var(--text3)">No branch</span>') + ' &middot; ' + esc(v.provider || 'etimeoffice');
+            var mc = (v.device_mode === 'single')
+                ? ('1 device' + (v.in_machine_id ? ' &middot; MC ' + esc(v.in_machine_id) : ''))
+                : ((v.in_machine_id || v.out_machine_id) ? ('2 devices &middot; IN ' + esc(v.in_machine_id || '-') + ' / OUT ' + esc(v.out_machine_id || '-')) : '');
+            var sub = (v.branch ? esc(v.branch) : '<span style="color:var(--text3)">No branch</span>') + ' &middot; ' + esc(v.provider || 'etimeoffice') + (mc ? ' &middot; ' + mc : '');
             return '<div class="card" style="padding:16px 18px;margin-bottom:12px">'
                 + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">'
                 + '<div><div style="font-weight:700;font-size:15px">' + title + '</div><div style="font-size:13px;color:var(--text2);margin-top:2px">' + sub + '</div><div style="font-size:12px;color:var(--text3);margin-top:6px">' + status + '</div></div>'

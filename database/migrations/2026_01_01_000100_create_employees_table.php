@@ -8,9 +8,31 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
+    /**
+     * 28 Aug 2026 (Ejaz) - client install died here with
+     *   SQLSTATE[42S01]: Base table or view already exists: 1050
+     *   Table 'training_programs' already exists
+     * MySQL DDL is NOT transactional: if this migration ever stops part-way
+     * (or the target DB already holds these tables - a re-install over an
+     * existing database, a restored dump without its `migrations` rows, a
+     * wrong DB_DATABASE), the row is never written to `migrations`, so every
+     * retry re-runs the whole file and dies on the FIRST table that exists.
+     * That is unrecoverable without dropping the database.
+     * Creating only what is missing makes the migration re-runnable, so a
+     * half-applied install repairs itself on the next `php artisan migrate`.
+     * A real error (bad column, no privilege) still throws - only "already
+     * there" is skipped.
+     */
+    private function mk(string $table, \Closure $definition): void
+    {
+        if (! Schema::hasTable($table)) {
+            Schema::create($table, $definition);
+        }
+    }
+
     public function up(): void
     {
-        Schema::create('companies', function (Blueprint $t) {
+        $this->mk('companies', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->string('name');
@@ -29,7 +51,7 @@ return new class extends Migration
             $t->softDeletes();
         });
 
-        Schema::create('departments', function (Blueprint $t) {
+        $this->mk('departments', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->nullable()->index();
@@ -39,7 +61,7 @@ return new class extends Migration
             $t->softDeletes();
         });
 
-        Schema::create('designations', function (Blueprint $t) {
+        $this->mk('designations', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->string('name');
@@ -48,7 +70,7 @@ return new class extends Migration
             $t->softDeletes();
         });
 
-        Schema::create('branches', function (Blueprint $t) {
+        $this->mk('branches', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->index();
@@ -61,14 +83,14 @@ return new class extends Migration
             $t->softDeletes();
         });
 
-        Schema::create('banks', function (Blueprint $t) {
+        $this->mk('banks', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->string('name');
             $t->timestamps();
         });
 
-        Schema::create('teams', function (Blueprint $t) {
+        $this->mk('teams', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->index();
@@ -81,7 +103,7 @@ return new class extends Migration
             $t->softDeletes();
         });
 
-        Schema::create('employees', function (Blueprint $t) {
+        $this->mk('employees', function (Blueprint $t) {
             $t->id();
             $t->uuid('uuid')->unique();
             $t->unsignedBigInteger('tenant_id')->index();
@@ -137,13 +159,13 @@ return new class extends Migration
             $t->index(['company_id', 'status']);
         });
 
-        Schema::create('employee_company', function (Blueprint $t) {
+        $this->mk('employee_company', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('employee_id')->index();
             $t->unsignedBigInteger('company_id')->index();
         });
 
-        Schema::create('employee_references', function (Blueprint $t) {
+        $this->mk('employee_references', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('employee_id')->index();
             $t->string('name');

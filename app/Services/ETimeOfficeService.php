@@ -74,6 +74,7 @@ class ETimeOfficeService
             'emp_prefix' => $r->emp_prefix ?? '',
             'in_machine_id' => $r->in_machine_id ?? '',    // rev173e
             'out_machine_id' => $r->out_machine_id ?? '',  // rev173e
+            'device_mode' => $r->device_mode ?? null,      // 'single' | 'dual' | null (legacy = dual)
             'tenant_id' => $r->tenant_id ?? null,
         ];
     }
@@ -560,6 +561,125 @@ class ETimeOfficeService
         return $promoted;
     }
 
+    // =====================================================================
+    // 1-DEVICE MODE — alternating IN/OUT (28 Aug 2026)
+    //
+    // A location with ONE reader cannot tell entry from exit by machine, and
+    // most such devices report a useless INOUT flag. The direction is therefore
+    // the punch's POSITION in that employee's day: 1st IN, 2nd OUT, 3rd IN...
+    //
+    // Opt-in per device: biometric_configs.device_mode = 'single'. Anything
+    // else — 'dual', or the NULL every pre-existing row carries — keeps the
+    // old behaviour byte for byte (machine-ID match, else the feed's flag), so
+    // no configured site changes until an admin picks "1 Device" on the screen.
+    // =====================================================================
+
+    /** Two reads of the same finger inside this many seconds are ONE punch. */
+    private const SINGLE_REPEAT_SEC = 60;
+
+    /** True only when the admin explicitly chose "1 Device" for this config. */
+    private static function isSingleDevice(array $cfg): bool
+    {
+        return strtolower(trim((string) ($cfg['device_mode'] ?? ''))) === 'single';
+    }
+
+    /** Stable key for one punch: tenant + employee + exact second. */
+    private static function seqKey($emp, string $ts): string
+    {
+        return ($emp->tenant_id ?? '').'|'.strtolower((string) $emp->emp_code).'|'.$ts;
+    }
+
+    /**
+     * Directions for a 1-device location, one sequence per employee per day.
+     *
+     * The rank is computed from the punch's position in TIME among every punch
+     * for that employee/day/source — the ones already stored plus the ones in
+     * this batch — never from "how many rows exist right now". That is what
+     * makes it idempotent: re-syncing the same window recomputes the identical
+     * directions instead of drifting, and a punch that arrives out of order
+     * re-stamps the ones after it rather than corrupting the day.
+     *
+     * Existing rows whose stored direction no longer matches ARE corrected in
+     * place — same identity, direction is a property, exactly the rule rev173g
+     * established when it removed direction from the updateOrInsert match keys.
+     *
+     * Scoped to `source` on purpose: a site whose people also punch on a
+     * different feed the same day keeps those punches out of this sequence.
+     *
+     * @param  array<string,object|null>  $cache  prefixed code => employee row|null
+     * @return array<string,string> seqKey => 'in'|'out'
+     */
+    private static function sequenceDirections(array $punches, array $cache, string $prefix, string $source): array
+    {
+        $days = [];
+        foreach ($punches as $p) {
+            $emp = $cache[$prefix.$p['emp_code']] ?? null;
+            if (! $emp) {
+                continue;
+            }
+            $date = $p['punch_at']->toDateString();
+            $k = ($emp->tenant_id ?? '').'|'.strtolower((string) $emp->emp_code).'|'.$date;
+            $days[$k]['emp'] = $emp;
+            $days[$k]['date'] = $date;
+            $days[$k]['times'][$p['punch_at']->format('Y-m-d H:i:s')] = true;
+        }
+
+        $out = [];
+        foreach ($days as $d) {
+            $emp = $d['emp'];
+
+            $stored = [];
+            try {
+                $rows = DB::table('attendance_logs')
+                    ->whereRaw('LOWER(emp_code) = ?', [strtolower((string) $emp->emp_code)])
+                    ->where('log_date', $d['date'])
+                    ->where('source', $source)
+                    ->when(
+                        $emp->tenant_id,
+                        fn ($q) => $q->where('tenant_id', $emp->tenant_id),
+                        fn ($q) => $q->whereNull('tenant_id')
+                    )
+                    ->get(['id', 'punch_at', 'direction']);
+                foreach ($rows as $row) {
+                    $stored[Carbon::parse($row->punch_at)->format('Y-m-d H:i:s')] = $row;
+                }
+            } catch (\Throwable $e) {
+                report($e);
+            }
+
+            $times = array_keys($d['times'] + $stored);
+            sort($times, SORT_STRING);   // 'Y-m-d H:i:s' sorts lexicographically = chronologically
+
+            $rank = 0;
+            $anchor = null;
+            $dir = 'in';
+            foreach ($times as $ts) {
+                $t = strtotime($ts);
+                if ($anchor === null || ($t - $anchor) > self::SINGLE_REPEAT_SEC) {
+                    $rank++;
+                    $dir = $rank % 2 === 1 ? 'in' : 'out';
+                    $anchor = $t;
+                }
+                $out[self::seqKey($emp, $ts)] = $dir;
+            }
+
+            // Re-stamp only what actually moved.
+            foreach ($stored as $ts => $row) {
+                $want = $out[self::seqKey($emp, $ts)] ?? null;
+                if ($want !== null && $want !== $row->direction) {
+                    try {
+                        DB::table('attendance_logs')->where('id', $row->id)
+                            ->update(['direction' => $want, 'updated_at' => now()]);
+                    } catch (\Throwable $e) {
+                        report($e);
+                    }
+                }
+            }
+        }
+
+        return $out;
+    }
+
     /**
      * Write parsed punches into attendance_logs, matching employees by
      * (emp_prefix . device_code) and, failing that, by the Biometric Mapping
@@ -577,11 +697,22 @@ class ETimeOfficeService
         }
         $cache = [];
         $touched = [];   // F4 — emp_code => [date => true] for late-arrival notification
+        $source = (string) ($cfg['source'] ?? 'etimeoffice');
+
+        // Resolve every employee first — the 1-device sequence needs the whole
+        // batch grouped by employee/day before the first row is written.
         foreach ($punches as $p) {
             $full = $prefix.$p['emp_code'];
             if (! array_key_exists($full, $cache)) {
                 $cache[$full] = self::matchEmployee($full, (string) $p['emp_code'], $cfg['tenant_id'] ?? null);
             }
+        }
+        $seq = self::isSingleDevice($cfg)
+            ? self::sequenceDirections($punches, $cache, $prefix, $source)
+            : [];
+
+        foreach ($punches as $p) {
+            $full = $prefix.$p['emp_code'];
             $emp = $cache[$full];
             if (! $emp) {
                 $unmatched[$full] = ($unmatched[$full] ?? 0) + 1;
@@ -606,13 +737,18 @@ class ETimeOfficeService
             // wrong-direction row → duplicate punches → attendance/payroll wrong.
             // A punch's identity is (tenant, emp, moment, source); direction is a
             // PROPERTY that a re-sync may correct in place.
+            $ts = $p['punch_at']->format('Y-m-d H:i:s');
+            // 1-device mode overrides the parsed direction with the punch's rank
+            // in the day. Empty $seq (every other config) leaves it untouched.
+            $direction = $seq[self::seqKey($emp, $ts)] ?? $p['direction'];
+
             $match = [
                 'emp_code' => $emp->emp_code,
-                'punch_at' => $p['punch_at']->format('Y-m-d H:i:s'),
+                'punch_at' => $ts,
                 // Channel label — 'etimeoffice' (cloud) by default, 'etimetracklite'
                 // (local WebAPI) when that provider imports. Keeps the two feeds
                 // from overwriting each other and lets a re-sync correct in place.
-                'source' => $cfg['source'] ?? 'etimeoffice',
+                'source' => $source,
             ];
             if (! empty($emp->tenant_id)) {
                 $match['tenant_id'] = $emp->tenant_id;
@@ -620,7 +756,7 @@ class ETimeOfficeService
             DB::table('attendance_logs')->updateOrInsert(
                 $match,
                 [
-                    'direction' => $p['direction'],
+                    'direction' => $direction,
                     'emp_name' => $emp->name ?? $p['name'],
                     'log_date' => $p['punch_at']->toDateString(),
                     'tenant_id' => $emp->tenant_id ?? null,
@@ -631,7 +767,7 @@ class ETimeOfficeService
             );
             $imported++;
             // F4 — remember only IN punches for the late-arrival check.
-            if (($p['direction'] ?? 'in') === 'in') {
+            if ($direction === 'in') {
                 $touched[$emp->emp_code][$p['punch_at']->toDateString()] = true;
             }
         }

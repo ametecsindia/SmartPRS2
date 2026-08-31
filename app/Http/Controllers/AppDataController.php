@@ -20,14 +20,23 @@ use Illuminate\Support\Str;
  */
 class AppDataController extends Controller
 {
-    // Labels MUST match the Add/Edit form's Salary Type dropdown options
-    // ("Only Salary" / "Salary + Commission" / "Only Commission"), otherwise the
-    // read-back value is not a valid option and the select shows blank on edit.
-    private const SALARY_TYPE = [
-        'only_salary' => 'Only Salary',
-        'salary_commission' => 'Salary + Commission',
-        'only_commission' => 'Only Commission',
-    ];
+    // Labels MUST match the Add/Edit form's Salary Type dropdown options,
+    // otherwise the read-back value is not a valid option and the select shows
+    // blank on edit — which is why they are declared in ONE place now.
+    /**
+     * 28 Aug 2026 (Ejaz) — ONE set of salary-type labels, defined once in
+     * EmployeeFieldRules and used by the form, the sample file, the export and
+     * the importer alike. It used to read "Only Salary" / "Only Commission"
+     * here and in the export while the sample file offered "Salary" /
+     * "Commission", so an exported file re-imported every commission-only
+     * employee as salary-only.
+     *
+     * Fixing it also repairs the TDS estimates below (lines ~1655/1678/1726),
+     * which have always compared against the SHORT labels — so
+     * `$st === 'Commission'` could never be true and commission-only employees
+     * were being given a commission base of zero.
+     */
+    private const SALARY_TYPE = \App\Services\EmployeeFieldRules::SALARY_TYPE;
 
     /**
      * Add the org-hierarchy name columns to employees if missing
@@ -43,7 +52,17 @@ class AppDataController extends Controller
         // mother, national_id (Government ID / SSN), marital_status, bank_branch.
         $cols = ['department', 'designation', 'branch', 'team', 'reporting_manager', 'team_leader', 'father', 'mother', 'spouse', 'marital_status', 'blood_group', 'id_marks', 'gender', 'address', 'national_id', 'bank_branch', 'pt_state', 'shift', 'employment_stage', 'dra_declared', 'pcc_declared', 'dra_status', 'pcc_status', 'pcc_deadline',
             // rev190 (item C) — import/export + self-onboarding parity columns.
-            'permanent_address', 'emergency_name', 'emergency_phone', 'esic_no', 'category', 'account_holder'];
+            'permanent_address', 'emergency_name', 'emergency_phone', 'esic_no', 'category', 'account_holder',
+            // 28 Aug 2026 (Ejaz) — the last three columns the Employee form,
+            // the sample file and Self-Onboarding did not share. `nationality`
+            // was written by the portal and read by nothing; `also_works_for`
+            // was a form control that was never saved at all; `id_marks` was
+            // saved but had no column in the file. See EmployeeFieldRules.
+            'nationality', 'also_works_for',
+            // 27 Aug 2026 (Ejaz) — DRA EXPIRY / PCC EXPIRY are import-template
+            // columns and are now captured on the Documents tab, so an install
+            // patched before the create-table carried them still gets them.
+            'dra_expiry', 'pcc_expiry'];
         $missing = array_values(array_filter($cols, fn ($c) => ! Schema::hasColumn('employees', $c)));
         if (! $missing) {
             return;
@@ -74,15 +93,60 @@ class AppDataController extends Controller
     }
 
     /** F5 — normalise a self-declared Yes/No compliance answer. Blank → null so
-     *  editing a pre-existing employee is never forced to answer. */
+     *  editing a pre-existing employee is never forced to answer.
+     *  27 Aug 2026 (Ejaz) — "NA" is preserved instead of collapsing to "No": the
+     *  import template's DRA / PCC DECLARED columns offer Yes/No/NA, the
+     *  Documents tab now offers the same three, and "not applicable" is not the
+     *  same statement as "declared No". */
     private static function yesNo($v): ?string
     {
         $s = strtolower(trim((string) $v));
         if ($s === '') {
             return null;
         }
+        if (in_array($s, ['na', 'n/a', 'notapplicable', 'not applicable', '-'], true)) {
+            return 'NA';
+        }
 
         return in_array($s, ['yes', 'y', 'true', '1'], true) ? 'Yes' : 'No';
+    }
+
+    /**
+     * 28 Aug 2026 (Ejaz) — normalise an Employment Stage to the ONE stored
+     * shape: '' (Permanent) | 'probation' | 'internship'. Accepts the form's
+     * labels, the sample file's labels and the values already in the column, so
+     * a record created any of the three ways reads the same afterwards.
+     * 'Intern' and 'Contract' arrive from the retired Self-Onboarding
+     * "Employment type" control: Intern is Internship; Contract has no stage
+     * equivalent and stays blank (= Permanent) rather than being invented.
+     */
+    public static function employmentStage($v): ?string
+    {
+        $s = strtolower(trim((string) $v));
+        if ($s === '') {
+            return null;
+        }
+        if (in_array($s, ['probation', 'probationary'], true)) {
+            return 'probation';
+        }
+        if (in_array($s, ['internship', 'intern'], true)) {
+            return 'internship';
+        }
+
+        return '';   // Permanent
+    }
+
+    /** 27 Aug 2026 (Ejaz) — one canonical DRA / PCC certificate status set,
+     *  shared by the Documents tab, the import template and the importer:
+     *  pending | submitted | verified (lowercase — ComplianceController
+     *  compares === 'verified'). Anything else, including the retired
+     *  'overdue', reads as null rather than being stored as a value the
+     *  dropdown cannot show. */
+    public static function complianceStatus($v): ?string
+    {
+        $s = strtolower(trim((string) $v));
+
+        return in_array($s, ['pending', 'submitted', 'verified'], true) ? $s : null;
     }
 
     /**
@@ -275,8 +339,13 @@ class AppDataController extends Controller
                 'teamLeader' => $col('team_leader') ?: (($teamId && ($teamLeaderId[$teamId] ?? null)) ? ($empNames[$teamLeaderId[$teamId]] ?? '') : ''),
                 'reporting' => $col('reporting_manager') ?: ($mgrId ? ($empNames[$mgrId] ?? '') : ''),
                 'leader' => $col('team_leader') ?: (($teamId && ($teamLeaderId[$teamId] ?? null)) ? ($empNames[$teamLeaderId[$teamId]] ?? '') : ''),
-                'type' => $col('type') === 'field' ? 'Field / FOS' : 'Office',
-                'employment_stage' => $col('employment_stage') ?: 'Permanent',
+                // 28 Aug 2026 (Ejaz) — the sample file's EMPLOYEE TYPE column
+                // offers Office / Field, so the form and the read-back use the
+                // same two words. (The old 'Field / FOS' survives only as the
+                // Directory badge colour key; wireEmpFormExtras re-registers it
+                // for 'Field'.)
+                'type' => $col('type') === 'field' ? 'Field' : 'Office',
+                'employment_stage' => \App\Services\EmployeeFieldRules::EMPLOYMENT_STAGE[(string) ($col('employment_stage') ?? '')] ?? 'Permanent',
                 'doj' => $col('doj') ?? '',
                 // 2026-08-05 — FIX "edits revert after refresh": these form fields
                 // were SAVED by storeEmployee but never sent back here, so after a
@@ -293,6 +362,22 @@ class AppDataController extends Controller
                 'idMarks' => $col('id_marks') ?? '',
                 'whatsapp' => $col('whatsapp') ?? '',
                 'addr' => $col('address') ?? '',
+                // 28 Aug 2026 (Ejaz) — PARITY READ-BACK. Every one of these
+                // columns already existed and was already being filled by the
+                // import wizard and by Self-Onboarding, but bootstrap() never
+                // sent them to the browser — so the Directory showed blanks for
+                // data that WAS in the row, and there was no way to see or
+                // correct it from the Employee form. The matching inputs are
+                // built from EmployeeFieldRules::formPanels().
+                'category' => $col('category') ?? '',
+                'nationality' => $col('nationality') ?? '',
+                'esicNo' => $col('esic_no') ?? '',
+                'permanentAddress' => $col('permanent_address') ?? '',
+                'emergencyName' => $col('emergency_name') ?? '',
+                'emergencyPhone' => $col('emergency_phone') ?? '',
+                'accountHolder' => $col('account_holder') ?? '',
+                'alsoWorksFor' => $col('also_works_for') ?? '',
+                'multi' => $col('also_works_for') ?? '',   // the form field is still f_multi
                 'homeLat' => $col('home_lat') ?? '',
                 'homeLng' => $col('home_lng') ?? '',
                 'geoStart' => $col('geo_start') ? ucfirst((string) $col('geo_start')) : '',
@@ -302,7 +387,15 @@ class AppDataController extends Controller
                 'email' => $col('email') ?? '',
                 'ctc' => (float) $col('ctc'),
                 'pf' => $col('pf_applicable') ? 'Yes' : 'No',
-                'esi' => $col('esi_applicable') === 'yes' ? 'Yes' : 'No',
+                // 28 Aug 2026 (Ejaz) — DATA LOSS, fixed. This read
+                //   $col('esi_applicable') === 'yes' ? 'Yes' : 'No'
+                // but the column is enum('auto','yes','no') and AUTO IS THE
+                // DEFAULT. So every employee left on Auto was sent to the
+                // browser as "No", the form showed No, and the next save of
+                // that employee — for any unrelated reason — wrote 'no' back
+                // and the Auto setting was gone for good. Three values in, the
+                // same three values out.
+                'esi' => ucfirst(strtolower((string) ($col('esi_applicable') ?: 'auto'))),
                 'pan' => $col('pan') ?? '',
                 'uan' => $col('uan') ?? '',
                 'ptState' => $col('pt_state') ?? '',
@@ -322,6 +415,10 @@ class AppDataController extends Controller
                 'dra' => ucfirst(strtolower((string) ($col('dra_status') ?? ''))),
                 'pcc' => ucfirst(strtolower((string) ($col('pcc_status') ?? ''))),
                 'pccDeadline' => $col('pcc_deadline') ? substr((string) $col('pcc_deadline'), 0, 10) : '',
+                // 27 Aug 2026 (Ejaz) — DRA / PCC EXPIRY are on the Documents tab
+                // now; read them back or the edit form would blank them on save.
+                'draExpiry' => $col('dra_expiry') ? substr((string) $col('dra_expiry'), 0, 10) : '',
+                'pccExpiry' => $col('pcc_expiry') ? substr((string) $col('pcc_expiry'), 0, 10) : '',
                 // Biometric Mapping — the employee's ID on the attendance device
                 // (employees.device_user_id). Editable in the Directory profile;
                 // punches whose device code matches it import under this employee.
@@ -573,7 +670,21 @@ class AppDataController extends Controller
 
                 continue;
             }
-            $code = trim((string) ($row['emp_code'] ?? $row['code'] ?? '')) ?: ('EMP-'.random_int(1000, 9999));
+            // 27 Aug 2026 (Ejaz) — "it still generates automatic Employee IDs even
+            // though the IDs are in the file". This importer only ever looked for
+            // `emp_code` / `code`, but the sample template's first column is
+            // EMPLOYEE CODE, which this header normaliser turns into
+            // `employee_code` — so the lookup ALWAYS missed and every row got a
+            // random EMP-xxxx. Accept every spelling the template / export /
+            // wizard use before falling back to a generated code.
+            $codeRaw = '';
+            foreach (['emp_code', 'employee_code', 'employeecode', 'code', 'employee_id', 'emp_id', 'employeeid', 'empid'] as $ck) {
+                if (trim((string) ($row[$ck] ?? '')) !== '') {
+                    $codeRaw = trim((string) $row[$ck]);
+                    break;
+                }
+            }
+            $code = $codeRaw ?: ('EMP-'.random_int(1000, 9999));
             $type = stripos((string) ($row['type'] ?? ''), 'field') !== false ? 'field' : 'office';
 
             $payload = [
@@ -681,6 +792,21 @@ class AppDataController extends Controller
             }
 
             $existing = DB::table('employees')->where('tenant_id', $tenantId)->where('emp_code', $code)->first();
+
+            // 28 Aug 2026 (Ejaz) — the same uniqueness gate the Employee form,
+            // the import wizard and Self-Onboarding now use. This legacy
+            // one-shot importer wrote straight through on emp_code alone, so a
+            // single CSV could give ten people the same PAN or the same
+            // Biometric ID. The row is reported and skipped; the rest still
+            // import.
+            $uniqErrs = \App\Services\EmployeeFieldRules::duplicateErrors($payload, $tenantId, $existing->id ?? null);
+            if ($uniqErrs) {
+                $errors[] = 'Row "'.$name.'" ('.$code.'): '.reset($uniqErrs);
+                $skipped++;
+
+                continue;
+            }
+
             if ($existing) {
                 DB::table('employees')->where('id', $existing->id)->update($payload);
             } else {
@@ -784,46 +910,28 @@ class AppDataController extends Controller
     {
         $tenantId = optional($request->user())->tenant_id;
 
-        // Header labels (ALL CAPS). Order mirrors the Add/Edit tabs + Self-Onboarding.
-        // 19 Aug 2026 (Ejaz) — the sample file was missing EVERY column in the
-        // second block below, which the EXPORT has been emitting since 10 Aug. The
-        // template now carries the full export column set in the same order, so an
-        // exported file can be edited and re-imported with nothing lost, plus one
-        // column the export deliberately never contains: DEFAULT PASSWORD (the
-        // person's first-time ESS login password). It is OPTIONAL — leave it blank
-        // and no login is created; fill it and the employee can sign in with their
-        // EMAIL + that password.
-        $headers = [
-            'EMPLOYEE CODE', 'NAME', 'TYPE', 'COMPANY', 'DEPARTMENT', 'DESIGNATION', 'BRANCH', 'TEAM', 'SHIFT',
-            'DOJ (DD-MM-YYYY)', 'DOB (DD-MM-YYYY)', 'GENDER', 'MARITAL STATUS', 'BLOOD GROUP',
-            'FATHER NAME', 'MOTHER NAME', 'SPOUSE NAME', 'CATEGORY', 'NATIONAL ID / SSN', 'ESIC',
-            'MOBILE', 'WHATSAPP', 'EMERGENCY CONTACT PERSON', 'EMERGENCY CONTACT NUMBER',
-            'PRESENT ADDRESS', 'PERMANENT ADDRESS', 'EMAIL', 'CTC', 'SALARY TYPE', 'PAN', 'UAN',
-            'BANK NAME', 'BANK ACCOUNT HOLDER', 'ACCOUNT NUMBER', 'BANK BRANCH', 'IFSC', 'BIOMETRIC ID', 'DRA', 'PCC',
-            // ---- export-parity columns (same order as EmployeeExportController) ----
-            'SALARY SCHEDULE', 'COMMISSION %', 'PF APPLICABLE', 'ESI APPLICABLE', 'PT STATE',
-            'EMPLOYMENT STAGE', 'REPORTING MANAGER', 'DRA STATUS', 'DRA EXPIRY (DD-MM-YYYY)',
-            'PCC STATUS', 'PCC DEADLINE (DD-MM-YYYY)', 'PCC EXPIRY (DD-MM-YYYY)', 'STATUS',
-            // ---- import-only column (never exported) ----
-            'DEFAULT PASSWORD',
-        ];
+        // 28 Aug 2026 (Ejaz) — the headers, the sample rows and every dropdown
+        // below are now DERIVED from App\Services\EmployeeFieldRules::FIELDS,
+        // the one place employee fields are declared. They used to be a
+        // hand-kept list here, a second hand-kept list in the Employee form, a
+        // third in EmployeeExportController::MAP and a fourth in
+        // EmployeeImportService::FIELDS — which is how the file came to carry
+        // CATEGORY with no matching form field, and the form came to carry
+        // Identification Marks with no matching column.
+        //
+        // DEFAULT PASSWORD is the one column the export deliberately never
+        // contains (it is the person's first-time ESS login password), so it is
+        // appended here rather than declared in the registry. OPTIONAL — leave
+        // it blank and no login is created; fill it and the employee signs in
+        // with their EMAIL + that password.
+        $rules = \App\Services\EmployeeFieldRules::class;
+        $headers = array_merge($rules::headers(), [$rules::PASSWORD_COLUMN]);
 
-        $sample = [
-            ['EMP100', 'Sample Name', 'Office', 'Acme Recovery Pvt Ltd', 'Operations', 'Executive', 'Head Office', 'Alpha Team', 'General Shift',
-                '01-04-2024', '15-06-1995', 'Male', 'Married', 'O+', 'Ramesh Sample', 'Sita Sample', 'Priya Sample', 'General', 'ABCDE1234F', '31001234567',
-                '9999999999', '9999999999', 'Ramesh Sample', '9888888888',
-                '12 MG Road, Hyderabad', '12 MG Road, Hyderabad', 'sample@company.in', '600000', 'Salary', 'ABCDE1234F', '100200300400',
-                'State Bank of India', 'Sample Name', '12345678901', 'MG Road', 'SBIN0001234', '1043', 'Yes', 'Yes',
-                '', '0', 'Yes', 'Auto', 'Telangana', 'Permanent', 'Reporting Manager Name', 'Verified', '31-03-2027',
-                'Verified', '30-06-2026', '30-06-2028', 'Active', 'Welcome@123'],
-            ['EMP101', 'Field Agent Name', 'Field', 'Acme Recovery Pvt Ltd', 'Collections', 'Field Officer', 'Branch-2', 'Bravo Team', 'General Shift',
-                '10-05-2024', '20-02-1998', 'Female', 'Single', 'B+', 'Suresh Kumar', 'Latha Kumar', '', 'General', 'FGHIJ5678K', '',
-                '8888888888', '8888888888', 'Suresh Kumar', '8777777777',
-                '45 Park Street, Pune', '45 Park Street, Pune', 'agent@company.in', '336000', 'Salary + Commission', 'FGHIJ5678K', '100200300401',
-                'HDFC Bank', 'Field Agent Name', '10987654321', 'Park Street', 'HDFC0005678', '1044', 'Yes', 'NA',
-                '', '30', 'Yes', 'Yes', 'Maharashtra', 'Probation', 'Sample Name', 'Pending', '',
-                'Pending', '31-12-2026', '', 'Active', 'Welcome@123'],
-        ];
+        $sample = [];
+        foreach ($rules::sampleRows() as $i => $row) {
+            $row[] = $rules::PASSWORD_SAMPLE[$i] ?? '';
+            $sample[] = $row;
+        }
 
         // Dynamic dropdown sources from the tenant's masters (names only).
         $names = function (string $table) use ($tenantId): array {
@@ -840,41 +948,47 @@ class AppDataController extends Controller
                 return [];
             }
         };
-        $lists = [
-            ['header' => 'DEPARTMENTS', 'values' => $names('departments')],
-            ['header' => 'DESIGNATIONS', 'values' => $names('designations')],
-            ['header' => 'BRANCHES', 'values' => $names('branches')],
-            ['header' => 'TEAMS', 'values' => $names('teams')],
-            ['header' => 'SHIFTS', 'values' => $names('shifts')],
-            // 19 Aug 2026 — Salary Schedule is now an import column, so offer the
-            // tenant's schedules as a dropdown instead of free text people mistype.
-            ['header' => 'SALARY SCHEDULES', 'values' => $names('salary_schedules')],
+        // One hidden "Lists" column per dynamic source the registry references,
+        // so a field declared with 'src' => '@teams' gets a real in-cell
+        // dropdown of that tenant's teams without anyone maintaining a second
+        // list here.
+        $sources = [
+            '@companies' => ['header' => 'COMPANIES', 'values' => $names('companies')],
+            '@departments' => ['header' => 'DEPARTMENTS', 'values' => $names('departments')],
+            '@designations' => ['header' => 'DESIGNATIONS', 'values' => $names('designations')],
+            '@branches' => ['header' => 'BRANCHES', 'values' => $names('branches')],
+            '@teams' => ['header' => 'TEAMS', 'values' => $names('teams')],
+            // REPORTING MANAGER / TEAM LEADER are employee names — offering the
+            // existing directory stops the two most-mistyped columns in the file.
+            '@employees' => ['header' => 'EMPLOYEES', 'values' => $names('employees')],
+            '@shifts' => ['header' => 'SHIFTS', 'values' => $names('shifts')],
+            '@schedules' => ['header' => 'SALARY SCHEDULES', 'values' => $names('salary_schedules')],
+            '@ptStates' => ['header' => 'PT STATES', 'values' => $rules::PT_STATES],
         ];
+        $lists = array_values($sources);
+        $srcCol = array_flip(array_keys($sources));
 
         $idx = array_flip($headers);
         $listRef = fn (int $listCol, int $count) => 'Lists!$'.self::tplColLetter($listCol + 1).'$2:$'
             .self::tplColLetter($listCol + 1).'$'.max(2, $count + 1);
-        $validations = [
-            ['col' => $idx['TYPE'], 'inline' => 'Office,Field'],
-            ['col' => $idx['GENDER'], 'inline' => 'Male,Female,Other'],
-            ['col' => $idx['MARITAL STATUS'], 'inline' => 'Single,Married,Divorced,Widowed'],
-            ['col' => $idx['BLOOD GROUP'], 'inline' => 'A+,A-,B+,B-,O+,O-,AB+,AB-'],
-            ['col' => $idx['SALARY TYPE'], 'inline' => 'Salary,Salary + Commission,Commission'],
-            ['col' => $idx['DRA'], 'inline' => 'Yes,No,NA'],
-            ['col' => $idx['PCC'], 'inline' => 'Yes,No,NA'],
-            // 19 Aug 2026 — dropdowns for the new export-parity columns.
-            ['col' => $idx['PF APPLICABLE'], 'inline' => 'Yes,No'],
-            ['col' => $idx['ESI APPLICABLE'], 'inline' => 'Auto,Yes,No'],
-            ['col' => $idx['EMPLOYMENT STAGE'], 'inline' => 'Permanent,Probation,Internship'],
-            ['col' => $idx['DRA STATUS'], 'inline' => 'Pending,Submitted,Verified'],
-            ['col' => $idx['PCC STATUS'], 'inline' => 'Pending,Submitted,Verified'],
-            ['col' => $idx['STATUS'], 'inline' => 'Active,Inactive'],
-        ];
-        // Only wire a master dropdown when that master actually has rows.
-        foreach ([['DEPARTMENT', 0], ['DESIGNATION', 1], ['BRANCH', 2], ['TEAM', 3], ['SHIFT', 4], ['SALARY SCHEDULE', 5]] as [$hdr, $lc]) {
-            $cnt = count($lists[$lc]['values']);
-            if ($cnt > 0) {
-                $validations[] = ['col' => $idx[$hdr], 'ref' => $listRef($lc, $cnt)];
+
+        // Dropdowns, straight off the registry: a fixed option list becomes an
+        // in-cell list, a dynamic source becomes a reference into the Lists
+        // sheet. The file can no longer offer a value the form does not, which
+        // is what made "Only Salary" vs "Salary" possible.
+        $validations = [];
+        foreach ($rules::FIELDS as $f) {
+            if (! isset($idx[$f['h']])) {
+                continue;
+            }
+            if (! empty($f['o'])) {
+                $validations[] = ['col' => $idx[$f['h']], 'inline' => implode(',', $f['o'])];
+            } elseif (! empty($f['src']) && isset($sources[$f['src']])) {
+                // Only wire a master dropdown when that master actually has rows.
+                $cnt = count($sources[$f['src']]['values']);
+                if ($cnt > 0) {
+                    $validations[] = ['col' => $idx[$f['h']], 'ref' => $listRef($srcCol[$f['src']], $cnt)];
+                }
             }
         }
 
@@ -2655,7 +2769,7 @@ class AppDataController extends Controller
 
             return null;
         };
-        foreach ([['mobile', 'Mobile'], ['whatsapp', 'WhatsApp']] as $pf) {
+        foreach ([['mobile', 'Mobile'], ['whatsapp', 'WhatsApp'], ['emergencyPhone', 'Emergency Contact Number']] as $pf) {
             if ($msg = $phoneErr($e[$pf[0]] ?? null, $pf[1])) {
                 return response()->json(['ok' => false, 'error' => $msg], 422);
             }
@@ -2670,15 +2784,34 @@ class AppDataController extends Controller
         }
         $e['pan'] = $panRaw ?: null;
 
-        // Accept BOTH the dropdown labels ("Only Salary"/"Only Commission") and the
-        // short forms, so "Only Commission" no longer silently mis-maps to salary.
-        $salaryMap = [
-            'Only Salary' => 'only_salary',
-            'Salary' => 'only_salary',
-            'Salary + Commission' => 'salary_commission',
-            'Only Commission' => 'only_commission',
-            'Commission' => 'only_commission',
-        ];
+        // 28 Aug 2026 (Ejaz) — every OTHER field with an objective format is
+        // checked here too, using the same rules the browser applies
+        // (EmployeeFieldRules::formatError mirrors AppController::empFieldError)
+        // and the same rules Self-Onboarding now applies. Before this, IFSC,
+        // UAN, bank account and Biometric ID were validated only in the browser,
+        // so anything posted around the form — or provisioned from an
+        // unvalidated onboarding record — reached the column unchecked.
+        $rules = \App\Services\EmployeeFieldRules::class;
+        $formValues = [];
+        foreach ($rules::formToColumn() as $formKey => $dbCol) {
+            if (array_key_exists($formKey, $e)) {
+                $formValues[$dbCol] = $e[$formKey];
+            }
+        }
+        // The two date synthetics travel under their short keys.
+        foreach ([['doj', 'doj'], ['dob', 'dob']] as [$fk, $k]) {
+            if (array_key_exists($fk, $e)) {
+                $formValues[$k] = $e[$fk];
+            }
+        }
+        if ($fmtErrs = $rules::formatErrors($formValues)) {
+            return response()->json(['ok' => false, 'error' => reset($fmtErrs)], 422);
+        }
+
+        // 28 Aug 2026 (Ejaz) — ONE list of accepted salary-type spellings, shared
+        // with the import wizard (which used to know only the short forms and
+        // silently downgraded everything else to Only Salary).
+        $salaryMap = \App\Services\EmployeeFieldRules::SALARY_TYPE_IN;
         $type = stripos($e['type'] ?? '', 'field') !== false ? 'field' : 'office';
         $code = trim((string) ($e['id'] ?? ''));
         if ($code === '') {
@@ -2717,7 +2850,7 @@ class AppDataController extends Controller
             'name' => $e['name'],
             'type' => $type,
             'ctc' => (float) ($e['ctc'] ?? 0),
-            'salary_type' => $salaryMap[$e['salaryType'] ?? 'Salary'] ?? 'only_salary',
+            'salary_type' => $salaryMap[strtolower(trim((string) ($e['salaryType'] ?? 'Salary')))] ?? 'only_salary',
             'mobile' => $e['mobile'] ?? null,
             'whatsapp' => $e['whatsapp'] ?? null,
             'email' => $e['email'] ?? null,
@@ -2748,16 +2881,42 @@ class AppDataController extends Controller
             'blood_group' => $e['bloodGroup'] ?? null,
             'id_marks' => $e['idMarks'] ?? null,
             'gender' => $e['gender'] ?? null,
-            'employment_stage' => $e['employment_stage'] ?? ($e['employmentStage'] ?? null),
+            // 28 Aug 2026 (Ejaz) — the form used to store the LABEL ('Permanent',
+            // 'Probation', 'Internship') while the importer stored the canonical
+            // value ('' | probation | internship), so the same employee read
+            // differently depending on how they were created. Normalise on the
+            // way in; EmployeeFieldRules::EMPLOYMENT_STAGE is the only map.
+            'employment_stage' => self::employmentStage($e['employment_stage'] ?? ($e['employmentStage'] ?? null)),
+            // ---- 28 Aug 2026 (Ejaz) — PARITY COLUMNS -----------------------
+            // Present in the sample file and in Self-Onboarding since rev190,
+            // but the Employee form had no inputs and storeEmployee never wrote
+            // them, so anything HR typed on the Directory screen was discarded
+            // and anything imported could not be corrected there.
+            'category' => $e['category'] ?? null,
+            'nationality' => $e['nationality'] ?? null,
+            'esic_no' => $e['esicNo'] ?? ($e['esic_no'] ?? null),
+            'permanent_address' => $e['permanentAddress'] ?? ($e['permanent_address'] ?? null),
+            'emergency_name' => $e['emergencyName'] ?? ($e['emergency_name'] ?? null),
+            'emergency_phone' => $e['emergencyPhone'] ?? ($e['emergency_phone'] ?? null),
+            'account_holder' => $e['accountHolder'] ?? ($e['account_holder'] ?? null),
+            // "Also works for" was a live control on the Job & Company tab that
+            // was never saved anywhere — the string `multi` did not appear once
+            // in app/. It is a real column now, and a real sample-file column.
+            'also_works_for' => $e['multi'] ?? ($e['alsoWorksFor'] ?? ($e['also_works_for'] ?? null)),
             // F5 — self-onboarding compliance self-declaration (Yes/No), normalised.
             'dra_declared' => self::yesNo($e['draDeclared'] ?? null),
             'pcc_declared' => self::yesNo($e['pccDeclared'] ?? null),
             // Documents tab (10 Aug 2026) — DRA Certificate status, PCC status &
             // PCC deadline were on the form but NEVER written, so they blanked
             // after a refresh. Stored lowercase to match ComplianceController.
-            'dra_status' => strtolower(trim((string) ($e['dra'] ?? ''))) ?: null,
-            'pcc_status' => strtolower(trim((string) ($e['pcc'] ?? ''))) ?: null,
-            'pcc_deadline' => trim((string) ($e['pccDeadline'] ?? '')) ?: null,
+            // 27 Aug 2026 (Ejaz) — both now go through complianceStatus() so the
+            // ONE canonical set (pending|submitted|verified) is enforced on the
+            // way in, identically to the importer; DRA / PCC EXPIRY are written
+            // too, and all three dates are normalised (they are real DATE
+            // columns — an unrecognised shape used to be rejected outright).
+            'dra_status' => self::complianceStatus($e['dra'] ?? null),
+            'pcc_status' => self::complianceStatus($e['pcc'] ?? null),
+            'pcc_deadline' => self::normDateWide(trim((string) ($e['pccDeadline'] ?? '')) ?: null),
             'status' => (strtolower(trim((string) ($e['status'] ?? 'active'))) === 'inactive') ? 'inactive' : 'active',   // rev183 — Active/Inactive from the form
             'address' => $e['addr'] ?? ($e['address'] ?? null),
             'dob' => $e['dob'] ?? null,
@@ -2765,6 +2924,15 @@ class AppDataController extends Controller
             'device_user_id' => trim((string) ($e['deviceUserId'] ?? ($e['device_user_id'] ?? ''))) ?: null,
             'updated_at' => now(),
         ];
+        // 27 Aug 2026 (Ejaz) — DRA / PCC EXPIRY from the Documents tab. Schema-
+        // guarded: ensureEmployeeColumns() above adds them, but a restricted DB
+        // user that cannot ALTER must still be able to save the rest.
+        foreach ([['draExpiry', 'dra_expiry'], ['pccExpiry', 'pcc_expiry']] as [$formKey, $dbCol]) {
+            if ((array_key_exists($formKey, $e) || array_key_exists($dbCol, $e)) && Schema::hasColumn('employees', $dbCol)) {
+                $raw = trim((string) ($e[$formKey] ?? ($e[$dbCol] ?? '')));
+                $payload[$dbCol] = $raw !== '' ? self::normDateWide($raw) : null;
+            }
+        }
         // 2026-08-05 — FIX "edits revert after refresh": PF / ESI / commission %
         // and the geo-fence fields were on the form but NEVER written to the
         // employee row, so those edits silently disappeared.
@@ -2832,6 +3000,18 @@ class AppDataController extends Controller
             if ($clash) {
                 return response()->json(['ok' => false, 'error' => 'Employee ID "'.$code.'" is already in use — choose a different one.'], 422);
             }
+        }
+
+        // 28 Aug 2026 (Ejaz) — "PAN will be unique to the individuals. It is
+        // accepting the PAN multiple times for different employees."
+        // Employee Code was the ONLY thing anything checked. PAN, UAN, National
+        // ID, ESIC, bank account, mobile, email and Biometric ID are all unique
+        // to a person and are all checked now, from this path, the import wizard
+        // and Self-Onboarding alike. Biometric ID and email matter most:
+        // device_user_id is what punch ingestion matches on, and email is the
+        // ESS login id.
+        if ($dupErrs = $rules::duplicateErrors($payload, $tenantId, $existing->id ?? null)) {
+            return response()->json(['ok' => false, 'error' => reset($dupErrs)], 422);
         }
         try {
         if ($existing) {

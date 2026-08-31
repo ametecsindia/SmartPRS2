@@ -8,9 +8,31 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
+    /**
+     * 28 Aug 2026 (Ejaz) - client install died here with
+     *   SQLSTATE[42S01]: Base table or view already exists: 1050
+     *   Table 'training_programs' already exists
+     * MySQL DDL is NOT transactional: if this migration ever stops part-way
+     * (or the target DB already holds these tables - a re-install over an
+     * existing database, a restored dump without its `migrations` rows, a
+     * wrong DB_DATABASE), the row is never written to `migrations`, so every
+     * retry re-runs the whole file and dies on the FIRST table that exists.
+     * That is unrecoverable without dropping the database.
+     * Creating only what is missing makes the migration re-runnable, so a
+     * half-applied install repairs itself on the next `php artisan migrate`.
+     * A real error (bad column, no privilege) still throws - only "already
+     * there" is skipped.
+     */
+    private function mk(string $table, \Closure $definition): void
+    {
+        if (! Schema::hasTable($table)) {
+            Schema::create($table, $definition);
+        }
+    }
+
     public function up(): void
     {
-        Schema::create('training_programs', function (Blueprint $t) {
+        $this->mk('training_programs', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->string('name');
@@ -22,7 +44,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('training_records', function (Blueprint $t) {
+        $this->mk('training_records', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('employee_id')->index();
@@ -34,7 +56,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('training_subjects', function (Blueprint $t) {
+        $this->mk('training_subjects', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('program_id')->index();
             $t->string('module')->nullable();
@@ -44,7 +66,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('tests', function (Blueprint $t) {
+        $this->mk('tests', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->string('name');
@@ -58,7 +80,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('test_attempts', function (Blueprint $t) {
+        $this->mk('test_attempts', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('employee_id')->index();
@@ -69,7 +91,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('code_of_conduct_ack', function (Blueprint $t) {
+        $this->mk('code_of_conduct_ack', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('employee_id')->index();
@@ -78,7 +100,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('faqs', function (Blueprint $t) {
+        $this->mk('faqs', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->string('category')->nullable();
@@ -87,7 +109,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('letters', function (Blueprint $t) {
+        $this->mk('letters', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->index();
@@ -99,7 +121,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('documents', function (Blueprint $t) {
+        $this->mk('documents', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('employee_id')->index();
@@ -110,7 +132,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('wa_settings', function (Blueprint $t) {
+        $this->mk('wa_settings', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->index();
@@ -123,7 +145,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('sms_settings', function (Blueprint $t) {
+        $this->mk('sms_settings', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->index();
@@ -137,7 +159,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('sms_templates', function (Blueprint $t) {
+        $this->mk('sms_templates', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->index();
@@ -149,7 +171,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('company_emails', function (Blueprint $t) {
+        $this->mk('company_emails', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->index();
@@ -161,7 +183,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('messages_log', function (Blueprint $t) {
+        $this->mk('messages_log', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->index();
@@ -174,7 +196,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('notifications_feed', function (Blueprint $t) {
+        $this->mk('notifications_feed', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('user_id')->index();
@@ -185,7 +207,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('point_rules', function (Blueprint $t) {
+        $this->mk('point_rules', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->nullable()->index();
@@ -196,7 +218,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('points_ledger', function (Blueprint $t) {
+        $this->mk('points_ledger', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->index();
@@ -210,7 +232,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('helpdesk', function (Blueprint $t) {
+        $this->mk('helpdesk', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->index();
@@ -223,7 +245,7 @@ return new class extends Migration
             $t->timestamps();
         });
 
-        Schema::create('increments', function (Blueprint $t) {
+        $this->mk('increments', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('tenant_id')->index();
             $t->unsignedBigInteger('company_id')->index();

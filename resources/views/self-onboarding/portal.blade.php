@@ -96,15 +96,21 @@
     <section class="panel" data-step="personal">
       <h2>Personal details</h2><p class="sub">Step 2 of 8</p>
       <div class="info"><span class="i">i</span><span>Enter your name exactly as on your ID proof.</span></div>
-      <label>Full name</label><input data-field="full_name">
-      <div class="two"><div><label>Date of birth</label><input type="date" data-field="dob"></div>
+      <label>Name</label><input data-field="full_name">
+      <div class="two"><div><label>Date of Birth</label><input type="date" data-field="dob"></div>
       <div><label>Gender</label><select data-field="gender"><option value="">Select</option><option>Male</option><option>Female</option><option>Other</option></select></div></div>
-      <label>Father / Guardian name</label><input data-field="father_name">
-      <label>Mother's name</label><input data-field="mother_name">
-      <label>Spouse name (if married)</label><input data-field="spouse_name">
+      <label>Father Name</label><input data-field="father_name">
+      <label>Mother Name</label><input data-field="mother_name">
+      <label>Spouse Name</label><input data-field="spouse_name">
       <label>Nationality</label><input data-field="nationality" value="Indian">
-      <div class="two"><div><label>Blood group</label><select data-field="blood_group"><option value="">Select</option><option>A+</option><option>A-</option><option>B+</option><option>B-</option><option>O+</option><option>O-</option><option>AB+</option><option>AB-</option></select></div>
-      <div><label>Marital status</label><select data-field="marital"><option value="">Select</option><option>Single</option><option>Married</option><option>Widowed</option><option>Divorced</option></select></div></div>
+      {{-- 28 Aug 2026 (Ejaz) — Category and Identification Marks are columns in
+           the sample import file and fields on the Employee form; the portal is
+           the third place the same person is described, so it asks for them too.
+           Category moved up here from Statutory, where it sat among tax IDs. --}}
+      <div class="two"><div><label>Category</label><select data-field="category"><option value="">Select</option><option>General</option><option>OBC</option><option>SC</option><option>ST</option><option>EWS</option></select></div>
+      <div><label>Blood Group</label><select data-field="blood_group"><option value="">Select</option><option>A+</option><option>A-</option><option>B+</option><option>B-</option><option>O+</option><option>O-</option><option>AB+</option><option>AB-</option></select></div></div>
+      <div class="two"><div><label>Marital Status</label><select data-field="marital"><option value="">Select</option><option>Single</option><option>Married</option><option>Divorced</option><option>Widowed</option></select></div>
+      <div><label>Identification Marks</label><input data-field="id_marks" placeholder="e.g. Mole on right cheek"></div></div>
       <div class="nav"><button class="btn ghost" data-back>Back</button><button class="btn primary" data-save data-section="personal">Save &amp; Next</button></div>
     </section>
 
@@ -112,10 +118,10 @@
     <section class="panel" data-step="contact">
       <h2>Contact &amp; address</h2><p class="sub">Step 3 of 8</p>
       <div class="info"><span class="i">i</span><span>Give an address where you can receive documents. Add an emergency contact.</span></div>
-      <label>Current address</label><textarea data-field="current_address" rows="2"></textarea>
-      <label>Permanent address</label><textarea data-field="permanent_address" rows="2"></textarea>
-      <div class="two"><div><label>Emergency contact name</label><input data-field="emergency_name"></div>
-      <div><label>Emergency contact no.</label><input data-field="emergency_phone"></div></div>
+      <label>Present Address</label><textarea data-field="current_address" rows="2"></textarea>
+      <label>Permanent Address</label><textarea data-field="permanent_address" rows="2"></textarea>
+      <div class="two"><div><label>Emergency Contact Person</label><input data-field="emergency_name"></div>
+      <div><label>Emergency Contact Number</label><input data-field="emergency_phone"></div></div>
       <div class="nav"><button class="btn ghost" data-back>Back</button><button class="btn primary" data-save data-section="contact">Save &amp; Next</button></div>
     </section>
 
@@ -124,12 +130,25 @@
       <h2>Statutory IDs</h2><p class="sub">Step 4 of 8</p>
       <div class="info"><span class="i">i</span><span>Enter carefully — these are used for payroll &amp; tax.</span></div>
       <label>PAN</label><input data-field="pan" style="text-transform:uppercase" maxlength="10">
-      <div class="two"><div><label>UAN / PF no. (if any)</label><input data-field="uan"></div>
-      <div><label>Aadhaar / National ID</label><input data-field="aadhaar"></div></div>
-      <div class="two"><div><label>ESIC no. (if any)</label><input data-field="esic"></div>
-      <div><label>Category</label><select data-field="category"><option value="">Select</option><option>General</option><option>OBC</option><option>SC</option><option>ST</option><option>EWS</option></select></div></div>
-      <div class="two"><div><label>DRA Status — valid DRA certificate? <span style="color:#c0392b">*</span></label><select data-field="dra_status"><option value="">Select</option><option>Yes</option><option>No</option></select></div>
-      <div><label>PCC Status — Police Clearance obtained? <span style="color:#c0392b">*</span></label><select data-field="pcc_status"><option value="">Select</option><option>Yes</option><option>No</option></select></div></div>
+      {{-- 28 Aug 2026 (Ejaz) — "National ID / SSN" is the name this field has on
+           the Employee form and in the sample import file. The data-field key is
+           deliberately left as `aadhaar` so onboarding records already in flight
+           keep loading; injectOne() maps it to employees.national_id, which is
+           where the other two capture paths have always put it. Until today it
+           was written to a separate employees.aadhaar column that nothing else
+           read, so every self-onboarded hire exported a blank National ID. --}}
+      <div class="two"><div><label>UAN</label><input data-field="uan" inputmode="numeric" maxlength="12"></div>
+      <div><label>National ID / SSN</label><input data-field="aadhaar"></div></div>
+      <label>ESIC</label><input data-field="esic">
+      {{-- 27 Aug 2026 (Ejaz) — named + optioned to match the bulk import file's
+           "DRA DECLARED (YES/NO)" / "PCC DECLARED (YES/NO)" columns and the
+           Directory > Employee > Documents tab. These are the candidate's own
+           DECLARATION (employees.dra_declared / pcc_declared), not the
+           HR-verified certificate status — that stays on the Documents tab.
+           data-field keys are unchanged so in-flight onboarding records still
+           load; injectOne() maps them to dra_declared / pcc_declared. --}}
+      <div class="two"><div><label>DRA Declared — do you hold a valid DRA certificate? <span style="color:#c0392b">*</span></label><select data-field="dra_status"><option value="">Select</option><option>Yes</option><option>No</option><option>NA</option></select></div>
+      <div><label>PCC Declared — Police Clearance obtained? <span style="color:#c0392b">*</span></label><select data-field="pcc_status"><option value="">Select</option><option>Yes</option><option>No</option><option>NA</option></select></div></div>
       <div class="nav"><button class="btn ghost" data-back>Back</button><button class="btn primary" data-save data-section="statutory">Save &amp; Next</button></div>
     </section>
 
@@ -137,10 +156,13 @@
     <section class="panel" data-step="bank">
       <h2>Bank details</h2><p class="sub">Step 5 of 8</p>
       <div class="info"><span class="i">i</span><span>Enter the account where your salary will be paid. Double-check the account number and IFSC.</span></div>
-      <label>Account holder name</label><input data-field="acc_name">
-      <label>Account number</label><input data-field="acc_no">
+      <label>Bank Account Holder</label><input data-field="acc_name">
+      <label>Account Number</label><input data-field="acc_no">
       <div class="two"><div><label>IFSC</label><input data-field="ifsc" style="text-transform:uppercase"></div>
-      <div><label>Bank name</label><input data-field="bank_name"></div></div>
+      <div><label>Bank Name</label><input data-field="bank_name"></div></div>
+      {{-- 27 Aug 2026 (Ejaz) — BANK BRANCH is an import-file column with nowhere
+           to enter it here, so a self-onboarded hire always landed with it blank. --}}
+      <label>Bank Branch</label><input data-field="bank_branch">
       <div class="nav"><button class="btn ghost" data-back>Back</button><button class="btn primary" data-save data-section="bank">Save &amp; Next</button></div>
     </section>
 
@@ -258,10 +280,48 @@ window.SO = {
   // navigation buttons
   $all('[data-back]').forEach(function(b){b.onclick=function(){var i=STEPS.indexOf(cur);if(i>0)show(STEPS[i-1]);};});
   $all('[data-next]').forEach(function(b){b.onclick=function(){var i=STEPS.indexOf(cur);if(i<STEPS.length-1)show(STEPS[i+1]);};});
+  // 28 Aug 2026 (Ejaz) — FIELD-LEVEL VALIDATION, which this portal had none of.
+  // The only check here was "DRA and PCC answered"; everything else was accepted
+  // as typed, stored as typed, and pushed into the employees row on approval —
+  // where PAN is a 10-character column, so a wrong-shaped value either sat there
+  // as bad data or failed the provisioning insert outright. These are the SAME
+  // rules the Employee form applies in the browser and the server now applies in
+  // EmployeeFieldRules::formatError, so the three capture paths accept and
+  // reject exactly the same things. Blank is always allowed — every one of these
+  // is optional; only a filled-in value of the wrong shape is refused.
+  var SO_RULES={
+    pan:[/^[A-Za-z]{5}[0-9]{4}[A-Za-z]$/,'PAN must be 10 characters in the format ABCDE1234F.'],
+    ifsc:[/^[A-Za-z]{4}0[A-Za-z0-9]{6}$/,'IFSC must be 11 characters like SBIN0001234.'],
+    uan:[/^[0-9]{12}$/,'UAN must be exactly 12 digits.'],
+    acc_no:[/^[0-9]{6,20}$/,'Account Number must be 6 to 20 digits (no letters).'],
+    emergency_phone:[/^[6-9][0-9]{9}$/,'Emergency Contact Number must be a 10-digit mobile number (starting 6-9).']
+  };
+  function soFieldError(key,val){
+    var v=(val==null?'':String(val)).trim();
+    if(v==='')return null;
+    var r=SO_RULES[key];
+    if(!r)return null;
+    var test=(key==='uan'||key==='acc_no'||key==='emergency_phone')?v.replace(/[^0-9]/g,''):v;
+    return r[0].test(test)?null:r[1];
+  }
+  // Show the problem where it happened, not just as a toast.
+  $all('[data-field]').forEach(function(el){
+    var key=el.getAttribute('data-field');
+    if(!SO_RULES[key])return;
+    el.addEventListener('blur',function(){
+      var msg=soFieldError(key,el.value);
+      el.style.borderColor=msg?'#c0392b':'';
+      if(msg)toast(msg);
+    });
+  });
+
   $all('[data-save]').forEach(function(b){b.onclick=function(){
     var sec=b.getAttribute('data-section');
     var d={};$all('[data-step="'+sec+'"] [data-field]').forEach(function(el){d[el.getAttribute('data-field')]=el.value.trim();});
-    if(sec==='statutory'&&(!d.dra_status||!d.pcc_status)){toast('Please select DRA Status and PCC Status (Yes / No) — both are required.');return;}
+    if(sec==='statutory'&&(!d.dra_status||!d.pcc_status)){toast('Please select DRA Declared and PCC Declared (Yes / No / NA) — both are required.');return;}
+    var bad=null;
+    Object.keys(d).forEach(function(k){if(!bad){var m=soFieldError(k,d[k]);if(m)bad=m;}});
+    if(bad){toast(bad);return;}
     b.disabled=true;
     post('/save',{section:sec,data:d}).then(function(r){b.disabled=false;
       if(!r.ok){toast(r.error||'Could not save');return;}
