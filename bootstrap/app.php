@@ -24,6 +24,12 @@ return Application::configure(basePath: dirname(__DIR__))
                 \App\Http\Middleware\DemoWriteGuard::class,
                 \App\Http\Middleware\EditionGuard::class,
             ])->group(__DIR__.'/../routes/smartept.php');
+
+            // SELF-UPDATE (flow chart, 2 Sep 2026): the platform's token package
+            // download plus the on-prem download/install/reset endpoints. Same
+            // reasoning as above — its own file, so routes/web.php is never
+            // rewritten to add five routes. Each half declares its own stack.
+            Route::group([], __DIR__.'/../routes/updates.php');
         },
     )
     ->withMiddleware(function (Middleware $middleware) {

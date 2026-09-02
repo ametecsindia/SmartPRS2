@@ -1086,8 +1086,13 @@ CSS;
             act = '<div class="card" style="padding:20px 22px;margin-bottom:14px;border-left:4px solid var(--accent)">'
                 + '<div style="font-weight:800;font-size:15px;margin-bottom:6px"><i class="fas fa-gift" style="color:var(--accent)"></i> Update ' + pend.version + ' is ready for you</div>'
                 + '<div style="font-size:13px;color:var(--text2);white-space:pre-line;margin-bottom:12px">' + (pend.notes || '') + '</div>'
-                + '<button class="btn btn-primary" onclick="sysUpdApply(&#39;' + pend.version + '&#39;)"><i class="fas fa-circle-down"></i> Download &amp; apply (auto-backup)</button>'
-                + ' <span id="sysupd-msg" style="font-size:12.5px;color:var(--text3);margin-left:8px"></span></div>';
+                + (pend.size_bytes ? '<div style="font-size:12px;color:var(--text3);margin-bottom:10px"><i class="fas fa-file-zipper"></i> ' + (pend.size_bytes / 1048576).toFixed(1) + ' MB' + (pend.released_at ? ' &middot; released ' + String(pend.released_at).slice(0, 10) : '') + '</div>' : '')
+                + '<button class="btn btn-primary"' + (st.can_install === false ? ' disabled' : '') + ' onclick="sysUpdStart(&#39;' + pend.version + '&#39;)"><i class="fas fa-circle-down"></i> Download &amp; install update</button>'
+                + ' <span id="sysupd-msg" style="font-size:12.5px;color:var(--text3);margin-left:8px"></span>'
+                + (st.can_install === false
+                    ? '<div style="margin-top:10px;font-size:12.5px;color:#b45309;background:#fffbeb;border-left:3px solid #f59e0b;padding:8px 12px;border-radius:0 6px 6px 0"><b>This server cannot install updates by itself.</b> PHP\u2019s command-line program was not found, or background processes are blocked in php.ini. Set SMARTPRS_PHP_BINARY in .env to the full path of php.exe, or ask Ametecs to run the updater for you (WhatsApp 9000098877).</div>'
+                    : '')
+                + '</div>';
         } else {
             act = '<div class="card" style="padding:20px 22px;margin-bottom:14px"><span style="color:#16a34a;font-weight:700"><i class="fas fa-circle-check"></i> ' + (st.reason || 'You are up to date.') + '</span></div>';
         }
@@ -1106,7 +1111,15 @@ CSS;
     function sysUpdLoad() {
         fetch(cfg.updatesBase + '/status', { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin' })
             .then(function (r) { return r.json(); })
-            .then(function (j) { window.__SYS_UPD = j && j.ok ? j : { version: cfg.appVersion, activated: false, history: [] }; if (typeof render === 'function') { render(); } })
+            .then(function (j) {
+                window.__SYS_UPD = j && j.ok ? j : { version: cfg.appVersion, activated: false, history: [] };
+                if (typeof render === 'function') { render(); }
+                // An update that was already running when this screen opened (or a
+                // refresh mid-install) puts the console straight back on screen.
+                if (j && j.ok && (j.phase === 'installing' || j.phase === 'verifying' || j.phase === 'backup'
+                    || j.phase === 'maintenance' || j.phase === 'migrating' || j.phase === 'checking'
+                    || j.phase === 'finishing' || j.phase === 'rolling_back')) { spUpdPaint(j); }
+            })
             .catch(function () { window.__SYS_UPD = { version: cfg.appVersion, activated: false, history: [] }; if (typeof render === 'function') { render(); } });
     }
     window.sysUpdCheck = function () {
@@ -1120,17 +1133,222 @@ CSS;
                 if (typeof toast === 'function') { toast(j.update ? ('Update ' + j.update.version + ' is available!') : (j.reason || 'Up to date')); }
             }).catch(function () { if (typeof toast === 'function') { toast('Could not reach the update server'); } });
     };
-    window.sysUpdApply = function (version) {
-        if (!confirm('Apply update ' + version + ' now? SmartPRS takes an automatic backup first and restores itself if anything fails. Takes about two minutes.')) { return; }
-        var msg = document.getElementById('sysupd-msg');
-        if (msg) { msg.textContent = 'Downloading and applying — please keep this window open…'; }
-        fetch(cfg.updatesBase + '/apply', { method: 'POST', headers: { 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ version: version }) })
-            .then(function (r) { return r.json(); })
-            .then(function (j) {
-                if (j && j.ok) { alert(j.message + String.fromCharCode(10) + 'The page will reload now.'); location.reload(); }
-                else { if (msg) { msg.textContent = ''; } alert((j && j.error) || 'Update failed — nothing was changed.'); }
-            }).catch(function () { if (msg) { msg.textContent = ''; } alert('Update failed — check the connection and try again.'); });
+    // rev 180 (self-update flow chart, 2 Sep 2026) — THE UPDATE CONSOLE.
+    //
+    // A modal that shows the update happening: an animated progress bar with a
+    // live percentage, the eight steps of the flow chart lighting up as the
+    // updater reaches them, and the updater's own timestamped log.
+    //
+    // Progress is polled from public/update-status.php, NOT from the API: the
+    // updater puts SmartPRS into maintenance mode, so by the time the first poll
+    // lands every route through Laravel is answering 503. That one file boots
+    // nothing and reads the same state file the updater writes.
+    var SP_UPD_STEPS = [
+        { k: 'downloading', t: 'Download the update package', i: 'fa-cloud-arrow-down' },
+        { k: 'verifying', t: 'Verify the package (SHA-256)', i: 'fa-shield-halved' },
+        { k: 'backup', t: 'Back up the current version', i: 'fa-box-archive' },
+        { k: 'maintenance', t: 'Switch on maintenance mode', i: 'fa-screwdriver-wrench' },
+        { k: 'installing', t: 'Install the new files', i: 'fa-file-arrow-down' },
+        { k: 'migrating', t: 'Update the database', i: 'fa-database' },
+        { k: 'checking', t: 'Post-update checks', i: 'fa-clipboard-check' },
+        { k: 'finishing', t: 'Bring SmartPRS back online', i: 'fa-rocket' }
+    ];
+    var SP_UPD_AT = {
+        downloading: 0, downloaded: 0, verifying: 1, backup: 2, maintenance: 3,
+        installing: 4, migrating: 5, checking: 6, finishing: 7, done: 8,
+        rolling_back: 7, failed: -1
     };
+    var spUpdTimer = null;
+    var spUpdVersion = '';
+
+    function spUpdCss() {
+        if (document.getElementById('sp-upd-css')) { return; }
+        var s = document.createElement('style');
+        s.id = 'sp-upd-css';
+        s.textContent = ''
+            + '.sp-upd-back{position:fixed;inset:0;background:rgba(9,17,32,.62);backdrop-filter:blur(3px);z-index:99999;display:flex;align-items:center;justify-content:center;padding:18px}'
+            + '.sp-upd-card{background:var(--card,#fff);color:var(--text,#0f172a);width:100%;max-width:640px;border-radius:16px;box-shadow:0 24px 70px rgba(0,0,0,.42);overflow:hidden;animation:spUpdIn .22s ease-out}'
+            + '@keyframes spUpdIn{from{opacity:0;transform:translateY(14px) scale(.98)}to{opacity:1;transform:none}}'
+            + '.sp-upd-head{padding:20px 24px 16px;border-bottom:1px solid var(--border,#e2e8f0)}'
+            + '.sp-upd-head h3{margin:0;font-size:18px;font-weight:800;display:flex;align-items:center;gap:10px}'
+            + '.sp-upd-head p{margin:6px 0 0;font-size:13px;color:var(--text2,#475569);min-height:18px}'
+            + '.sp-upd-bar{height:10px;border-radius:99px;background:var(--border,#e2e8f0);overflow:hidden;margin:14px 0 8px;position:relative}'
+            + '.sp-upd-fill{height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,#f97316,#fb923c,#f97316);background-size:220% 100%;transition:width .45s ease;animation:spUpdFlow 1.5s linear infinite}'
+            + '@keyframes spUpdFlow{from{background-position:0 0}to{background-position:220% 0}}'
+            + '.sp-upd-fill.ok{background:linear-gradient(90deg,#16a34a,#4ade80,#16a34a);background-size:220% 100%}'
+            + '.sp-upd-fill.bad{background:linear-gradient(90deg,#dc2626,#f87171,#dc2626);background-size:220% 100%;animation:none}'
+            + '.sp-upd-pct{display:flex;justify-content:space-between;font-size:12px;font-weight:700;color:var(--text3,#64748b);letter-spacing:.3px}'
+            + '.sp-upd-pct b{font-size:22px;font-weight:800;color:var(--text,#0f172a);line-height:1}'
+            + '.sp-upd-steps{list-style:none;margin:0;padding:14px 24px 6px;display:grid;gap:2px}'
+            + '.sp-upd-steps li{display:flex;align-items:center;gap:11px;font-size:13px;padding:5px 0;color:var(--text3,#94a3b8);transition:color .2s}'
+            + '.sp-upd-steps li .dot{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10.5px;background:var(--border,#e9edf3);color:var(--text3,#94a3b8);flex-shrink:0}'
+            + '.sp-upd-steps li.on{color:var(--text,#0f172a);font-weight:700}'
+            + '.sp-upd-steps li.on .dot{background:#f97316;color:#fff;animation:spUpdPulse 1.1s ease-in-out infinite}'
+            + '@keyframes spUpdPulse{0%,100%{box-shadow:0 0 0 0 rgba(249,115,22,.55)}70%{box-shadow:0 0 0 8px rgba(249,115,22,0)}}'
+            + '.sp-upd-steps li.did{color:var(--text2,#475569)}'
+            + '.sp-upd-steps li.did .dot{background:#16a34a;color:#fff}'
+            + '.sp-upd-steps li.err .dot{background:#dc2626;color:#fff}'
+            + '.sp-upd-log{margin:10px 24px 0;background:#0b1220;color:#cbd5e1;border-radius:10px;padding:12px 14px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px;line-height:1.65;height:132px;overflow:auto;white-space:pre-wrap;word-break:break-word}'
+            + '.sp-upd-foot{padding:16px 24px 20px;display:flex;align-items:center;gap:10px}'
+            + '.sp-upd-foot .note{font-size:12px;color:var(--text3,#64748b)}'
+            + '@media(max-width:560px){.sp-upd-steps{padding:12px 16px 4px}.sp-upd-log{margin:10px 16px 0}.sp-upd-head,.sp-upd-foot{padding-left:16px;padding-right:16px}}';
+        document.head.appendChild(s);
+    }
+
+    function spUpdOpen() {
+        spUpdCss();
+        var back = document.getElementById('sp-upd-back');
+        if (back) { return back; }
+        back = document.createElement('div');
+        back.id = 'sp-upd-back';
+        back.className = 'sp-upd-back';
+        back.innerHTML = '<div class="sp-upd-card">'
+            + '<div class="sp-upd-head">'
+            + '<h3><i class="fas fa-cloud-arrow-down" id="sp-upd-icon" style="color:#f97316"></i> <span id="sp-upd-title">Updating SmartPRS</span></h3>'
+            + '<div class="sp-upd-bar"><div class="sp-upd-fill" id="sp-upd-fill"></div></div>'
+            + '<div class="sp-upd-pct"><span id="sp-upd-phase">Starting…</span><b id="sp-upd-pctnum">0%</b></div>'
+            + '<p id="sp-upd-msg">Please keep this window open until the update finishes.</p>'
+            + '</div>'
+            + '<ul class="sp-upd-steps" id="sp-upd-steps"></ul>'
+            + '<div class="sp-upd-log" id="sp-upd-log"></div>'
+            + '<div class="sp-upd-foot" id="sp-upd-foot"><span class="note"><i class="fas fa-circle-info"></i> A full backup is taken first — if anything fails, SmartPRS restores itself automatically.</span></div>'
+            + '</div>';
+        document.body.appendChild(back);
+        var ul = back.querySelector('#sp-upd-steps');
+        ul.innerHTML = SP_UPD_STEPS.map(function (s, n) {
+            return '<li data-n="' + n + '"><span class="dot"><i class="fas ' + s.i + '"></i></span><span>' + s.t + '</span></li>';
+        }).join('');
+        return back;
+    }
+
+    function spUpdClose() {
+        if (spUpdTimer) { clearInterval(spUpdTimer); spUpdTimer = null; }
+        var b = document.getElementById('sp-upd-back');
+        if (b && b.parentNode) { b.parentNode.removeChild(b); }
+    }
+    window.spUpdClose = spUpdClose;
+
+    // Never location.reload() — that re-serves the page from cache and a good
+    // update then looks like a failed one. A fresh query string cannot.
+    window.spUpdReload = function () { location.href = location.pathname + '?v=' + Date.now(); };
+
+    function spUpdPaint(st) {
+        spUpdOpen();
+        var phase = (st && st.phase) || 'installing';
+        var pct = Math.max(0, Math.min(100, parseInt((st && st.percent) || 0, 10) || 0));
+        var done = phase === 'done';
+        var bad = phase === 'failed';
+        var at = typeof SP_UPD_AT[phase] === 'number' ? SP_UPD_AT[phase] : 4;
+
+        var fill = document.getElementById('sp-upd-fill');
+        if (fill) { fill.style.width = (bad ? 100 : pct) + '%'; fill.className = 'sp-upd-fill' + (done ? ' ok' : (bad ? ' bad' : '')); }
+        var num = document.getElementById('sp-upd-pctnum');
+        if (num) { num.textContent = (bad ? '—' : pct + '%'); }
+        var ph = document.getElementById('sp-upd-phase');
+        if (ph) { ph.textContent = done ? 'Finished' : (bad ? 'Stopped' : (phase.charAt(0).toUpperCase() + phase.slice(1).replace(/_/g, ' '))); }
+        var title = document.getElementById('sp-upd-title');
+        if (title) { title.textContent = done ? 'Update complete' : (bad ? 'Update stopped — nothing was lost' : 'Updating SmartPRS' + (spUpdVersion ? ' to ' + spUpdVersion : '')); }
+        var icon = document.getElementById('sp-upd-icon');
+        if (icon) {
+            icon.className = 'fas ' + (done ? 'fa-circle-check' : (bad ? 'fa-triangle-exclamation' : 'fa-arrows-rotate fa-spin'));
+            icon.style.color = done ? '#16a34a' : (bad ? '#dc2626' : '#f97316');
+        }
+        var msg = document.getElementById('sp-upd-msg');
+        if (msg) { msg.textContent = (st && st.message) || ''; }
+
+        var lis = document.querySelectorAll('#sp-upd-steps li');
+        for (var i = 0; i < lis.length; i++) {
+            var n = parseInt(lis[i].getAttribute('data-n'), 10);
+            lis[i].className = done || n < at ? 'did' : (bad && n === at ? 'err' : (n === at ? 'on' : ''));
+        }
+
+        var log = document.getElementById('sp-upd-log');
+        if (log && st && st.log && st.log.length) {
+            var txt = st.log.join(String.fromCharCode(10));
+            if (log.textContent !== txt) { log.textContent = txt; log.scrollTop = log.scrollHeight; }
+        }
+
+        var foot = document.getElementById('sp-upd-foot');
+        if (foot) {
+            if (done) {
+                foot.innerHTML = '<button class="btn btn-primary" onclick="spUpdReload()"><i class="fas fa-rotate-right"></i> Reload console</button>'
+                    + '<span class="note">SmartPRS is running the new version.</span>';
+            } else if (bad) {
+                foot.innerHTML = '<button class="btn btn-outline" onclick="spUpdClose()">Close</button>'
+                    + '<span class="note">Your previous version is still running. Nothing was lost.</span>';
+            }
+        }
+    }
+
+    /** Poll the bootless status file while the app itself is answering 503. */
+    function spUpdPoll(url) {
+        if (spUpdTimer) { clearInterval(spUpdTimer); }
+        var misses = 0;
+        spUpdTimer = setInterval(function () {
+            fetch(url + '&_=' + Date.now(), { cache: 'no-store' })
+                .then(function (r) { return r.json(); })
+                .then(function (j) {
+                    if (!j || !j.ok) { return; }
+                    misses = 0;
+                    spUpdPaint(j);
+                    if (j.phase === 'done' || j.phase === 'failed') { clearInterval(spUpdTimer); spUpdTimer = null; }
+                })
+                .catch(function () {
+                    // The web server itself can blink while public/ is replaced.
+                    misses++;
+                    if (misses > 40) {
+                        clearInterval(spUpdTimer); spUpdTimer = null;
+                        spUpdPaint({ phase: 'failed', percent: 100, message: 'Lost contact with the server while updating. Reload the page in a minute to see the result.', log: [] });
+                    }
+                });
+        }, 1500);
+    }
+
+    /**
+     * The one button on the screen: download, verify, then hand off to the
+     * standalone updater and watch it work. Three server calls, never one, so a
+     * failure at any stage says exactly which stage.
+     */
+    window.sysUpdStart = function (version) {
+        if (!confirm('Update SmartPRS to ' + version + ' now?' + String.fromCharCode(10) + String.fromCharCode(10)
+            + 'SmartPRS takes a full backup first, goes offline for about two minutes, and restores itself automatically if anything fails.')) { return; }
+        spUpdVersion = version;
+        spUpdPaint({ phase: 'downloading', percent: 2, message: 'Downloading version ' + version + ' from the update server…', log: [] });
+
+        var post = function (path, body) {
+            return fetch(cfg.updatesBase + path, {
+                method: 'POST',
+                headers: { 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify(body || {})
+            }).then(function (r) { return r.json().catch(function () { return null; }); });
+        };
+
+        post('/download', { version: version })
+            .then(function (j) {
+                if (!j || !j.ok) {
+                    spUpdPaint({ phase: 'failed', percent: 100, message: (j && (j.error || j.message)) || 'The download failed — nothing was changed.', log: (j && j.log) || [] });
+                    return null;
+                }
+                spUpdPaint({ phase: 'verifying', percent: 8, message: 'Package downloaded and verified. Starting the updater…', log: j.log || [] });
+                return post('/install', { version: version });
+            })
+            .then(function (j) {
+                if (!j) { return; }
+                if (!j.ok || !j.poll_url) {
+                    spUpdPaint({ phase: 'failed', percent: 100, message: (j.error || j.message) || 'The updater could not be started — nothing was changed.', log: j.log || [] });
+                    return;
+                }
+                spUpdPaint(j);
+                spUpdPoll(j.poll_url);
+            })
+            .catch(function () {
+                spUpdPaint({ phase: 'failed', percent: 100, message: 'Could not reach this server. Check the connection and try again — nothing was changed.', log: [] });
+            });
+    };
+
+    // Old name kept: an admin with a stale tab still gets the new console.
+    window.sysUpdApply = function (version) { window.sysUpdStart(version); };
     // rev 125 (Ejaz, approved Taurus-style menu): every SUBMENU leaf gets its
     // own icon + a connector-tree look, in SmartPRS navy + orange. CONTENT,
     // structure and the existing GROUP icons are untouched — we only decorate
@@ -6225,7 +6443,9 @@ CSS;
         if (!d) { setTimeout(function () { if (!window.__DASH.data) { dashLoad(); } }, 10); return pghead(title, 'Loading live figures…', '') + '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">Loading…</div></div>'; }
         var cards = d.cards || [];
         var grid = '<div class="stats-grid" style="margin-bottom:16px">' + cards.map(function (c) {
-            return '<div class="stat-card"><div class="icon" style="background:' + c.color + '22;color:' + c.color + '"><i class="fas ' + (c.icon || 'fa-chart-simple') + '"></i></div><h3>' + c.value + '</h3><p>' + c.label + '</p></div>';
+            var tint = c.bg ? ' style="background:' + c.bg + ';border-color:' + c.color + '55"' : '';
+            var ink = c.fg ? ' style="color:' + c.fg + '"' : '';
+            return '<div class="stat-card"' + tint + '><div class="icon" style="background:' + c.color + '22;color:' + c.color + '"><i class="fas ' + (c.icon || 'fa-chart-simple') + '"></i></div><h3' + ink + '>' + c.value + '</h3><p' + ink + '>' + c.label + '</p></div>';
         }).join('') + '</div>';
         var links = d.scope === 'platform'
             ? [['tenants', 'Tenants'], ['subscriptions', 'Subscriptions'], ['invoices', 'Invoices'], ['plans', 'Plans']]

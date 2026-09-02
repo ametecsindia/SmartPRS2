@@ -154,7 +154,10 @@ class DashboardController extends Controller
         }
 
         return [
-            ['label' => 'Active Employees', 'value' => number_format($headcount), 'color' => '#3b82f6', 'icon' => 'fa-users'],
+            // ponytail: TEST MARKER (2 Sep 2026) — light-green tile, proving a
+            // self-update really replaced files. Revert to 'color' => '#3b82f6'
+            // and drop bg/fg once the update has been seen to land.
+            ['label' => 'Active Employees', 'value' => number_format($headcount), 'color' => '#16a34a', 'bg' => '#dcfce7', 'fg' => '#166534', 'icon' => 'fa-users'],
             ['label' => 'Present Today', 'value' => number_format($presentToday), 'color' => '#10b981', 'icon' => 'fa-user-check'],
             ['label' => 'Pending Approvals', 'value' => number_format($pending), 'color' => '#f97316', 'icon' => 'fa-hourglass-half'],
             ['label' => 'Compliance Flags (30d)', 'value' => number_format($compliance), 'color' => '#dc2626', 'icon' => 'fa-triangle-exclamation'],

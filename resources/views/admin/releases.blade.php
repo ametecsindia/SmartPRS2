@@ -15,7 +15,12 @@
         <form method="POST" action="{{ route('admin.releases.upload') }}" enctype="multipart/form-data" style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:18px;display:grid;grid-template-columns:1fr 2fr;gap:12px;">
             @csrf
             <label>Version * (e.g. 2026.6.2)<input name="version" required pattern="[0-9][0-9.]*"></label>
-            <label>Package zip * (from BUILD-RELEASE.bat)<input type="file" name="package" accept=".zip" required></label>
+            <label>Package zip (from BUILD-CLIENT-PACKAGE.bat)<input type="file" name="package" accept=".zip"></label>
+            <label style="grid-column:span 2;">…or attach a zip already on this server
+                <input name="existing" list="release-files" placeholder="file name inside storage/app/releases">
+                <datalist id="release-files">@foreach ($available as $f)<option value="{{ $f }}">@endforeach</datalist>
+                <span style="display:block;font-weight:400;color:#64748b;margin-top:4px;">Use this for a large package: an upload over ~30 MB is often rejected by the web server itself before SmartPRS sees it. Copy the zip into <code>storage/app/releases</code> over SFTP, then type its name here. The SHA-256 is always computed here, from the file that will be served.</span>
+            </label>
             <label style="grid-column:span 2;">What is new * (plain language — this goes into the client email, one point per line)<textarea name="notes" rows="4" required style="width:100%;padding:8px 10px;border:1.5px solid #cbd5e1;border-radius:8px;font-size:13px;margin-top:4px;"></textarea></label>
             <div><button class="btn btn-primary" type="submit">Upload &amp; register</button></div>
         </form>
@@ -29,7 +34,7 @@
         @forelse ($releases as $r)
             <tr style="border-top:1px solid #e2e8f0;font-size:13px;">
                 <td style="padding:10px 12px;"><strong>{{ $r->version }}</strong><div style="font-size:11px;color:#64748b;max-width:380px;white-space:pre-line;">{{ \Illuminate\Support\Str::limit($r->notes, 160) }}</div></td>
-                <td style="padding:10px 12px;">{{ \Carbon\Carbon::parse($r->created_at)->format('d M Y') }}<div style="font-size:11px;color:#64748b;">{{ number_format($r->size / 1048576, 1) }} MB</div></td>
+                <td style="padding:10px 12px;">{{ \Carbon\Carbon::parse($r->created_at)->format('d M Y') }}<div style="font-size:11px;color:#64748b;">{{ number_format($r->size / 1048576, 1) }} MB</div><div style="font-size:10px;color:#94a3b8;font-family:ui-monospace,monospace;" title="SHA-256 the client verifies the download against">{{ substr((string) $r->checksum, 0, 16) }}…</div></td>
                 <td style="padding:10px 12px;">{{ $r->applied_platform_at ? '✓ applied' : '—' }}</td>
                 <td style="padding:10px 12px;">{{ $r->published_at ? '✓' : '—' }}</td>
                 <td style="padding:10px 12px;">{{ $grantCounts->get($r->id, 0) }} / {{ $clientCount }}</td>

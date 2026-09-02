@@ -5,8 +5,8 @@ namespace App\Http\Controllers;
 use App\Services\Edition;
 use App\Services\LicenseFile;
 use App\Services\LicenseService;
+use App\Services\UpdateClient;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -26,8 +26,6 @@ use Illuminate\Support\Facades\Schema;
  */
 class ClientUpdateController extends Controller
 {
-    private const CODE_DIRS = ['app', 'config', 'database', 'resources', 'routes'];
-
     // ---------- local licence state ----------
 
     public static function state(): array
@@ -702,7 +700,20 @@ class ClientUpdateController extends Controller
         return redirect('/login')->with('status', 'SmartPRS is activated. Please sign in to continue.');
     }
 
-    // ---------- Administration → Updates ----------
+    // ---------- Administration → Updates (self-update flow chart, 2 Sep 2026) ----------
+    //
+    // Four deliberate steps, each its own call, so the screen can show honest
+    // progress and a failure can never be mistaken for a success:
+    //
+    //     status  → what this server runs and what it last found
+    //     check   → chart step 3: ask the platform
+    //     download→ chart steps 4-5: fetch the package and verify its hash
+    //     install → chart steps 6-12: hand off to the STANDALONE updater
+    //
+    // Nothing here ever writes over the application tree. PHP cannot reliably
+    // overwrite the files it is executing — on Windows/IIS it cannot do it at
+    // all while they are open — so the install is performed by
+    // updater/updater.php running as its own process, outside Laravel.
 
     private function key(): ?string
     {
@@ -714,11 +725,18 @@ class ClientUpdateController extends Controller
         }
     }
 
+    private function updates(): UpdateClient
+    {
+        return app(UpdateClient::class);
+    }
+
     /** GET /app/updates/status — everything the screen shows. */
     public function status(Request $request)
     {
         $this->guard($request);
         $st = self::state();
+        $u = $this->updates();
+        $live = $u->state();
         $hist = [];
         try {
             if (Schema::hasTable('client_updates')) {
@@ -729,181 +747,120 @@ class ClientUpdateController extends Controller
 
         return response()->json([
             'ok' => true,
-            'version' => config('smartprs.version'),
+            'version' => $u->currentVersion(),
+            'channel' => $u->channel(),
             'edition' => Edition::label(),
             'activated' => self::activated(),
             'company' => $st['company'] ?? '',
-            'amc_expires_on' => $st['cert']['amc_expires_on'] ?? null,
-            'last_check' => $st['last_check'] ?? null,
-            'pending' => $st['pending'] ?? null,           // last offered update, if any
+            'amc_expires_on' => $st['cert']['amc_expires_on'] ?? ($live['amc_expires_on'] ?? null),
+            'last_check' => $live['checked_at'] ?? ($st['last_check'] ?? null),
+            // The live state file is authoritative for the offer; $st['pending'] is
+            // only kept so an install made before this feature still renders.
+            'pending' => $live['available'] ?? ($st['pending'] ?? null),
+            'phase' => $live['phase'],
+            'percent' => $live['percent'],
+            'message' => $live['message'],
+            'log' => array_slice((array) $live['log'], -20),
+            // Told to the screen BEFORE the admin commits, so "install" never
+            // fails on something we already knew at page load.
+            'can_install' => $u->phpBinary() !== null && $u->canSpawn(),
             'history' => $hist,
         ]);
     }
 
-    /** POST /app/updates/check — ask the platform. */
+    /** POST /app/updates/check — chart step 3: ask the platform. */
     public function check(Request $request)
     {
         $this->guard($request);
-        $key = $this->key();
-        if (! $key) {
-            return response()->json(['ok' => false, 'error' => 'Not activated yet — activate the licence first.'], 422);
-        }
-        try {
-            $resp = Http::timeout(20)->post(config('smartprs.update_url').'/check', [
-                'key' => $key, 'version' => config('smartprs.version'),
-            ]);
-            $j = $resp->json();
-            if (! is_array($j)) {
-                return response()->json(['ok' => false, 'error' => 'The update server did not answer — try again later.'], 422);
-            }
-            $st = self::state();
-            $st['last_check'] = now()->toDateTimeString();
-            if (! empty($j['ok'])) {
-                $st['last_ok'] = now()->toDateTimeString();
-                $st['pending'] = $j['update'] ?? null;
-                if (isset($j['amc_expires_on'])) {
-                    $st['cert']['amc_expires_on'] = $j['amc_expires_on'];
-                }
-                if (isset($j['expiry_mode'])) {
-                    $st['cert']['expiry_mode'] = $j['expiry_mode'];
-                }
-            }
-            self::saveState($st);
-            $this->logLocal('check', ! empty($j['update']) ? ('offered '.$j['update']['version']) : (($j['reason'] ?? '')));
+        $res = $this->updates()->check();
 
-            return response()->json($j);
-        } catch (\Throwable $e) {
-            return response()->json(['ok' => false, 'error' => 'Could not reach the update server — check the internet connection.'], 422);
+        // Keep the legacy local licence state in step with the check, so the login
+        // gate and the AMC banner still read the same dates they always did.
+        $st = self::state();
+        $st['last_check'] = now()->toDateTimeString();
+        if (! empty($res['ok'])) {
+            $st['last_ok'] = now()->toDateTimeString();
+            $st['pending'] = $res['available'] ?? null;
+            if (! empty($res['amc_expires_on'])) {
+                $st['cert']['amc_expires_on'] = $res['amc_expires_on'];
+            }
         }
+        self::saveState($st);
+
+        $this->logLocal('check', ! empty($res['available'])
+            ? ('offered '.$res['available']['version'])
+            : (string) ($res['message'] ?? ''));
+
+        // 'update' is repeated in the old shape so nothing that read it breaks.
+        return response()->json($res + ['update' => $res['available'] ?? null]);
     }
 
-    /** POST /app/updates/apply {version} — download, backup, apply, migrate. */
+    /** POST /app/updates/download — chart steps 4-5: download, then verify the hash. */
+    public function download(Request $request)
+    {
+        $this->guard($request);
+        @set_time_limit(900);
+        $res = $this->updates()->download();
+        $this->logLocal($res['ok'] ? 'download' : 'failed', (string) ($res['message'] ?? ''));
+
+        return response()->json($res, $res['ok'] ? 200 : 422);
+    }
+
+    /**
+     * POST /app/updates/install — chart steps 6-12, handed to the standalone updater.
+     *
+     * The updater puts SmartPRS into maintenance mode, so the screen cannot poll
+     * this application for progress while it runs. It is given a one-time token
+     * and polls public/update-status.php instead, which reads the same state file
+     * without booting anything.
+     */
+    public function install(Request $request)
+    {
+        $this->guard($request);
+        $u = $this->updates();
+
+        $state = $u->state();
+        $state['poll_token'] = \Illuminate\Support\Str::random(40);
+        $u->writeState($state);
+
+        $res = $u->install();
+        if (! empty($res['ok'])) {
+            $this->logLocal('applying', 'started '.($state['available']['version'] ?? ''));
+        } else {
+            $this->logLocal('failed', (string) ($res['message'] ?? ''));
+        }
+
+        return response()->json($res + [
+            'poll_url' => url('/update-status.php?t='.$state['poll_token']),
+        ], ! empty($res['ok']) ? 200 : 422);
+    }
+
+    /** POST /app/updates/reset — forget a half-finished attempt so the screen starts clean. */
+    public function resetUpdate(Request $request)
+    {
+        $this->guard($request);
+        $this->updates()->reset();
+
+        return response()->json(['ok' => true]);
+    }
+
+    /**
+     * POST /app/updates/apply {version} — the ORIGINAL one-button route, kept so
+     * an older browser tab (or an install that has not refreshed its boot JS)
+     * still works. It no longer extracts anything itself: it is now download
+     * followed by install, exactly what the two new buttons do.
+     */
     public function apply(Request $request)
     {
         $this->guard($request);
-        @set_time_limit(600);
-        $key = $this->key();
-        $version = trim((string) $request->input('version', ''));
-        $st = self::state();
-        $pending = $st['pending'] ?? null;
-        if (! $key || ! $pending || $pending['version'] !== $version) {
-            return response()->json(['ok' => false, 'error' => 'Please run "Check for updates" first.'], 422);
+        @set_time_limit(900);
+
+        $dl = $this->updates()->download();
+        if (empty($dl['ok'])) {
+            return response()->json($dl, 422);
         }
 
-        $workDir = storage_path('app/updates');
-        @mkdir($workDir, 0775, true);
-        $zipPath = $workDir.'/SmartPRS-Update-'.$version.'.zip';
-
-        // 1) Download.
-        try {
-            $resp = Http::timeout(300)->withOptions(['sink' => $zipPath])
-                ->get(config('smartprs.update_url').'/download/'.$version, ['key' => $key]);
-            if (! $resp->ok() || ! is_file($zipPath) || filesize($zipPath) < 1000) {
-                @unlink($zipPath);
-
-                return response()->json(['ok' => false, 'error' => 'Download failed — the update may not be granted to this licence.'], 422);
-            }
-        } catch (\Throwable $e) {
-            return response()->json(['ok' => false, 'error' => 'Download failed: '.$e->getMessage()], 422);
-        }
-
-        // 2) Verify checksum (FR-9.2).
-        if (! empty($pending['checksum']) && ! hash_equals($pending['checksum'], hash_file('sha256', $zipPath))) {
-            @unlink($zipPath);
-            $this->logLocal('failed', $version.': checksum mismatch');
-
-            return response()->json(['ok' => false, 'error' => 'The downloaded file failed its integrity check — update aborted, nothing was changed. Please try again.'], 422);
-        }
-
-        // 3) Backup the code folders (rollback point).
-        $bk = storage_path('app/backups/'.$version.'-'.date('YmdHis'));
-        try {
-            foreach (self::CODE_DIRS as $d) {
-                $this->copyDir(base_path($d), $bk.'/'.$d);
-            }
-        } catch (\Throwable $e) {
-            return response()->json(['ok' => false, 'error' => 'Could not take the safety backup — update aborted, nothing was changed.'], 422);
-        }
-
-        // 4) Extract over the code (never .env, storage, vendor).
-        try {
-            $zip = new \ZipArchive;
-            if ($zip->open($zipPath) !== true) {
-                throw new \RuntimeException('Bad zip');
-            }
-            for ($i = 0; $i < $zip->numFiles; $i++) {
-                $name = $zip->getNameIndex($i);
-                $clean = ltrim(str_replace('\\', '/', $name), '/');
-                if ($clean === '' || str_contains($clean, '..')) {
-                    continue;
-                }
-                $top = explode('/', $clean)[0];
-                if (in_array($top, ['.env', 'storage', 'vendor', 'node_modules'], true)) {
-                    continue;
-                }
-                $dest = base_path($clean);
-                if (str_ends_with($clean, '/')) {
-                    @mkdir($dest, 0775, true);
-                    continue;
-                }
-                @mkdir(dirname($dest), 0775, true);
-                copy('zip://'.$zipPath.'#'.$name, $dest);
-            }
-            $zip->close();
-        } catch (\Throwable $e) {
-            $this->restore($bk);
-            $this->logLocal('failed', $version.': extract failed, rolled back');
-
-            return response()->json(['ok' => false, 'error' => 'Applying files failed — the previous version was RESTORED automatically. Please contact Ametecs (9000098877).'], 422);
-        }
-
-        // 5) Migrate + clear caches.
-        try {
-            Artisan::call('migrate', ['--force' => true]);
-            Artisan::call('optimize:clear');
-        } catch (\Throwable $e) {
-            $this->restore($bk);
-            $this->logLocal('failed', $version.': migrate failed, rolled back');
-
-            return response()->json(['ok' => false, 'error' => 'Database upgrade failed — the previous version was RESTORED automatically. Please contact Ametecs (9000098877).'], 422);
-        }
-
-        unset($st['pending']);
-        $st['last_applied'] = $version.' on '.now()->toDateTimeString();
-        self::saveState($st);
-        $this->logLocal('applied', $version);
-        @unlink($zipPath);
-
-        return response()->json(['ok' => true, 'message' => 'Updated to '.$version.' successfully. A backup of the previous version is kept in storage/backups.']);
-    }
-
-    private function copyDir(string $src, string $dst): void
-    {
-        if (! is_dir($src)) {
-            return;
-        }
-        @mkdir($dst, 0775, true);
-        $it = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($src, \FilesystemIterator::SKIP_DOTS), \RecursiveIteratorIterator::SELF_FIRST);
-        foreach ($it as $item) {
-            $target = $dst.'/'.$it->getSubPathname();
-            if ($item->isDir()) {
-                @mkdir($target, 0775, true);
-            } else {
-                copy($item->getPathname(), $target);
-            }
-        }
-    }
-
-    private function restore(string $bk): void
-    {
-        try {
-            foreach (self::CODE_DIRS as $d) {
-                if (is_dir($bk.'/'.$d)) {
-                    $this->copyDir($bk.'/'.$d, base_path($d));
-                }
-            }
-        } catch (\Throwable $e) {
-        }
+        return $this->install($request);
     }
 
     private function logLocal(string $action, string $detail): void

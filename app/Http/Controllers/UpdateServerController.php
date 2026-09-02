@@ -4,7 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Services\LicenseService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 /**
  * rev 107 — THE UPDATE SERVER (SRS FR-5, SaaS platform only).
@@ -20,6 +22,11 @@ use Illuminate\Support\Facades\DB;
  */
 class UpdateServerController extends Controller
 {
+    /** Download tokens live in the cache for an hour — long enough to resume, short enough that a leaked URL dies on its own. */
+    private const TOKEN_PREFIX = 'sprs_update_dl:';
+
+    private const TOKEN_TTL_MINUTES = 60;
+
     private const NEUTRAL = 'Licence not recognised. Please check the key, or contact Ametecs (ejaz@ametecsindia.com · WhatsApp 9000098877).';
 
     /** Resolve + basic-validate the licence from the request key. */
@@ -176,23 +183,65 @@ class UpdateServerController extends Controller
         return response()->json(['ok' => $ok]);
     }
 
-    /** POST /update/check {key, version} — latest GRANTED release beyond theirs. */
+    /**
+     * POST /update/check — "is there a GRANTED update for me?"
+     *
+     * READ-ONLY on licence identity, deliberately (self-update flow chart,
+     * 2 Sep 2026): a version check must never bind a machine fingerprint or
+     * move activation state, or pressing a button on the client's Updates
+     * screen would silently rewrite their licence. It reads the row, decides,
+     * and leaves it as it found it. Machine cloning is caught where it belongs
+     * — the daily heartbeat, which already logs and alerts sales.
+     *
+     * Every refusal returns a `reason` the client can branch on AND a `message`
+     * the admin can act on. Never a bare 403.
+     */
     public function check(Request $request)
     {
         [$lic] = $this->licence($request);
-        if (! $lic || $lic->status !== 'active') {
-            return response()->json(['ok' => false, 'error' => self::NEUTRAL], 422);
+        $current = trim((string) $request->input('current_version', $request->input('version', '0')));
+        $channel = $request->input('channel', 'stable') === 'beta' ? 'beta' : 'stable';
+
+        if (! $lic) {
+            // Naming the host that answered turns "key not recognised" from a
+            // support ticket into a glance: it is almost always an .env still
+            // pointing at a test platform, not a bad key.
+            return response()->json([
+                'ok' => false, 'update_available' => false, 'reason' => 'unknown_key',
+                'message' => self::NEUTRAL, 'error' => self::NEUTRAL,
+            ], 422);
         }
-        $current = trim((string) $request->input('version', '0'));
+        if (in_array($lic->status, ['revoked', 'suspended'], true)) {
+            $msg = 'Updates need an active licence. This licence is '.$lic->status.'. Please contact Ametecs (WhatsApp 9000098877).';
+
+            return response()->json([
+                'ok' => false, 'update_available' => false, 'reason' => 'licence_'.$lic->status,
+                'message' => $msg, 'error' => $msg,
+            ], 422);
+        }
+        if ($lic->status !== 'active') {
+            return response()->json([
+                'ok' => false, 'update_available' => false, 'reason' => 'licence_not_active',
+                'message' => self::NEUTRAL, 'error' => self::NEUTRAL,
+            ], 422);
+        }
+
         DB::table('licences')->where('id', $lic->id)->update(['last_seen_at' => now(), 'updated_at' => now()]);
-        $this->log($lic, 'check', 'on '.$current);
+        $this->log($lic, 'check', 'on '.$current.' ('.$channel.')');
+
+        $base = [
+            'ok' => true,
+            'amc_expires_on' => $lic->amc_expires_on,
+            'expiry_mode' => $lic->expiry_mode ?? 'renew',
+        ];
 
         if (! LicenseService::amcActive($lic)) {
-            return response()->json([
-                'ok' => true, 'update' => null,
-                'reason' => 'Your AMC ended on '.($lic->amc_expires_on ?: '—').'. Renew to receive updates — WhatsApp 9000098877.',
-                'amc_active' => false, 'amc_expires_on' => $lic->amc_expires_on,
-                'expiry_mode' => $lic->expiry_mode ?? 'renew',
+            $msg = 'Your AMC ended on '.($lic->amc_expires_on ?: '—').'. Renew to receive updates — WhatsApp 9000098877.';
+
+            return response()->json($base + [
+                'update_available' => false, 'update' => null,
+                'reason' => 'amc_expired', 'message' => $msg,
+                'amc_active' => false,
             ]);
         }
 
@@ -204,14 +253,90 @@ class UpdateServerController extends Controller
             ->select('releases.*')
             ->first();
 
+        // Version comparison is NUMERIC, never string: "2026.6.10" sorts BELOW
+        // "2026.6.9" as text, which would hide every tenth release.
         if (! $rel || version_compare($this->numeric($rel->version), $this->numeric($current), '<=')) {
-            return response()->json(['ok' => true, 'update' => null, 'reason' => 'You are on the latest version granted to you.', 'amc_active' => true, 'amc_expires_on' => $lic->amc_expires_on, 'expiry_mode' => $lic->expiry_mode ?? 'renew']);
+            return response()->json($base + [
+                'update_available' => false, 'update' => null,
+                'reason' => $rel ? 'up_to_date' : 'not_granted',
+                'message' => $rel
+                    ? 'You are on the latest version granted to you.'
+                    : 'No update has been released for your licence yet.',
+                'amc_active' => true,
+            ]);
         }
 
-        return response()->json([
-            'ok' => true, 'amc_active' => true, 'amc_expires_on' => $lic->amc_expires_on,
-            'expiry_mode' => $lic->expiry_mode ?? 'renew',
+        // The package is fetched with a short-lived token, never with the licence
+        // key in a query string — URLs land in access logs, proxy caches and
+        // browser history, and a key in one is a credential you have published.
+        $token = Str::random(48);
+        Cache::put(self::TOKEN_PREFIX.$token, [
+            'release_id' => $rel->id,
+            'licence_id' => $lic->id,
+            'client_id' => $lic->client_id,
+        ], now()->addMinutes(self::TOKEN_TTL_MINUTES));
+
+        return response()->json($base + [
+            'update_available' => true,
+            'amc_active' => true,
+            'product' => 'smartprs',
+            'version' => $rel->version,
+            'title' => 'SmartPRS '.$rel->version,
+            'notes' => $rel->notes,
+            'size_bytes' => (int) $rel->size,
+            'package_hash' => $rel->checksum,
+            'download_url' => url('/update/package/'.$token),
+            'token_expires_in' => self::TOKEN_TTL_MINUTES * 60,
+            'released_at' => $rel->published_at,
+            // The pre-2 Sep 2026 shape, so a client that has not been updated
+            // yet still sees the offer and can still fetch it by version.
             'update' => ['version' => $rel->version, 'notes' => $rel->notes, 'size' => (int) $rel->size, 'checksum' => $rel->checksum],
+        ]);
+    }
+
+    /**
+     * GET /update/package/{token} — the package, fetched without a licence key.
+     *
+     * The token stays valid for its whole window rather than being burned on the
+     * first byte, so a dropped 200 MB download can be retried without another
+     * round trip through check.
+     */
+    public function packageDownload(Request $request, string $token)
+    {
+        $entry = Cache::get(self::TOKEN_PREFIX.$token);
+        if (! is_array($entry)) {
+            return response()->json([
+                'ok' => false, 'reason' => 'token_expired',
+                'message' => 'This download link has expired. Press "Check for updates" again.',
+            ], 410);
+        }
+
+        $rel = DB::table('releases')->where('id', $entry['release_id'])->whereNotNull('published_at')->first();
+        if (! $rel || ! $rel->file_path || ! is_file(storage_path('app/'.$rel->file_path))) {
+            return response()->json([
+                'ok' => false, 'reason' => 'package_unavailable',
+                'message' => 'That package is no longer available. Please contact Ametecs (WhatsApp 9000098877).',
+            ], 404);
+        }
+
+        // Re-check entitlement at download time: a licence revoked in the hour
+        // since the check must not still be able to pull the build.
+        $lic = DB::table('licences')->where('id', $entry['licence_id'])->first();
+        $granted = $lic && DB::table('release_grants')
+            ->where('release_id', $rel->id)->where('client_id', $lic->client_id)->exists();
+        if (! $lic || $lic->status !== 'active' || ! LicenseService::amcActive($lic) || ! $granted) {
+            return response()->json([
+                'ok' => false, 'reason' => 'not_entitled',
+                'message' => 'This update is not available for your licence.',
+            ], 403);
+        }
+
+        $this->log($lic, 'download', $rel->version);
+
+        return response()->download(storage_path('app/'.$rel->file_path), 'SmartPRS-Update-'.$rel->version.'.zip', [
+            'Content-Type' => 'application/zip',
+            'X-SmartPRS-Version' => $rel->version,
+            'X-SmartPRS-Sha256' => (string) $rel->checksum,
         ]);
     }
 

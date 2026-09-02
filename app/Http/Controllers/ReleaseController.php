@@ -36,32 +36,156 @@ class ReleaseController extends Controller
             'grantCounts' => DB::table('release_grants')->selectRaw('release_id, count(*) n')->groupBy('release_id')->pluck('n', 'release_id'),
             'clientCount' => DB::table('onprem_clients')->count(),
             'log' => DB::table('client_updates')->orderByDesc('id')->limit(30)->get(),
+            // Zips already sitting in storage/app/releases, so a package too big
+            // for an HTTP upload can be dropped there over SFTP and attached by name.
+            'available' => collect(glob(storage_path('app/releases/*.zip')) ?: [])
+                ->map(fn ($f) => basename($f))->values()->all(),
         ]);
     }
 
-    /** Upload + register a release zip. */
+    /**
+     * Upload + register a release zip, OR attach one already sitting in
+     * storage/app/releases.
+     *
+     * The second path exists because of a trap that costs an afternoon every
+     * time: a web server's body-size limit (nginx client_max_body_size, IIS
+     * maxAllowedContentLength — often 1-30 MB) rejects a large upload with its
+     * own HTML error BEFORE PHP runs, so this controller's "file too large"
+     * message never executes and the screen just says "save failed". For a
+     * 200 MB package, dropping the file into storage/app/releases over SFTP and
+     * attaching it by name is the reliable path.
+     *
+     * The checksum is ALWAYS computed here, from the bytes on disk. It is never
+     * accepted from the form: the hash is what the client verifies the download
+     * against, so it has to come from the file that will actually be served.
+     */
     public function upload(Request $request)
     {
         $this->guard($request);
+        LicenseService::ensureTables();
+
         $v = $request->validate([
             'version' => ['required', 'string', 'max:30', 'regex:/^[0-9][0-9.]*$/'],
             'notes' => ['required', 'string', 'max:8000'],
-            'package' => ['required', 'file', 'mimes:zip', 'max:204800'],   // up to 200 MB
+            'package' => ['nullable', 'file', 'mimes:zip', 'max:512000'],       // up to 500 MB
+            'existing' => ['nullable', 'string', 'max:255'],
         ]);
         if (DB::table('releases')->where('version', $v['version'])->exists()) {
             return back()->with('success', 'Version '.$v['version'].' already exists — bump the version number.');
         }
-        $path = $request->file('package')->storeAs('releases', 'SmartPRS-Update-'.$v['version'].'.zip');
+
+        // --- get the file into storage/app/releases, whichever way it arrived.
+        if ($request->hasFile('package')) {
+            $path = $request->file('package')->storeAs('releases', 'SmartPRS-Update-'.$v['version'].'.zip');
+        } elseif (! empty($v['existing'])) {
+            // basename() only — never let a form field walk out of the folder.
+            $name = basename(str_replace('\\', '/', $v['existing']));
+            $src = storage_path('app/releases/'.$name);
+            if (! is_file($src)) {
+                return back()->with('success', 'ATTACH FAILED: storage/app/releases/'.$name.' was not found on this server. '
+                    .'Upload the zip there (SFTP) first, then attach it by name.');
+            }
+            $path = 'releases/'.$name;
+        } else {
+            return back()->with('success', 'Choose a package to upload, or type the name of a zip already in storage/app/releases.');
+        }
+
+        $full = storage_path('app/'.$path);
+
+        // --- refuse a package the client updater could not install (blueprint trap 1).
+        $shape = $this->inspectPackage($full);
+        if (! $shape['ok']) {
+            if ($request->hasFile('package')) {
+                @unlink($full);                       // do not keep a package we will not serve
+            }
+
+            return back()->with('success', 'UPLOAD REJECTED: '.$shape['why']);
+        }
+
         DB::table('releases')->insert([
-            'version' => $v['version'], 'notes' => $v['notes'],
+            'version' => $v['version'],
+            'notes' => $v['notes'],
             'file_path' => $path,
-            'checksum' => hash_file('sha256', storage_path('app/'.$path)),
-            'size' => filesize(storage_path('app/'.$path)),
+            'checksum' => hash_file('sha256', $full),
+            'size' => filesize($full),
             'published_at' => null,
             'created_at' => now(), 'updated_at' => now(),
         ]);
 
-        return back()->with('success', 'Release '.$v['version'].' uploaded and registered. Next: apply to the platform, then publish to clients.');
+        return back()->with('success', 'Release '.$v['version'].' registered ('
+            .number_format(filesize($full) / 1048576, 1).' MB). It will replace: '.implode(', ', array_slice($shape['top'], 0, 8))
+            .($shape['wrapper'] ? ' — note: the application sits inside '.$shape['wrapper'].'/, which the client updater unwraps automatically.' : '.')
+            .' Next: apply to the platform, then publish to clients.');
+    }
+
+    /**
+     * Look inside the zip and decide whether an updater could install it.
+     *
+     * An updater copies the archive's TOP-LEVEL entries over the application
+     * root. A package that wraps everything in one folder therefore copies that
+     * FOLDER into the app root, replaces nothing, and still reports success —
+     * the version number moves and every later check says "up to date", so the
+     * bug becomes invisible. The client updater unwraps single-folder archives
+     * for exactly this reason; this check is the second guard, here, where the
+     * package can still be rejected before any client ever sees it.
+     */
+    private function inspectPackage(string $zipPath): array
+    {
+        if (! class_exists('\ZipArchive')) {
+            return ['ok' => true, 'top' => ['(not inspected — ext-zip is missing on this server)'], 'wrapper' => null, 'why' => ''];
+        }
+        $zip = new \ZipArchive;
+        if ($zip->open($zipPath) !== true) {
+            return ['ok' => false, 'top' => [], 'wrapper' => null, 'why' => 'the file is not a readable zip archive.'];
+        }
+
+        $top = [];
+        $prefixCounts = [];
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            // `tar -a -c -f x.zip -C stage .` prefixes every entry with "./";
+            // strip it or the whole archive looks like it is wrapped in a folder
+            // called ".".
+            $name = preg_replace('#^\./#', '', ltrim(str_replace('\\', '/', (string) $zip->getNameIndex($i)), '/'));
+            if ($name === '' || $name === '.') {
+                continue;
+            }
+            $first = explode('/', $name)[0];
+            $top[$first] = true;
+            $prefixCounts[$first] = ($prefixCounts[$first] ?? 0) + 1;
+        }
+        $zip->close();
+
+        $entries = array_keys($top);
+        $wrapper = null;
+
+        // One top-level folder = a wrapped package. Report the wrapper and look
+        // one level deeper for the real application root.
+        if (count($entries) === 1) {
+            $wrapper = $entries[0];
+            $zip = new \ZipArchive;
+            if ($zip->open($zipPath) === true) {
+                $inner = [];
+                foreach (range(0, $zip->numFiles - 1) as $i) {
+                    $name = preg_replace('#^\./#', '', ltrim(str_replace('\\', '/', (string) $zip->getNameIndex($i)), '/'));
+                    $parts = explode('/', $name);
+                    if (count($parts) > 1 && $parts[1] !== '') {
+                        $inner[$parts[1]] = true;
+                    }
+                }
+                $zip->close();
+                $entries = array_keys($inner);
+            }
+        }
+
+        if (! in_array('app', $entries, true) || ! in_array('config', $entries, true)) {
+            return ['ok' => false, 'top' => $entries, 'wrapper' => $wrapper,
+                'why' => 'this zip has no app/ and config/ folders at its root'
+                    .($wrapper ? ' (even inside '.$wrapper.'/)' : '')
+                    .'. It looks like an installer/Setup zip, not an update package — a client updater would '
+                    .'report success and change nothing. Found: '.implode(', ', array_slice($entries, 0, 10)).'.'];
+        }
+
+        return ['ok' => true, 'top' => $entries, 'wrapper' => $wrapper, 'why' => ''];
     }
 
     /**
