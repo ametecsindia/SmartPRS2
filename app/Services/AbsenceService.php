@@ -153,7 +153,23 @@ class AbsenceService
         if (isset($onLeave[(int) ($a['id'] ?? 0)])) {
             return false;
         }
-        // Weekly-off? Prefer the shift/roster; fall back to working_days pattern.
+        if (self::isWeeklyOff($emp, $ymd, $iso, $shiftDefs, $rosterMap, $workingDays)) {
+            return false;   // weekly-off — not expected to work
+        }
+
+        return true;   // no punch, not on leave, not holiday, not weekly-off → absent
+    }
+
+    /**
+     * Weekly-off decision for one employee on one date. Prefers the resolved
+     * shift/roster 'off' flag; falls back to the configured working_days
+     * pattern when no shift is defined. Split out of isAbsent() so both the F10
+     * sweep and AttendanceReportController's day-by-day classification share
+     * the exact same rule instead of two copies that could drift apart.
+     */
+    public static function isWeeklyOff($emp, string $ymd, int $iso, array $shiftDefs, array $rosterMap, array $workingDays): bool
+    {
+        $a = (array) $emp;
         $off = null;
         if ($shiftDefs) {
             try {
@@ -168,11 +184,100 @@ class AbsenceService
         if ($off === null) {
             $off = ! in_array($iso, $workingDays, true);   // no shift info → configured pattern
         }
-        if ($off) {
-            return false;   // weekly-off — not expected to work
+
+        return $off;
+    }
+
+    /**
+     * Holiday dates for a tenant within [from,to], as a 'Y-m-d' => true set.
+     * ONE query for the whole range (unlike isHoliday(), which is per-day) —
+     * for a caller enumerating many days at once, e.g. the attendance report.
+     */
+    public static function holidaysInRange(?int $tid, string $from, string $to): array
+    {
+        $set = [];
+        try {
+            if (! Schema::hasTable('holidays')) {
+                return $set;
+            }
+            $rows = DB::table('holidays')
+                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                ->whereDate('date', '>=', $from)->whereDate('date', '<=', $to)
+                ->pluck('date');
+            foreach ($rows as $d) {
+                $set[Carbon::parse($d)->toDateString()] = true;
+            }
+        } catch (\Throwable $e) {
         }
 
-        return true;   // no punch, not on leave, not holiday, not weekly-off → absent
+        return $set;
+    }
+
+    /**
+     * Approved leaves overlapping [from,to] for a tenant, ONE query, keyed by
+     * employee_id => list of ['from'=>Y-m-d,'to'=>Y-m-d,'days'=>float]. `days`
+     * is read as a float (as the rest of the app already does, e.g.
+     * LeaveController) because a single-day leave recorded with days < 1 is
+     * how this schema represents a half-day — there is no separate half-day
+     * flag/table.
+     */
+    public static function leavesInRange(?int $tid, string $from, string $to): array
+    {
+        $out = [];
+        try {
+            if (! Schema::hasTable('leaves')) {
+                return $out;
+            }
+            $rows = DB::table('leaves')
+                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                ->where('status', 'approved')
+                ->whereDate('from_date', '<=', $to)
+                ->whereDate('to_date', '>=', $from)
+                ->get(['employee_id', 'from_date', 'to_date', 'days']);
+            foreach ($rows as $r) {
+                $out[(int) $r->employee_id][] = [
+                    'from' => Carbon::parse($r->from_date)->toDateString(),
+                    'to' => Carbon::parse($r->to_date)->toDateString(),
+                    'days' => (float) ($r->days ?? 1),
+                ];
+            }
+        } catch (\Throwable $e) {
+        }
+
+        return $out;
+    }
+
+    /**
+     * Classify ONE employee's day when there is NO punch, using the bulk sets
+     * above (holidaysInRange/leavesInRange — load once per report, not per
+     * employee/day) plus the same weekly-off rule isAbsent() uses. Shared by
+     * AttendanceReportController::buildReport() so its "Daily rows" list and
+     * this service's own absence sweep can never disagree on a given day.
+     * Never returns 'present' — this is only called for a day with no punch.
+     *
+     * @param  array  $holidaySet   from holidaysInRange()
+     * @param  array  $leavesByEmp  from leavesInRange()
+     * @return string 'holiday'|'on_leave'|'half_day'|'weekly_off'|'absent'
+     */
+    public static function classifyNoPunchDay($emp, string $ymd, array $holidaySet, array $leavesByEmp, array $shiftDefs, array $rosterMap, array $workingDays): string
+    {
+        if (isset($holidaySet[$ymd])) {
+            return 'holiday';
+        }
+        $a = (array) $emp;
+        $empId = (int) ($a['id'] ?? 0);
+        foreach ($leavesByEmp[$empId] ?? [] as $lv) {
+            if ($ymd >= $lv['from'] && $ymd <= $lv['to']) {
+                // A single-day leave logged with a fractional day count is a half-day.
+                return ($lv['from'] === $lv['to'] && $lv['days'] > 0 && $lv['days'] < 1) ? 'half_day' : 'on_leave';
+            }
+        }
+        $iso = (int) Carbon::parse($ymd)->isoWeekday();
+        if (self::isWeeklyOff($emp, $ymd, $iso, $shiftDefs, $rosterMap, $workingDays)) {
+            return 'weekly_off';
+        }
+
+        return 'absent';
     }
 
     /** Send the absence notice to the employee (and optionally the manager). */

@@ -143,36 +143,11 @@ class PayrollPeriodAudit extends Command
         }
     }
 
-    /** Mirrors PayrollGenController::resolveCutoffDay (company row beats all-company). */
+    /** rev191 — was a third hand-rolled copy of the cut-off scan, and it only
+     *  looked at pay_cycles, so an audit of a company configured through Salary
+     *  Schedules reported "calendar" for a window client. One resolver now. */
     private function cutoffFor($tid, string $companyName): int
     {
-        try {
-            if (! Schema::hasTable('pay_cycles') || ! Schema::hasColumn('pay_cycles', 'cutoff_day')) {
-                return 0;
-            }
-            $rows = DB::table('pay_cycles')
-                ->when($tid && Schema::hasColumn('pay_cycles', 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
-                ->when(Schema::hasColumn('pay_cycles', 'status'),
-                    fn ($q) => $q->where(fn ($x) => $x->where('status', 'active')->orWhereNull('status')))
-                ->orderByDesc('id')->limit(50)->get();
-            $best = 0;
-            foreach ($rows as $row) {
-                $cn = strtolower(trim((string) ($row->company_name ?? '')));
-                if ($cn !== '' && $cn !== 'all' && $cn !== strtolower(trim($companyName))) {
-                    continue;
-                }
-                $cd = (int) ($row->cutoff_day ?? 0);
-                if ($cd >= 2 && $cd <= 28) {
-                    if ($cn !== '' && $cn !== 'all') {
-                        return $cd;
-                    }
-                    $best = $best ?: $cd;
-                }
-            }
-
-            return $best;
-        } catch (\Throwable $e) {
-            return 0;
-        }
+        return PeriodResolver::masterDay($tid, $companyName, 'cutoff_day');
     }
 }

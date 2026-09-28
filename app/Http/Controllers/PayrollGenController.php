@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\PeriodResolver;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -98,7 +99,7 @@ class PayrollGenController extends Controller
     {
         $n = 0;
         for ($d = max(1, $fromDay); $d <= $toDay; $d++) {
-            $cur = Carbon::create($start->year, $start->month, $d);
+            $cur = $start->copy()->addDays($d - 1);   // rev191 — index INTO the period, not day-of-month
             if (self::isWeekOff($cur, $rates) || isset($holidays[$cur->toDateString()])) {
                 continue;
             }
@@ -118,84 +119,105 @@ class PayrollGenController extends Controller
     private function periodStart(string $month): string
     {
         $c = (int) $this->runCutoff;
-        if ($c <= 1) {
-            return $month.'-01';
-        }
 
-        return Carbon::createFromFormat('Y-m-d', $month.'-01')->subMonthNoOverflow()->day($c)->addDay()->toDateString();
+        return PeriodResolver::resolve($month, ($c >= 2 && $c <= 28) ? $c : null)['start'];
     }
 
-    /** Cut-off day (2..28) for a company; 0 = calendar month. The assigned Salary
-     *  Schedule drives it (rev190), falling back to the Pay Cycle master — same
-     *  table precedence as AppDataController::payDateFor so the attendance window
-     *  and the pay date always agree. A company-specific row wins over an
-     *  all-company / blank one; salary_schedules is consulted before pay_cycles. */
+    /** Cut-off day (2..28) for a company; 0 = calendar month.
+     *  rev191 — the scan itself now lives in PeriodResolver::masterDay so the
+     *  payroll engine, the pay date, ESS, Reports, Live Salary and the audit
+     *  command cannot drift apart. Behaviour is unchanged: salary_schedules
+     *  before pay_cycles, company-specific row before an all-company one. */
     private function resolveCutoffDay($tid, object $company): int
     {
-        try {
-            $cn = strtolower(trim((string) $company->name));
-            $bestGeneric = 0;
-            foreach (['salary_schedules', 'pay_cycles'] as $table) {
-                if (! Schema::hasTable($table) || ! Schema::hasColumn($table, 'cutoff_day')) {
-                    continue;
-                }
-                $rows = DB::table($table)
-                    ->when($tid && Schema::hasColumn($table, 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
-                    ->when(Schema::hasColumn($table, 'status'), fn ($q) => $q->where(fn ($x) => $x->where('status', 'active')->orWhereNull('status')))
-                    ->orderByDesc('id')->limit(50)->get();
-                foreach ($rows as $row) {
-                    $rcn = strtolower(trim((string) ($row->company_name ?? '')));
-                    if ($rcn !== '' && $rcn !== 'all' && $rcn !== $cn) {
-                        continue;
-                    }
-                    $cd = (int) ($row->cutoff_day ?? 0);
-                    if ($cd < 2 || $cd > 28) {
-                        continue;
-                    }
-                    if ($rcn !== '' && $rcn !== 'all') {
-                        return $cd;   // company-specific row wins (schedules scanned first)
-                    }
-                    if ($bestGeneric === 0) {
-                        $bestGeneric = $cd;
-                    }
-                }
-            }
-
-            return $bestGeneric;
-        } catch (\Throwable $e) {
-            return 0;
-        }
+        return PeriodResolver::masterDay($tid, (string) $company->name, 'cutoff_day');
     }
 
     /** [startDate, daysInPeriod, workingDays(excl. Sundays), endDateString] for a run month (cut-off aware). */
     private function monthMeta(string $month): array
     {
         $c = (int) $this->runCutoff;
-        if ($c >= 2 && $c <= 28) {
-            $start = Carbon::createFromFormat('Y-m-d', $month.'-01')->subMonthNoOverflow()->day($c)->addDay()->startOfDay();
-            $end = Carbon::createFromFormat('Y-m-d', $month.'-01')->day($c)->startOfDay();
-            $days = (int) $start->diffInDays($end) + 1;
-            $working = 0;
-            $cur = $start->copy();
-            while ($cur->lte($end)) {
-                if ($cur->dayOfWeek !== Carbon::SUNDAY) {
-                    $working++;
-                }
-                $cur->addDay();
-            }
-
-            return [$start, $days, max(1, $working), $end->toDateString()];
-        }
-        $start = Carbon::createFromFormat('Y-m-d', $month.'-01')->startOfDay();
-        $days = $start->daysInMonth;
+        $p = PeriodResolver::resolve($month, ($c >= 2 && $c <= 28) ? $c : null);
+        $start = Carbon::parse($p['start'])->startOfDay();
+        $end = Carbon::parse($p['end'])->startOfDay();
         $working = 0;
-        for ($d = 1; $d <= $days; $d++) {
-            if (Carbon::create($start->year, $start->month, $d)->dayOfWeek !== Carbon::SUNDAY) {
+        $cur = $start->copy();
+        while ($cur->lte($end)) {
+            if ($cur->dayOfWeek !== Carbon::SUNDAY) {
                 $working++;
             }
+            $cur->addDay();
         }
 
-        return [$start, $days, max(1, $working), $start->copy()->endOfMonth()->toDateString()];
+        return [$start, (int) $p['days'], max(1, $working), $p['end']];
+    }
+
+    /**
+     * rev191 — working days in a period, and how many of them have elapsed.
+     *
+     * Replaces four copies of `for ($d = 1; $d <= $daysInMonth; $d++)` in
+     * compute(), liveSalary(), liveSalaryAll() and simulate(). That loop
+     * indexed days off $start->month, so for a 21 Aug – 20 Sep period it walked
+     * 1–31 AUGUST: the wrong dates, the wrong weekly offs, and an elapsed count
+     * that compared a period index against a calendar day-of-month. A date walk
+     * is correct for a calendar month and a cut-off cycle alike.
+     *
+     * @return array [workingDays, workingDaysElapsedOnOrBefore($upto)]
+     */
+    private function workingSpan(Carbon $start, string $end, string $upto, array $rates, array $holidays): array
+    {
+        $total = 0;
+        $soFar = 0;
+        $cur = $start->copy();
+        $last = Carbon::parse($end);
+        while ($cur->lte($last)) {
+            if (! (self::isWeekOff($cur, $rates) || isset($holidays[$cur->toDateString()]))) {
+                $total++;
+                if ($cur->toDateString() <= $upto) {
+                    $soFar++;
+                }
+            }
+            $cur->addDay();
+        }
+
+        return [max(1, $total), $soFar];
+    }
+
+    /**
+     * rev191 — does this company have ANY punch at all in the run window?
+     *
+     * Since rev191 an employee with no punches is scored as absent, which is the
+     * correct answer for one person and a catastrophe for a whole company: a dead
+     * biometric sync, a mismatched emp_code or a wrong tenant_id would otherwise
+     * zero everybody's pay in silence. generate() calls this BEFORE it touches any
+     * existing draft and refuses the run when it comes back false.
+     *
+     * Fail-soft returns TRUE (never block payroll because a probe threw).
+     */
+    private function hasAnyAttendance($tid, object $company, string $month, string $endDate): bool
+    {
+        try {
+            if (! Schema::hasTable('attendance_logs')) {
+                return true;   // attendance isn't tracked at all in this install
+            }
+            $codes = DB::table('employees')
+                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                ->where('company_id', $company->id)
+                ->where('status', 'active')
+                ->whereNull('deleted_at')
+                ->pluck('emp_code')->filter()->all();
+            if (! $codes) {
+                return true;   // nothing to pay anyway; the empty-rows check handles it
+            }
+
+            return DB::table('attendance_logs')
+                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                ->whereIn('emp_code', $codes)
+                ->whereBetween('log_date', [$this->periodStart($month), $endDate])
+                ->exists();
+        } catch (\Throwable $e) {
+            return true;
+        }
     }
 
     /** Distinct punch dates for an employee in the month (0 if none / no table). */
@@ -778,7 +800,7 @@ class PayrollGenController extends Controller
                 $covered[$d] = true;
             }
             $isOff = function (int $day) use ($start, $rates, $holidays): bool {
-                $cur = Carbon::create($start->year, $start->month, $day);
+                $cur = $start->copy()->addDays($day - 1);   // rev191 — period index
 
                 return self::isWeekOff($cur, $rates) || isset($holidays[$cur->toDateString()]);
             };
@@ -802,8 +824,8 @@ class PayrollGenController extends Controller
                 if ($p < $dojDay || $p < 1 || $n > $daysInMonth) {
                     continue;   // month/DOJ edge — no expected working day on one side, not a sandwich
                 }
-                $pd = Carbon::create($start->year, $start->month, $p)->toDateString();
-                $nd = Carbon::create($start->year, $start->month, $n)->toDateString();
+                $pd = $start->copy()->addDays($p - 1)->toDateString();   // rev191 — period index
+                $nd = $start->copy()->addDays($n - 1)->toDateString();
                 if (empty($covered[$pd]) && empty($covered[$nd])) {
                     $count++;
                 }
@@ -1093,7 +1115,19 @@ class PayrollGenController extends Controller
         $tid = $request->user()->tenant_id;
         $rates = SettingsController::rates($tid);
         $this->runCutoff = $this->resolveCutoffDay($tid, $company);   // rev181 — attendance cut-off period (0 = calendar month)
-        [$start, $daysInMonth, , $endDate] = $this->monthMeta($month);
+        [$start, $daysInMonth, , $periodEnd] = $this->monthMeta($month);
+
+        // rev191 (Ejaz, 23 Sep 2026) — NEVER pay for days that have not happened.
+        // Before this, running September's payroll on the 23rd built the window as
+        // 1–30 Sep and paid a full 30 days. Now:
+        //   • the DENOMINATOR still spans the whole period (a full month is a full
+        //     month — so one absent day always costs the same),
+        //   • but attendance is only ever counted up to TODAY, so an open period
+        //     pays what has been EARNED to date and nothing more.
+        // Closed (past) periods are completely unaffected.
+        $today = Carbon::today()->toDateString();
+        $periodOpen = $periodEnd > $today;
+        $endDate = $periodOpen ? $today : $periodEnd;
 
         // rev177 — LOP basis (Statutory Settings → "Salary / LOP day basis"):
         // what one day of salary is WORTH when prorating.
@@ -1114,17 +1148,24 @@ class PayrollGenController extends Controller
         $sandwichOn = ! empty($rates['sandwich_rule']);
 
         // Working days = calendar days minus weekly offs (configurable) minus working-day holidays.
-        $holidays = $lop ? $this->holidayDates($tid, $month, $endDate, $rates) : [];
-        $working = 0;
-        $__pc = $start->copy();
-        $__pe = Carbon::parse($endDate);
-        while ($__pc->lte($__pe)) {
-            if (! (self::isWeekOff($__pc, $rates) || isset($holidays[$__pc->toDateString()]))) {
-                $working++;
-            }
-            $__pc->addDay();
-        }
-        $working = max(1, $working);
+        // rev191 — holidays and working days span the WHOLE period ($periodEnd),
+        // never the capped attendance window: they are the denominator.
+        $holidays = $lop ? $this->holidayDates($tid, $month, $periodEnd, $rates) : [];
+        // rev191 — one shared span walk (see workingSpan). Days beyond $endDate
+        // have not happened yet and are not loss of pay; the count travels on the
+        // calc note so no payslip ever prints them as LOP.
+        [$working, $workingSoFar] = $this->workingSpan($start, $periodEnd, $endDate, $rates, $holidays);
+        $notElapsed = max(0, $working - $workingSoFar);
+        // rev191 — the same question in CALENDAR terms, for the calendar / fixed30
+        // day-value bases (where weekly offs are paid days, so the unworked tail of
+        // the period has to be measured in calendar days, not working days).
+        $calSoFar = $periodOpen ? ((int) $start->diffInDays(Carbon::parse($endDate)) + 1) : $daysInMonth;
+        $notElapsedCal = max(0, $daysInMonth - $calSoFar);
+        // What the calc note should report, expressed in the SAME unit as the
+        // "Paid X of Y days" line the note already prints for this basis.
+        $noteNotElapsed = $lopBasis === 'working'
+            ? (float) $notElapsed
+            : ($lopBasis === 'fixed30' ? round(30.0 * $notElapsedCal / max(1, $daysInMonth), 2) : (float) $notElapsedCal);
 
         $empSel = ['id', 'emp_code', 'name', 'ctc'];
         if (Schema::hasColumn('employees', 'branch_id')) {
@@ -1209,21 +1250,30 @@ class PayrollGenController extends Controller
                 continue;   // no CTC set → cannot compute a salary; flagged to the user
             }
             $present = $lop ? $this->presentDays($e->emp_code, $month, $endDate, $tid) : 0;
-            $leave = ($lop && $present > 0) ? $this->paidLeaveDays((int) $e->id, $tid, $month, $endDate, $holidays, $rates) : 0.0;
+            // rev191 — approved paid leave is counted even for an employee with NO
+            // punches at all. A full month of approved leave is PAID leave, not
+            // absence; the old `$present > 0` gate silently mis-scored exactly the
+            // people most likely to have none.
+            $leave = $lop ? $this->paidLeaveDays((int) $e->id, $tid, $month, $endDate, $holidays, $rates) : 0.0;
             // rev172 (M1) — mid-month joiner: prorate against the working days
             // available FROM the date of joining, not the whole month.
             $empWorking = $working;
-            $dojDay = 1; // rev177 — joiner's day-of-month (1 = full month), used by the calendar/fixed30 bases
+            // rev191 — the joiner's position is an INDEX INTO THE PERIOD (1 = the
+            // period's first day), not a day-of-month. The old test only fired
+            // when the DOJ's calendar month equalled the run month, so someone who
+            // joined on 25 Aug inside a 21 Aug – 20 Sep period was paid as if they
+            // had worked the whole period.
+            $dojDay = 1;
             $dojField = property_exists($e, 'doj') ? $e->doj : null;
             if ($dojField) {
                 try {
-                    $doj = Carbon::parse(substr((string) $dojField, 0, 10));
-                    if ($doj->format('Y-m') === $month && $doj->day > 1) {
-                        $empWorking = max(1, $this->workingDaysInRange($start, $doj->day, $daysInMonth, $rates, $holidays));
-                        $dojDay = (int) $doj->day;
+                    $doj = Carbon::parse(substr((string) $dojField, 0, 10))->startOfDay();
+                    if ($doj->gt($start) && $doj->toDateString() <= $periodEnd) {
+                        $dojDay = (int) $start->diffInDays($doj) + 1;
+                        $empWorking = max(1, $this->workingDaysInRange($start, $dojDay, $daysInMonth, $rates, $holidays));
                     }
                 } catch (\Throwable $e2) {
-                    // unparseable DOJ → fall back to full-month working days
+                    // unparseable DOJ → fall back to full-period working days
                 }
             }
             $lateCut = 0.0;
@@ -1234,7 +1284,12 @@ class PayrollGenController extends Controller
             $dispPaid = null;   // rev177 — paid/denominator pair for the calc note, in the chosen basis
             $dispDen = null;
             $sandwichDays = 0;  // rev180 — off-days between absences counted as LOP (sandwich rule)
-            if ($lop && $present > 0) {
+            // rev191 — attendance is now scored for EVERY employee, not only those
+            // who happened to punch. Zero punches + zero approved leave is genuine
+            // absence and is treated as such. The company-wide safety net lives in
+            // generate(): if NOBODY punched in the window that is a broken feed, not
+            // a company that stayed home, and the run is refused instead of zeroed.
+            if ($lop) {
                 // Resolve the most specific policy for this employee (employee > team > company),
                 // then run the attendance engine (tiered / net-hours / simple + break deduction).
                 $team = property_exists($e, 'team') ? $e->team : null;
@@ -1254,33 +1309,59 @@ class PayrollGenController extends Controller
                     $breakCut = $res['breakCut'];
                     $lateDays = $res['late'];
                 }
-                // Paid leave counts as present; an employee with zero punches is
-                // paid in full (safeguard for companies not using biometric).
+                // Paid leave counts as present.
                 $paidDays = max(0.0, min($empWorking, $present + $leave) - $lateCut - $breakCut);
                 // rev180 — sandwich rule: each off-day between two uncovered
                 // (absent, non-leave) working days becomes an extra LOP day.
-                if ($sandwichOn) {
+                // rev191 — MANDATORY under calendar/fixed30. Those bases treat
+                // weekly offs and holidays as PAID days, which is only true of
+                // someone actually in service around them: without this, an
+                // employee absent every single working day still collected every
+                // Sunday (5/31 of a month's gross for zero attendance). Under the
+                // 'working' basis offs are outside the denominator already, so
+                // there it stays the policy option it was.
+                $offsArePaid = ($lopBasis === 'calendar' || $lopBasis === 'fixed30');
+                if ($sandwichOn || $offsArePaid) {
                     $sandwichDays = $this->sandwichDays($e->emp_code, (int) $e->id, $tid, $month, $daysInMonth, $start, $endDate, $holidays, $rates, $dojDay);
-                    if ($sandwichDays > 0) {
+                    if ($sandwichDays > 0 && ! $offsArePaid) {
+                        // working basis: the penalty lands on the numerator.
                         $paidDays = max(0.0, $paidDays - $sandwichDays);
                     }
                 }
-                if ($lopBasis === 'calendar' || $lopBasis === 'fixed30') {
+                if ($offsArePaid) {
                     // rev177 — absence measured in working days, VALUED against a
                     // calendar (or flat-30) denominator: weekly offs & holidays
                     // are paid days, so 1 LOP day costs gross/31 (or gross/30)
                     // instead of gross/working-days.
-                    $absentDays = max(0.0, $empWorking - $paidDays);
+                    // rev191 — in an OPEN period absence can only be measured over
+                    // the working days that have actually elapsed; days still to
+                    // come are not absences. The available side shrinks to the
+                    // elapsed calendar days for the same reason.
+                    $absentBase = $periodOpen ? min($empWorking, $workingSoFar) : $empWorking;
+                    // rev191 — LOP here is measured in CALENDAR days: the absent
+                    // working days PLUS the offs that sat inside those absences.
+                    // (Subtracting the sandwich from $paidDays instead — as the
+                    // working basis does — was lost at the max(0.0, …) floor for
+                    // anyone fully absent, which is exactly how they kept getting
+                    // paid for the weekends.)
+                    $absentDays = max(0.0, $absentBase - $paidDays) + $sandwichDays;
                     if ($lopBasis === 'fixed30') {
                         $den = 30.0;
                         // joiner: pre-joining days scale into 30-day terms
-                        $avail = 30.0 - ($dojDay > 1 ? round(($dojDay - 1) * 30.0 / max(1, $daysInMonth), 2) : 0.0);
+                        $avail = round(30.0 * $calSoFar / max(1, $daysInMonth), 2) - ($dojDay > 1 ? round(($dojDay - 1) * 30.0 / max(1, $daysInMonth), 2) : 0.0);
                     } else {
                         $den = (float) $daysInMonth;
-                        $avail = (float) ($daysInMonth - ($dojDay > 1 ? ($dojDay - 1) : 0));
+                        $avail = (float) ($calSoFar - ($dojDay > 1 ? ($dojDay - 1) : 0));
                     }
+                    $avail = max(0.0, $avail);
                     $factor = max(0.0, min(1.0, ($avail - $absentDays) / max(1.0, $den)));
-                    $dispPaid = max(0.0, round($avail - $absentDays, 2));
+                    // rev191 — the floor the whole thing rests on: no attendance
+                    // and no approved leave means NO pay, whatever the day maths
+                    // rounds to. An off day is never earned on its own.
+                    if ($paidDays <= 0) {
+                        $factor = 0.0;
+                    }
+                    $dispPaid = $paidDays <= 0 ? 0.0 : max(0.0, round($avail - $absentDays, 2));
                     $dispDen = $den;
                 } else {
                     $factor = min(1.0, $paidDays / $empWorking); // rev172 (M1) — DOJ-aware denominator; factor never exceeds full month
@@ -1396,7 +1477,16 @@ class PayrollGenController extends Controller
                 // rev180 — sandwich rule visible on the slip.
                 $note .= ' Sandwich rule: '.$sandwichDays.' off-day(s) falling between absent days counted as LOP.';
             }
-            if ($lop && $present > 0 && $lopBasis !== 'working') {
+            if ($lop && $periodOpen) {
+                // rev191 — the slip must say out loud that this is an earned-to-date
+                // figure. The trailing count is machine-read by
+                // AppDataController::payslipData so the unworked remainder of the
+                // period is never printed as LOP.
+                $note .= ' Period still in progress: attendance counted from '.$start->toDateString().' to '.$endDate
+                    .' only (period ends '.$periodEnd.'), so this is salary EARNED TO DATE, not a full period.'
+                    .' Not-yet-elapsed working day(s): '.rtrim(rtrim(number_format($noteNotElapsed, 2), '0'), '.').'.';
+            }
+            if ($lop && $lopBasis !== 'working') {
                 // rev177 — make the chosen day-value basis explicit on the slip.
                 $note .= ' LOP basis: '.($lopBasis === 'calendar'
                     ? 'calendar days — each LOP day costs gross/'.$daysInMonth.' ('.$daysInMonth.' days this month); weekly offs & holidays are paid days.'
@@ -1480,6 +1570,13 @@ class PayrollGenController extends Controller
                 'daysInMonth' => $daysInMonth,
                 'workingDays' => $working,
                 'holidays' => count($holidays),
+                // rev191 — open-period facts, used by preview()/generate() and the UI.
+                'periodStart' => $start->toDateString(),
+                'periodEnd' => $periodEnd,
+                'attendanceEnd' => $endDate,       // = periodEnd once the period has closed
+                'periodOpen' => $periodOpen,
+                'workingSoFar' => $workingSoFar,
+                'notElapsed' => $notElapsed,
                 'monthLabel' => $start->format('M Y'),
                 'payDate' => $this->resolvePayDate($tid, $company, $month, $endDate), // rev180 — schedule-aware
                 'lopBasis' => $lopBasis, // rev177
@@ -1558,26 +1655,21 @@ class PayrollGenController extends Controller
             }
 
             $rates = SettingsController::rates($tid);
-            $month = now()->format('Y-m');
-            [$start, $daysInMonth, , ] = $this->monthMeta($month);
+            // rev191 — Live Salary runs on the company's OWN pay cycle, exactly
+            // like the payroll engine. It used to force the calendar month, so a
+            // 21st–20th company saw a window here that no payslip ever matched,
+            // and on the 23rd it named the wrong payroll month entirely.
+            $this->runCutoff = $this->resolveCutoffDay($tid, $company);
+            $month = PeriodResolver::currentMonthFor($tid, (string) $company->name);
+            [$start, $daysInMonth, , $periodEnd] = $this->monthMeta($month);
             $today = now()->toDateString();
-            $dayOfMonth = (int) now()->day;
+            // Calendar days of the PERIOD elapsed so far (not day-of-month: with a
+            // cut-off cycle the period does not start on the 1st).
+            $dayOfMonth = max(1, min($daysInMonth, (int) $start->diffInDays(Carbon::parse($today)) + 1));
 
-            // Working days: full month + elapsed-till-today (Sundays/holidays excluded).
-            $holidays = $this->holidayDates($tid, $month, $start->copy()->endOfMonth()->toDateString(), $rates);
-            $working = 0;
-            $workingSoFar = 0;
-            for ($d = 1; $d <= $daysInMonth; $d++) {
-                $cur = Carbon::create($start->year, $start->month, $d);
-                if (self::isWeekOff($cur, $rates) || isset($holidays[$cur->toDateString()])) {
-                    continue;
-                }
-                $working++;
-                if ($d <= $dayOfMonth) {
-                    $workingSoFar++;
-                }
-            }
-            $working = max(1, $working);
+            // Working days: whole period + elapsed-till-today (weekly offs/holidays excluded).
+            $holidays = $this->holidayDates($tid, $month, $periodEnd, $rates);
+            [$working, $workingSoFar] = $this->workingSpan($start, $periodEnd, $today, $rates, $holidays);
 
             // Attendance till TODAY (same helpers as payroll, endDate = today).
             $present = $this->presentDays($target->emp_code, $month, $today, $tid);
@@ -1686,7 +1778,7 @@ class PayrollGenController extends Controller
                 }
             }
             // rev176 — approved overtime for the month (now paid on the payslip).
-            $otLv = $this->overtimeByEmployee($tid, $month, $start->copy()->endOfMonth()->toDateString());
+            $otLv = $this->overtimeByEmployee($tid, $month, $periodEnd);   // rev191 — the period's end, not the calendar month's
             $otAmtLv = round((float) ($otLv['sum'][$target->id] ?? 0), 2);
             if ($otAmtLv > 0) {
                 $earnings[] = ['label' => 'Overtime (approved)', 'amount' => $otAmtLv];
@@ -1972,24 +2064,17 @@ class PayrollGenController extends Controller
             }
 
             $rates = SettingsController::rates($tid);
-            $month = now()->format('Y-m');
-            [$start, $daysInMonth, , ] = $this->monthMeta($month);
+            // rev191 — same pay cycle as everything else.
+            // ponytail: this screen lists employees across companies but keeps ONE
+            // working-day span, so it uses the tenant-level cycle. Per-company
+            // spans only matter once a tenant runs two different cut-offs at once.
+            $this->runCutoff = PeriodResolver::masterDay($tid, '', 'cutoff_day');
+            $month = PeriodResolver::currentMonthFor($tid, '');
+            [$start, $daysInMonth, , $periodEnd] = $this->monthMeta($month);
             $today = now()->toDateString();
-            $dayOfMonth = (int) now()->day;
-            $holidays = $this->holidayDates($tid, $month, $start->copy()->endOfMonth()->toDateString(), $rates);
-            $working = 0;
-            $workingSoFar = 0;
-            for ($d = 1; $d <= $daysInMonth; $d++) {
-                $cur = Carbon::create($start->year, $start->month, $d);
-                if (self::isWeekOff($cur, $rates) || isset($holidays[$cur->toDateString()])) {
-                    continue;
-                }
-                $working++;
-                if ($d <= $dayOfMonth) {
-                    $workingSoFar++;
-                }
-            }
-            $working = max(1, $working);
+            $dayOfMonth = max(1, min($daysInMonth, (int) $start->diffInDays(Carbon::parse($today)) + 1));
+            $holidays = $this->holidayDates($tid, $month, $periodEnd, $rates);
+            [$working, $workingSoFar] = $this->workingSpan($start, $periodEnd, $today, $rates, $holidays);
             $lopBasis = strtolower(trim((string) ($rates['lop_basis'] ?? 'working')));
 
             $companyCache = [];
@@ -2086,20 +2171,19 @@ class PayrollGenController extends Controller
             if ($ctc <= 0) {
                 return response()->json(['ok' => false, 'error' => 'Enter an annual CTC first.'], 200);
             }
-            $month = $this->normMonth((string) $request->input('month', '')) ?: now()->format('Y-m');
+            // rev191 — the Simulator answers "what would payroll do", so it has to
+            // use the same period the payroll engine would. The selected company's
+            // pay cycle drives it; with none selected, the tenant-level cycle does.
+            $simCo = $request->input('company_id')
+                ? DB::table('companies')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->where('id', (int) $request->input('company_id'))->value('name')
+                : '';
+            $this->runCutoff = PeriodResolver::masterDay($tid, (string) $simCo, 'cutoff_day');
+            $month = $this->normMonth((string) $request->input('month', '')) ?: PeriodResolver::currentMonthFor($tid, (string) $simCo);
             [$start, $daysInMonth, , $endDate] = $this->monthMeta($month);
 
-            // Working days of the month (weekly offs + holidays honoured).
+            // Working days of the period (weekly offs + holidays honoured).
             $holidays = $this->holidayDates($tid, $month, $endDate, $rates);
-            $working = 0;
-            for ($d = 1; $d <= $daysInMonth; $d++) {
-                $cur = Carbon::create($start->year, $start->month, $d);
-                if (self::isWeekOff($cur, $rates) || isset($holidays[$cur->toDateString()])) {
-                    continue;
-                }
-                $working++;
-            }
-            $working = max(1, $working);
+            [$working, ] = $this->workingSpan($start, $endDate, $endDate, $rates, $holidays);
 
             // LOP basis — tenant setting by default, overridable per simulation.
             $basis = strtolower(trim((string) $request->input('lop_basis', '')));
@@ -2303,7 +2387,10 @@ class PayrollGenController extends Controller
             if (! $company) {
                 return response()->json(['ok' => false, 'error' => 'Pick a company you manage.'], 422);
             }
-            $lop = filter_var($request->query('lop'), FILTER_VALIDATE_BOOLEAN);
+            // rev191 — attendance is no longer optional. Every preview and every
+            // run is scored against real attendance; the old `lop` query flag is
+            // accepted and ignored so existing links keep working.
+            $lop = true;
             $c = $this->compute($request, $company, $month, $lop);
 
             $existing = $this->existingRun($request, $company, $month);
@@ -2324,9 +2411,110 @@ class PayrollGenController extends Controller
                 'exists' => (bool) $existing,
                 'existingStatus' => $existing->status ?? null,
                 'existingRunId' => $existing->id ?? null,
+                // rev191 — let the screen warn before anyone generates.
+                'periodOpen' => $c['meta']['periodOpen'],
+                'periodStart' => $c['meta']['periodStart'],
+                'periodEnd' => $c['meta']['periodEnd'],
+                'attendanceEnd' => $c['meta']['attendanceEnd'],
+                'workingSoFar' => $c['meta']['workingSoFar'],
+                'hasAttendance' => $this->hasAnyAttendance($request->user()->tenant_id, $company, $month, $c['meta']['attendanceEnd']),
             ]);
         } catch (\Throwable $e) {
             return response()->json(['ok' => false, 'error' => $e->getMessage()], 200);
+        }
+    }
+
+    /**
+     * rev191 — UNDO everything a payroll run stamped on the rest of the system,
+     * then delete it.
+     *
+     * This was ~90 lines living inside generate()'s regenerate branch, which
+     * meant it existed for exactly one caller. Deleting a run any other way
+     * (a purge, a SQL "DELETE FROM payroll_runs") leaves commissions locked to a
+     * run that no longer exists, overtime stuck at 'paid', loan instalment
+     * counters advanced against recoveries that were reversed, and clawbacks
+     * stamped as recovered. One method, both callers.
+     *
+     * Every step is best-effort: a reversal must never be what fails.
+     */
+    public function reverseRun(int $runId): void
+    {
+        DB::table('payslips')->where('run_id', $runId)->delete();
+        DB::table('payroll_runs')->where('id', $runId)->delete();
+        // rev165 DATA INTEGRITY: also reverse the COMMISSION side of the old
+        // run. The first generate inserted a commission_payments debit
+        // (reference "run #<id> · …") and set commissions.locked_at; if we
+        // don't undo them, regenerating leaves a passbook debit pointing at a
+        // deleted run + a lock for a run that no longer exists, and the
+        // recompute's whereNull('locked_at') skips those commissions while
+        // they still fold into the new payslip. Best-effort; never blocks.
+        try {
+            if (Schema::hasTable('commission_payments')) {
+                $refLike = 'run #'.$runId.' %';
+                $freedCids = DB::table('commission_payments')
+                    ->where('mode', 'payslip')->where('reference', 'like', $refLike)
+                    ->pluck('commission_id')->all();
+                DB::table('commission_payments')
+                    ->where('mode', 'payslip')->where('reference', 'like', $refLike)->delete();
+                if ($freedCids && Schema::hasColumn('commissions', 'locked_at')) {
+                    $clear = ['locked_at' => null, 'updated_at' => now()];
+                    if (Schema::hasColumn('commissions', 'locked_by')) {
+                        $clear['locked_by'] = null;
+                    }
+                    if (Schema::hasColumn('commissions', 'lock_source')) {
+                        $clear['lock_source'] = null;
+                    }
+                    DB::table('commissions')->whereIn('id', $freedCids)->update($clear);
+                }
+            }
+        } catch (\Throwable $e) {
+            // best-effort; a regenerate must not fail on the reversal.
+        }
+        // rev176 — reverse the OVERTIME side of the old run: entries that
+        // run marked 'paid' go back to approved, so the recompute re-pays them.
+        try {
+            if (Schema::hasTable('overtime') && Schema::hasColumn('overtime', 'paid_run_id')) {
+                $updO = ['status' => 'approved', 'paid_run_id' => null];
+                if (Schema::hasColumn('overtime', 'updated_at')) {
+                    $updO['updated_at'] = now();
+                }
+                DB::table('overtime')->where('paid_run_id', $runId)->where('status', 'paid')->update($updO);
+            }
+        } catch (\Throwable $e) {
+            // best-effort; a regenerate must not fail on the reversal.
+        }
+        // rev176 — reverse the LOAN-EMI recoveries of the old run (ledger
+        // rows + installment counters; re-open a loan that run auto-closed).
+        try {
+            if (Schema::hasTable('loan_recoveries')) {
+                $recRows = DB::table('loan_recoveries')->where('run_id', $runId)->get(['id', 'loan_id']);
+                if ($recRows->count() && Schema::hasColumn('loans', 'installments_paid')) {
+                    foreach ($recRows as $rr) {
+                        DB::table('loans')->where('id', $rr->loan_id)->where('installments_paid', '>', 0)->decrement('installments_paid');
+                        $ln = DB::table('loans')->where('id', $rr->loan_id)->first();
+                        $totL = $ln ? (int) (($ln->installments_total ?? null) ?: ($ln->tenure_months ?? 0)) : 0;
+                        if ($ln && ($ln->status ?? '') === 'closed' && ($totL <= 0 || (int) ($ln->installments_paid ?? 0) < $totL)) {
+                            DB::table('loans')->where('id', $rr->loan_id)->update(['status' => 'active']);
+                        }
+                    }
+                }
+                DB::table('loan_recoveries')->where('run_id', $runId)->delete();
+            }
+        } catch (\Throwable $e) {
+            // best-effort; a regenerate must not fail on the reversal.
+        }
+        // rev181 — reverse the CLAWBACK recoveries of the old run: clear
+        // the run-keyed stamp so the recompute recovers them again.
+        try {
+            if (Schema::hasTable('clawbacks') && Schema::hasColumn('clawbacks', 'recovered_run_id')) {
+                $clr = ['recovered_run_id' => null, 'recovered_amount' => null, 'recovered_at' => null];
+                if (Schema::hasColumn('clawbacks', 'updated_at')) {
+                    $clr['updated_at'] = now();
+                }
+                DB::table('clawbacks')->where('recovered_run_id', $runId)->update($clr);
+            }
+        } catch (\Throwable $e) {
+            // best-effort; a regenerate must not fail on the reversal.
         }
     }
 
@@ -2351,9 +2539,32 @@ class PayrollGenController extends Controller
             if (! $company) {
                 return response()->json(['ok' => false, 'error' => 'Pick a company you manage.'], 422);
             }
-            $lop = filter_var($request->input('lop'), FILTER_VALIDATE_BOOLEAN);
+            // rev191 — attendance is no longer optional; the posted `lop` flag is
+            // accepted and ignored so older clients keep working.
+            $lop = true;
             $regenerate = filter_var($request->input('regenerate'), FILTER_VALIDATE_BOOLEAN);
             $tid = $request->user()->tenant_id;
+
+            // ---- rev191 ATTENDANCE-FEED GUARD --------------------------------
+            // Scoring every employee against attendance means a company with NO
+            // punches at all would be paid nothing. That is never a real month —
+            // it is a stopped biometric sync, a renamed emp_code or the wrong
+            // tenant. Refuse before anything is deleted or written, and make the
+            // override explicit and auditable.
+            $this->runCutoff = $this->resolveCutoffDay($tid, $company);
+            [, , , $gPeriodEnd] = $this->monthMeta($month);
+            $gToday = Carbon::today()->toDateString();
+            $gEnd = $gPeriodEnd > $gToday ? $gToday : $gPeriodEnd;
+            if (! $request->boolean('confirm_no_attendance') && ! $this->hasAnyAttendance($tid, $company, $month, $gEnd)) {
+                return response()->json([
+                    'ok' => false,
+                    'needs_confirm' => 'no_attendance',
+                    'error' => 'No attendance was found for any employee of '.$company->name.' between '
+                        .$this->periodStart($month).' and '.$gEnd.'. Salary is now prorated by attendance, so '
+                        .'generating now would pay everyone zero. Check the biometric sync / device mapping first. '
+                        .'(To pay this company without attendance on purpose, re-submit with confirm_no_attendance=1.)',
+                ], 422);
+            }
 
             // Idempotency: one run per company/month. A run already past draft is
             // locked from regeneration; a draft can be replaced only on request.
@@ -2385,84 +2596,7 @@ class PayrollGenController extends Controller
                 } catch (\Throwable $e) {
                     // audit is best-effort; never block the regenerate on it
                 }
-                // Replace the existing draft: drop its payslips then the run.
-                DB::table('payslips')->where('run_id', $existing->id)->delete();
-                DB::table('payroll_runs')->where('id', $existing->id)->delete();
-                // rev165 DATA INTEGRITY: also reverse the COMMISSION side of the old
-                // run. The first generate inserted a commission_payments debit
-                // (reference "run #<id> · …") and set commissions.locked_at; if we
-                // don't undo them, regenerating leaves a passbook debit pointing at a
-                // deleted run + a lock for a run that no longer exists, and the
-                // recompute's whereNull('locked_at') skips those commissions while
-                // they still fold into the new payslip. Best-effort; never blocks.
-                try {
-                    if (Schema::hasTable('commission_payments')) {
-                        $refLike = 'run #'.$existing->id.' %';
-                        $freedCids = DB::table('commission_payments')
-                            ->where('mode', 'payslip')->where('reference', 'like', $refLike)
-                            ->pluck('commission_id')->all();
-                        DB::table('commission_payments')
-                            ->where('mode', 'payslip')->where('reference', 'like', $refLike)->delete();
-                        if ($freedCids && Schema::hasColumn('commissions', 'locked_at')) {
-                            $clear = ['locked_at' => null, 'updated_at' => now()];
-                            if (Schema::hasColumn('commissions', 'locked_by')) {
-                                $clear['locked_by'] = null;
-                            }
-                            if (Schema::hasColumn('commissions', 'lock_source')) {
-                                $clear['lock_source'] = null;
-                            }
-                            DB::table('commissions')->whereIn('id', $freedCids)->update($clear);
-                        }
-                    }
-                } catch (\Throwable $e) {
-                    // best-effort; a regenerate must not fail on the reversal.
-                }
-                // rev176 — reverse the OVERTIME side of the old run: entries that
-                // run marked 'paid' go back to approved, so the recompute re-pays them.
-                try {
-                    if (Schema::hasTable('overtime') && Schema::hasColumn('overtime', 'paid_run_id')) {
-                        $updO = ['status' => 'approved', 'paid_run_id' => null];
-                        if (Schema::hasColumn('overtime', 'updated_at')) {
-                            $updO['updated_at'] = now();
-                        }
-                        DB::table('overtime')->where('paid_run_id', $existing->id)->where('status', 'paid')->update($updO);
-                    }
-                } catch (\Throwable $e) {
-                    // best-effort; a regenerate must not fail on the reversal.
-                }
-                // rev176 — reverse the LOAN-EMI recoveries of the old run (ledger
-                // rows + installment counters; re-open a loan that run auto-closed).
-                try {
-                    if (Schema::hasTable('loan_recoveries')) {
-                        $recRows = DB::table('loan_recoveries')->where('run_id', $existing->id)->get(['id', 'loan_id']);
-                        if ($recRows->count() && Schema::hasColumn('loans', 'installments_paid')) {
-                            foreach ($recRows as $rr) {
-                                DB::table('loans')->where('id', $rr->loan_id)->where('installments_paid', '>', 0)->decrement('installments_paid');
-                                $ln = DB::table('loans')->where('id', $rr->loan_id)->first();
-                                $totL = $ln ? (int) (($ln->installments_total ?? null) ?: ($ln->tenure_months ?? 0)) : 0;
-                                if ($ln && ($ln->status ?? '') === 'closed' && ($totL <= 0 || (int) ($ln->installments_paid ?? 0) < $totL)) {
-                                    DB::table('loans')->where('id', $rr->loan_id)->update(['status' => 'active']);
-                                }
-                            }
-                        }
-                        DB::table('loan_recoveries')->where('run_id', $existing->id)->delete();
-                    }
-                } catch (\Throwable $e) {
-                    // best-effort; a regenerate must not fail on the reversal.
-                }
-                // rev181 — reverse the CLAWBACK recoveries of the old run: clear
-                // the run-keyed stamp so the recompute recovers them again.
-                try {
-                    if (Schema::hasTable('clawbacks') && Schema::hasColumn('clawbacks', 'recovered_run_id')) {
-                        $clr = ['recovered_run_id' => null, 'recovered_amount' => null, 'recovered_at' => null];
-                        if (Schema::hasColumn('clawbacks', 'updated_at')) {
-                            $clr['updated_at'] = now();
-                        }
-                        DB::table('clawbacks')->where('recovered_run_id', $existing->id)->update($clr);
-                    }
-                } catch (\Throwable $e) {
-                    // best-effort; a regenerate must not fail on the reversal.
-                }
+                $this->reverseRun((int) $existing->id);
             }
 
             $c = $this->compute($request, $company, $month, $lop);
@@ -2475,7 +2609,12 @@ class PayrollGenController extends Controller
             // from. monthMeta() already honours the Pay Cycle cut-off.
             [$pStart, , , $pEnd] = $this->monthMeta($month);
             $periodStart = $pStart->toDateString();
-            $periodEnd = $pEnd;
+            // rev191 — a run generated mid-period paid only up to the attendance
+            // cut. Store THAT as period_end, not the period's nominal end: the
+            // payslip then prints the window it was really built from, and next
+            // cycle's period-gap guard flags the days nobody has been paid for
+            // instead of letting them disappear.
+            $periodEnd = $c['meta']['attendanceEnd'];
             $payDate = $pEnd;
             // rev180 (Gap 7) — pay date from the Salary Schedules / Pay Cycle
             // masters: an active row with pay_day N pays on the Nth of the

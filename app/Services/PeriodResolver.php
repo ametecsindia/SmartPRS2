@@ -26,9 +26,14 @@ use Illuminate\Support\Facades\Schema;
  * NULL = calendar). A future client on 25→24 is one dropdown entry and zero
  * engine changes.
  *
- * Nothing in this class touches the payroll engine yet — wiring it into
- * PayrollGenController is the next, reviewed step, gated on calendar-mode
- * output staying byte-identical to rev181.
+ * rev191 — WIRED. This is now the single source of truth for "what dates does
+ * payroll month YYYY-MM cover for this company". Before rev191 four separate
+ * copies of that question existed (PayrollGenController::resolveCutoffDay,
+ * AppDataController::payDateFor, PayrollPeriodAudit and this class) reading two
+ * different columns, and every other module — ESS, Reports, Live Salary, the
+ * Simulator — simply assumed a calendar month. A 21st–20th company therefore
+ * saw one window on the payslip and a different one everywhere else. They all
+ * call window() now; nothing keeps a private opinion about the period.
  */
 class PeriodResolver
 {
@@ -225,6 +230,93 @@ class PeriodResolver
                 'period_end' => fn ($t) => $t->date('period_end')->nullable(),
             ]);
         }
+    }
+
+    /**
+     * rev191 — scan the Salary Schedules / Pay Cycle masters for one configured
+     * day value (cutoff_day or pay_day), by company NAME, which is how those
+     * tables actually key their rows. Lifted verbatim from
+     * PayrollGenController::resolveCutoffDay so the precedence is unchanged:
+     * salary_schedules before pay_cycles, a company-specific row before an
+     * all-company / blank one, newest id first. 0 = not configured.
+     */
+    public static function masterDay(?int $tenantId, ?string $companyName, string $column, int $min = 2, int $max = 28): int
+    {
+        try {
+            $cn = strtolower(trim((string) $companyName));
+            $bestGeneric = 0;
+            foreach (['salary_schedules', 'pay_cycles'] as $table) {
+                if (! Schema::hasTable($table) || ! Schema::hasColumn($table, $column)) {
+                    continue;
+                }
+                $rows = DB::table($table)
+                    ->when($tenantId && Schema::hasColumn($table, 'tenant_id'), fn ($q) => $q->where('tenant_id', $tenantId))
+                    ->when(Schema::hasColumn($table, 'status'), fn ($q) => $q->where(fn ($x) => $x->where('status', 'active')->orWhereNull('status')))
+                    ->orderByDesc('id')->limit(50)->get();
+                foreach ($rows as $row) {
+                    $rcn = strtolower(trim((string) ($row->company_name ?? '')));
+                    if ($rcn !== '' && $rcn !== 'all' && $rcn !== $cn) {
+                        continue;
+                    }
+                    $v = (int) ($row->{$column} ?? 0);
+                    if ($v < $min || $v > $max) {
+                        continue;
+                    }
+                    if ($rcn !== '' && $rcn !== 'all') {
+                        return $v;   // company-specific row wins
+                    }
+                    if ($bestGeneric === 0) {
+                        $bestGeneric = $v;
+                    }
+                }
+            }
+
+            return $bestGeneric;
+        } catch (\Throwable $e) {
+            return 0;
+        }
+    }
+
+    /**
+     * rev191 — THE call every module makes. One window, one label, one answer.
+     *
+     * @param  bool  $capToday  cap the end at today for an in-progress period,
+     *                          so "this month so far" means the same thing in
+     *                          Live Salary, ESS and the payroll engine.
+     * @return array ['start','end','days','label','end_day','pay_date',
+     *                'open' => period has not finished, 'attendance_end']
+     */
+    public static function window(?int $tenantId, ?string $companyName, string $payrollMonth, bool $capToday = false): array
+    {
+        $endDay = self::masterDay($tenantId, $companyName, 'cutoff_day');
+        $p = self::resolve($payrollMonth, $endDay >= 2 && $endDay <= 28 ? $endDay : null);
+        $today = Carbon::now()->startOfDay()->toDateString();
+        $p['open'] = $p['end'] > $today;
+        $p['attendance_end'] = ($capToday && $p['open']) ? $today : $p['end'];
+        $p['end_day'] = $endDay ?: null;
+        $payDay = self::masterDay($tenantId, $companyName, 'pay_day', 1, 28);
+        // A cut-off cycle pays inside the run month; a calendar cycle pays the
+        // month after. Same rule AppDataController::payDateFor has always used.
+        $p['pay_date'] = $payDay
+            ? ($endDay >= 2 && $endDay <= 28
+                ? self::clamp((int) substr($payrollMonth, 0, 4), (int) substr($payrollMonth, 5, 2), $payDay)->toDateString()
+                : self::clamp((int) substr($payrollMonth, 0, 4), (int) substr($payrollMonth, 5, 2), 1)->addMonthNoOverflow()->day(min($payDay, 28))->toDateString())
+            : null;
+
+        return $p;
+    }
+
+    /**
+     * rev191 — which payroll month TODAY belongs to for this company. With a
+     * 21st–20th cycle, 23 September sits inside 21 Sep → 20 Oct, i.e. the
+     * OCTOBER run. Live Salary and ESS used now()->format('Y-m') and were a
+     * month out for every window client.
+     */
+    public static function currentMonthFor(?int $tenantId, ?string $companyName, $on = null): string
+    {
+        $endDay = self::masterDay($tenantId, $companyName, 'cutoff_day');
+
+        return self::payrollMonthFor($on ?: Carbon::now(), $endDay >= 2 && $endDay <= 28 ? $endDay : null);
     }
 
     /**

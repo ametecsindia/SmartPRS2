@@ -194,11 +194,33 @@ class MobileDeviceController extends Controller
         abort_unless($request->user()?->hasAnyRole(['super_admin', 'admin', 'hr_manager']), 403, 'Admin only.');
     }
 
+    /**
+     * Which tenant's devices this admin should see. register()/status() resolve
+     * the tenant from the HOST the request came in on (resolveTenant() →
+     * AuthController::tenantByHost, matched against tenants.custom_domain) — a
+     * phone that registers at smartprs.stormfinancial.in lands under whichever
+     * tenant row has that custom_domain, regardless of what the admin user's own
+     * `tenant_id` column happens to be. If the admin's account was created under
+     * a different tenant row (multiple tenants for one client, or the account
+     * predates the custom_domain being set), the two drift apart and every
+     * pending device silently vanishes from this list. Prefer the same
+     * host-based resolution register() uses so "device registered on this
+     * domain" and "devices visible to the admin viewing this domain" always
+     * agree; fall back to the admin's own tenant_id when the host has no
+     * custom_domain match (e.g. a super_admin on the shared/base domain).
+     */
+    private function scopeTenantId(Request $request): ?int
+    {
+        $byHost = AuthController::tenantByHost($request->getHost());
+
+        return $byHost?->id ?? $request->user()->tenant_id;
+    }
+
     public function index(Request $request)
     {
         self::ensure();
         $this->guard($request);
-        $tid = $request->user()->tenant_id;
+        $tid = $this->scopeTenantId($request);
         $rows = DB::table('mobile_devices')
             ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
             ->orderByRaw("FIELD(status,'pending','approved','rejected')")
@@ -219,7 +241,7 @@ class MobileDeviceController extends Controller
     {
         self::ensure();
         $this->guard($request);
-        $tid = $request->user()->tenant_id;
+        $tid = $this->scopeTenantId($request);
         $row = DB::table('mobile_devices')->where('id', $id)->when($tid, fn ($q) => $q->where('tenant_id', $tid))->first();
         if (! $row) {
             return response()->json(['ok' => false, 'error' => 'Device not found.'], 404);
@@ -238,7 +260,7 @@ class MobileDeviceController extends Controller
         self::ensure();
         $this->guard($request);
         $v = $request->validate(['reason' => ['nullable', 'string', 'max:191']]);
-        $tid = $request->user()->tenant_id;
+        $tid = $this->scopeTenantId($request);
         $row = DB::table('mobile_devices')->where('id', $id)->when($tid, fn ($q) => $q->where('tenant_id', $tid))->first();
         if (! $row) {
             return response()->json(['ok' => false, 'error' => 'Device not found.'], 404);

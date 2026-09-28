@@ -562,8 +562,16 @@ class SalaryApprovalController extends Controller
 
         $map = [
             'approve' => ['need' => $hr, 'from' => ['pending', 'on_hold', 'in_review'], 'to' => 'approved', 'by' => 'approved_by', 'at' => 'approved_at', 'err' => 'HR/Admin only'],
-            'reject' => ['need' => $hr, 'from' => ['pending', 'on_hold', 'in_review'], 'to' => 'rejected', 'by' => null, 'at' => null, 'err' => 'HR/Admin only'],
-            'hold' => ['need' => $hr, 'from' => ['pending', 'in_review'], 'to' => 'on_hold', 'by' => 'held_by', 'at' => 'held_at', 'err' => 'HR/Admin only'],
+            // rev191 — reject and hold now reach an APPROVED line too. Approved
+            // means "cleared for payment", not paid: stopping a line in the gap
+            // between approval and disbursement is the most useful thing this
+            // screen can do, and it was the one stage that could not. The screen
+            // offered the buttons anyway, so every attempt came back "0 line(s)
+            // rejected, N skipped". Once money has moved (disbursed / paid /
+            // acknowledged) it stays out of reach — undoing that needs a
+            // reversal, not a status flip.
+            'reject' => ['need' => $hr, 'from' => ['pending', 'on_hold', 'in_review', 'approved'], 'to' => 'rejected', 'by' => null, 'at' => null, 'err' => 'HR/Admin only'],
+            'hold' => ['need' => $hr, 'from' => ['pending', 'in_review', 'approved'], 'to' => 'on_hold', 'by' => 'held_by', 'at' => 'held_at', 'err' => 'HR/Admin only'],
             'review' => ['need' => $hr, 'from' => ['pending', 'on_hold'], 'to' => 'in_review', 'by' => 'reviewed_by', 'at' => 'reviewed_at', 'err' => 'HR/Admin only'],
             'disburse' => ['need' => $fin, 'from' => ['approved'], 'to' => 'disbursed', 'by' => 'disbursed_by', 'at' => 'disbursed_at', 'err' => 'Finance/Admin only'],
         ];
@@ -717,7 +725,12 @@ class SalaryApprovalController extends Controller
                 'ok' => true,
                 'done' => $done,
                 'skipped' => $skipped,
-                'message' => $done.' line(s) '.$v['action'].'d'.($skipped ? ', '.$skipped.' skipped (not allowed at their stage)' : ''),
+                // rev191 — "reject" + "d" read "rejectd". Past tense per action.
+                'message' => $done.' line(s) '.([
+                    'approve' => 'approved', 'reject' => 'rejected', 'hold' => 'put on hold',
+                    'review' => 'sent for review', 'disburse' => 'disbursed',
+                ][$v['action']] ?? $v['action'].'d')
+                    .($skipped ? ', '.$skipped.' skipped (already disbursed or paid)' : ''),
             ]);
         } catch (\Throwable $e) {
             return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);

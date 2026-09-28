@@ -27,6 +27,13 @@ class AttendanceReportController extends Controller
     private const SHIFT_END = '18:30';
     private const STANDARD_WORK_MIN = 480; // 8h net of break
 
+    // ponytail: cap the no-punch day-by-day enumeration (see buildReport) to a
+    // sane range — it's O(active employees × days), unlike the punch-based
+    // rows above it which are O(punch rows). A multi-year range would otherwise
+    // try to build a huge in-memory/JSON matrix. Raise this (or paginate) if a
+    // customer genuinely needs a longer range than ~3 months in one call.
+    private const MAX_ENUMERATE_DAYS = 100;
+
     private function ensureTables(): void
     {
         if (! Schema::hasTable('attendance_logs')) {
@@ -151,6 +158,7 @@ class AttendanceReportController extends Controller
                 'date' => $date,
                 'company' => $m['company'] ?? '',
                 'branch' => $m['branch'] ?? '',
+                'department' => $m['department'] ?? '',
                 'team' => $m['team'] ?? '',
                 'reporting' => $m['reporting'] ?? '',
                 'leader' => $m['leader'] ?? '',
@@ -159,6 +167,93 @@ class AttendanceReportController extends Controller
                 'rating' => $rt->rating ?? null,
                 'remarks' => $rt->remarks ?? '',
             ], $summary, $flags);
+        }
+
+        // Fill in every (employee, day) in the range that has NO punch, so the
+        // "Daily rows" list stops silently skipping weekly-offs, holidays,
+        // approved leave and genuine absences — it only ever showed a row when
+        // a punch existed. Classified via AbsenceService::classifyNoPunchDay(),
+        // the SAME holiday/leave/weekly-off rules as the F10 absence-notify
+        // sweep, so the two can never disagree (see AbsenceService.php).
+        try {
+            $rangeDays = Carbon::parse($from)->diffInDays(Carbon::parse($to)) + 1;
+            if ($rangeDays > 0 && $rangeDays <= self::MAX_ENUMERATE_DAYS) {
+                $holidaySet = \App\Services\AbsenceService::holidaysInRange($tenantId, $from, $to);
+                $leavesByEmp = \App\Services\AbsenceService::leavesInRange($tenantId, $from, $to);
+                $workingDays = [1, 2, 3, 4, 5, 6];
+                try {
+                    $workingDays = array_map('intval', (array) (\App\Services\AbsenceService::config($tenantId)['working_days'] ?? $workingDays));
+                } catch (\Throwable $e) {
+                    // config() is already fail-soft, but keep the default either way
+                }
+
+                // Active-ish employees in scope (same leniency ensureDemo() already
+                // uses in this file: exclude only an explicit 'exited' status).
+                // 'shift' is selected only when the column exists — same tolerance
+                // employeeMeta() already applies to this optional column.
+                $scopeCols = array_values(array_filter(
+                    ['id', 'emp_code', 'name', 'shift'],
+                    fn ($c) => $c === 'shift' ? Schema::hasColumn('employees', 'shift') : true
+                ));
+                $scopeEmps = DB::table('employees')
+                    ->when($tenantId, fn ($q) => $q->where('tenant_id', $tenantId))
+                    ->whereNull('deleted_at')
+                    ->where(function ($q) {
+                        $q->whereNull('status')->orWhereRaw('LOWER(status) <> ?', ['exited']);
+                    })
+                    ->when($selfScope, fn ($q) => $q->where('emp_code', $selfScope['code']))
+                    ->get($scopeCols);
+
+                foreach ($scopeEmps as $e) {
+                    $code = $e->emp_code;
+                    $m = $meta[$code] ?? [];
+                    $empName = ($m['name'] ?? '') ?: ($e->name ?: $code);
+                    for ($d = Carbon::parse($from); $d->lte(Carbon::parse($to)); $d->addDay()) {
+                        $date = $d->toDateString();
+                        if (isset($groups[$code.'|'.$date])) {
+                            continue; // already has a detailed punch row above
+                        }
+                        $status = \App\Services\AbsenceService::classifyNoPunchDay(
+                            (array) $e, $date, $holidaySet, $leavesByEmp, $shiftDefs, $rosterMap, $workingDays
+                        );
+                        $sh = $shiftDefs
+                            ? \App\Services\ShiftResolver::resolve($shiftDefs, $rosterMap, $empName, $m['shift'] ?? null, $date)
+                            : null;
+                        $rows[] = [
+                            'emp_code' => $code,
+                            'emp_name' => $empName,
+                            'date' => $date,
+                            'company' => $m['company'] ?? '',
+                            'branch' => $m['branch'] ?? '',
+                            'department' => $m['department'] ?? '',
+                            'team' => $m['team'] ?? '',
+                            'reporting' => $m['reporting'] ?? '',
+                            'leader' => $m['leader'] ?? '',
+                            'shift_name' => $sh['name'] ?? '',
+                            'weekoff' => $status === 'weekly_off',
+                            'rating' => null,
+                            'remarks' => '',
+                            'status' => $status,   // absent|weekly_off|holiday|on_leave|half_day
+                            // ponytail: summarise() (the punch-row path just above) never
+                            // returns null for these — always a formatted string, '—' when
+                            // empty — and the frontend concatenates them straight into HTML
+                            // with no null guard. Match that convention here or these cells
+                            // literally render the text "null".
+                            'first_in' => '—', 'first_in_min' => null,
+                            'last_out' => '—', 'last_in' => '—',
+                            'total_time' => '—', 'work_min' => 0,
+                            'break_time' => '—', 'break_min' => 0,
+                            'drawback_time' => '—',
+                            'early_min' => 0, 'overtime_min' => 0,
+                            'in_count' => 0, 'out_count' => 0,
+                            'late_min' => 0, 'late_level' => '',
+                            'break_over' => false, 'break_budget' => 0,
+                        ];
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            // Day-by-day fill-in is best-effort; the punch-based rows above still render.
         }
 
         // Sort by employee name then date.
@@ -185,7 +280,7 @@ class AttendanceReportController extends Controller
         // Only select columns that actually exist in this deployment's schema —
         // the live employees table may predate the hierarchy columns.
         $want = ['emp_code', 'company_id', 'name', 'branch_id', 'team_id', 'reporting_manager_id',
-            'branch', 'team', 'reporting_manager', 'team_leader', 'shift'];
+            'branch', 'team', 'reporting_manager', 'team_leader', 'shift', 'department_id'];
         $cols = array_values(array_filter($want, fn ($c) => Schema::hasColumn('employees', $c)));
         if (! in_array('emp_code', $cols, true)) {
             return [];
@@ -194,6 +289,7 @@ class AttendanceReportController extends Controller
 
         $companies = Schema::hasTable('companies') ? DB::table('companies')->pluck('name', 'id') : collect();
         $branchNames = Schema::hasTable('branches') ? DB::table('branches')->pluck('name', 'id') : collect();
+        $deptNames = Schema::hasTable('departments') ? DB::table('departments')->pluck('name', 'id') : collect();   // 26-Sep muster filter
         $teamNames = collect();
         $teamLeaderId = collect();
         if (Schema::hasTable('teams')) {
@@ -228,6 +324,7 @@ class AttendanceReportController extends Controller
             $out[$e->emp_code] = [
                 'company' => $companies[$e->company_id] ?? '',
                 'branch' => $branch,
+                'department' => ($has('department_id') && $e->department_id) ? ($deptNames[$e->department_id] ?? '') : '',
                 'team' => $team,
                 'reporting' => $reporting,
                 'leader' => $leader,
@@ -573,6 +670,7 @@ class AttendanceReportController extends Controller
                 'date' => $date,
                 'company' => $m['company'] ?? '',
                 'branch' => $m['branch'] ?? '',
+                'department' => $m['department'] ?? '',
                 'team' => $m['team'] ?? '',
                 'reporting' => $m['reporting'] ?? '',
                 'leader' => $m['leader'] ?? '',

@@ -1390,6 +1390,17 @@ CSS;
         'tenants': 'fa-building-user', 'plans': 'fa-tags', 'subscriptions': 'fa-arrows-rotate', 'invoices': 'fa-file-invoice', 'payments': 'fa-indian-rupee-sign', 'gateways': 'fa-credit-card', 'demo-requests': 'fa-key'
     };
     function decorateSubmenuIcons() {
+        // 26-Sep-2026 (Ejaz): swap the two attendance sidebar labels. Screen ids are unchanged
+        // (att-daily / att-report keep their routes, permissions and icons) - only the text moves.
+        var spAttLabels = { 'att-daily': 'Attendance Report', 'att-report': 'Daily Attendance' };
+        Object.keys(spAttLabels).forEach(function (id) {
+            document.querySelectorAll('.sidebar .nav-item[data-id="' + id + '"]').forEach(function (el) {
+                for (var k = 0; k < el.childNodes.length; k++) {
+                    var nd = el.childNodes[k];
+                    if (nd.nodeType === 3 && nd.nodeValue.trim()) { nd.nodeValue = spAttLabels[id]; return; }
+                }
+            });
+        });
         if (!document.getElementById('sp-subic-css')) {
             var st = document.createElement('style');
             st.id = 'sp-subic-css';
@@ -3185,12 +3196,12 @@ CSS;
     function wireCustomScreens() {
         // Repurpose the placeholder "Attendance Report" card screen into a live
         // daily punch report (the nav item already exists in the prototype).
-        try { if (typeof SCREENS !== 'undefined' && SCREENS['att-report']) { SCREENS['att-report'] = { title: 'Attendance Report', type: 'custom' }; } } catch (e) {}
+        try { if (typeof SCREENS !== 'undefined' && SCREENS['att-report']) { SCREENS['att-report'] = { title: 'Daily Attendance', type: 'custom' }; } } catch (e) {}
         try { if (typeof SCREENS !== 'undefined') { SCREENS['emp-archived'] = { title: 'Backed up / Old data', type: 'custom' }; } } catch (e) {}
         // AS-DL: register the on-prem "Updates & Licence" screen so render() shows it (was blank — unregistered).
         try { if (typeof SCREENS !== 'undefined') { SCREENS['sys-updates'] = { title: 'Updates & Licence', type: 'custom' }; } } catch (e) {}
         // Turn the placeholder Daily Attendance card screen into a live today view.
-        try { if (typeof SCREENS !== 'undefined' && SCREENS['att-daily']) { SCREENS['att-daily'] = { title: 'Daily Attendance', type: 'custom' }; } } catch (e) {}
+        try { if (typeof SCREENS !== 'undefined' && SCREENS['att-daily']) { SCREENS['att-daily'] = { title: 'Attendance Report', type: 'custom' }; } } catch (e) {}
         // Company-wise branding editor.
         try { if (typeof SCREENS !== 'undefined' && SCREENS['branding']) { SCREENS['branding'] = { title: 'Company Branding', type: 'custom' }; } } catch (e) {}
         // Repurpose the "Company Emails" list nav into the SMTP / email settings screen.
@@ -4183,6 +4194,10 @@ CSS;
         var d = window.__MOBDEV;
         if (!d) { setTimeout(function () { if (!window.__MOBDEV) { mobDevLoad(); } }, 10); return pghead('Mobile Devices', 'Loading…', '') + '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">Loading devices…</div></div>'; }
         var rows = d.rows || [];
+        // rev: a 403 (role mismatch) or fetch failure both land here with no
+        // rows — previously that silently rendered as "No devices yet", which
+        // looks identical to a real empty list and hides the actual problem.
+        var errBanner = (! d.ok) ? ('<div class="card" style="padding:14px 16px;margin-bottom:12px;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;font-size:13px"><i class="fas fa-triangle-exclamation"></i> Could not load devices: ' + (d.error || d.message || 'unknown error') + '</div>') : '';
         var body = rows.map(function (x) {
             var act = '';
             if (x.status === 'pending' || x.status === 'rejected') {
@@ -4202,7 +4217,8 @@ CSS;
                 + '<td style="white-space:nowrap">' + act + '</td>'
                 + '</tr>';
         }).join('');
-        return pghead('Mobile Devices', 'Approve the phones that may use the SmartPRS app. Only an approved device can sign in and punch — revoke a lost phone to lock it out instantly.', '<button class="btn btn-outline" onclick="window.__MOBDEV=null;mobDevLoad()"><i class="fas fa-rotate"></i> Refresh</button>')
+        return errBanner
+            + pghead('Mobile Devices', 'Approve the phones that may use the SmartPRS app. Only an approved device can sign in and punch — revoke a lost phone to lock it out instantly.', '<button class="btn btn-outline" onclick="window.__MOBDEV=null;mobDevLoad()"><i class="fas fa-rotate"></i> Refresh</button>')
             + '<div class="card" style="padding:0;overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr><th>Device</th><th>Code</th><th>Registered</th><th>Status</th><th></th></tr></thead><tbody>'
             + (body || '<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:30px 18px"><div style="font-size:14px;color:var(--text2);font-weight:600;margin-bottom:6px"><i class="fas fa-mobile-screen-button" style="margin-right:6px"></i>No devices yet &mdash; phones enrol themselves</div><div style="font-size:12.5px;max-width:540px;margin:0 auto;line-height:1.6">There is no manual &ldquo;add device&rdquo; step, by design. Ask each employee to open the <b>SmartPRS mobile app</b>, enter your workspace web address and sign in &mdash; their phone then appears here as <b>Pending</b> for you to <b>Approve</b> or <b>Reject</b>. Only devices you approve can sign in and punch, so you stay in control.</div></td></tr>')
             + '</tbody></table></div>';
@@ -6310,6 +6326,13 @@ CSS;
             if (typeof toast === 'function') { toast(j.message || 'Draft payroll created'); }
             window.__PG.preview = null; window.__SALRUNS = null;
             if (typeof go === 'function') { go('salary-approval'); } else if (typeof render === 'function') { render(); }
+        } else if (j && j.needs_confirm === 'no_attendance') {
+            // rev191 — the attendance feed looks dead. Never auto-retry: make the
+            // person say out loud that this company is to be paid without it.
+            var pgx = window.__PG;
+            if (window.confirm(String(j.error || 'No attendance found.') + '  ---  Pay this company WITHOUT attendance anyway?')) {
+                pgSubmit({ company_id: pgx.company, month: pgx.month, regenerate: (pgx.preview && pgx.preview.exists) ? 1 : 0, confirm_no_attendance: 1 }, pgDone);
+            }
         } else if (typeof toast === 'function') { toast((j && j.error) || 'Could not generate'); }
     }
     window.pgGenerate = function () {
@@ -6317,12 +6340,15 @@ CSS;
         var msg = p.exists
             ? ('Replace the existing ' + (p.existingStatus || 'draft') + ' run for ' + p.monthLabel + ' with a fresh draft of ' + p.totals.count + ' employees?')
             : ('Create a draft payroll for ' + p.monthLabel + ' — ' + p.totals.count + ' employees, net ' + inr(p.totals.net) + '?');
+        // rev191 — spell out that an unfinished period pays only to date.
+        if (p.periodOpen) { msg += '  ---  ' + p.monthLabel + ' has not ended: this run covers ' + p.periodStart + ' to ' + p.attendanceEnd + ' only and pays what has been earned so far.'; }
         if (!window.confirm(msg)) { return; }
-        pgSubmit({ company_id: pg.company, month: pg.month, lop: pg.lop ? 1 : 0, regenerate: p.exists ? 1 : 0 }, pgDone);
+        pgSubmit({ company_id: pg.company, month: pg.month, regenerate: p.exists ? 1 : 0 }, pgDone);
     };
     window.pgNote = function (i) { var el = document.getElementById('pgn_' + i); if (el) { el.style.display = el.style.display === 'none' ? '' : 'none'; } };
     function salaryGenScreen() {
-        if (!window.__PG) { window.__PG = { month: pgDefaultMonth(), company: '', lop: false, preview: null }; }
+        // rev191 — attendance proration is always on; the server ignores this flag now.
+        if (!window.__PG) { window.__PG = { month: pgDefaultMonth(), company: '', lop: true, preview: null }; }
         var pg = window.__PG;
         var comps = (typeof DB !== 'undefined' && DB.companies) || [];
         if (!pg.company && comps.length) { pg.company = comps[0].id; }
@@ -6330,7 +6356,8 @@ CSS;
         var lbl = 'font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:4px';
         var compSel = '<select id="pg_company" onchange="pgSet(' + "'company'" + ',this.value)" style="' + inp + ';min-width:200px">' + comps.map(function (c) { return '<option value="' + c.id + '"' + (String(c.id) === String(pg.company) ? ' selected' : '') + '>' + c.name + '</option>'; }).join('') + '</select>';
         var monthInp = '<input id="pg_month" type="month" value="' + pg.month + '" onchange="pgSet(' + "'month'" + ',this.value)" style="' + inp + '">';
-        var lopChk = '<label style="display:flex;align-items:center;gap:7px;font-size:13px;color:var(--text2);cursor:pointer"><input type="checkbox" ' + (pg.lop ? 'checked' : '') + ' onchange="pgSet(' + "'lop'" + ',this.checked)"> Prorate by attendance (LOP)</label>';
+        // rev191 — no longer a choice: every run is scored against real attendance.
+        var lopChk = '<div style="display:flex;align-items:center;gap:7px;font-size:13px;color:#15803d" title="Salary is always prorated by attendance. Approved paid leave counts as present."><i class="fas fa-fingerprint"></i> Prorated by attendance (always on)</div>';
         var controls = '<div class="card" style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:16px;margin-bottom:14px">'
             + '<div><label style="' + lbl + '">Company</label>' + compSel + '</div>'
             + '<div><label style="' + lbl + '">Month</label>' + monthInp + '</div>'
@@ -6350,7 +6377,9 @@ CSS;
         var notes = [];
         if (p.exists) { notes.push('<b style="color:#b45309">A ' + (p.existingStatus || 'draft') + ' run already exists for ' + p.monthLabel + '</b> — generating will replace the draft.'); }
         if (p.skipped) { notes.push(p.skipped + ' employee(s) skipped (no CTC set).'); }
-        if (p.lop) { notes.push('LOP on: ' + p.workingDays + ' working days of ' + p.daysInMonth + ' (excl. weekly offs' + (p.holidays ? ' + ' + p.holidays + ' holiday(s)' : '') + '). Approved paid leave counts as present; employees with no punches are paid in full. Non-working days: holidays are added/deleted in Leave &rarr; Holidays; weekly offs (Sunday / 2nd-4th Saturday&hellip;) in Statutory &amp; Compliance &rarr; PF &amp; ESIC &rarr; Edit Rates.'); }
+        if (p.periodOpen) { notes.push('<b style="color:#b45309">' + p.monthLabel + ' has not ended yet</b> — attendance is counted to ' + p.attendanceEnd + ' only (' + p.workingSoFar + ' of ' + p.workingDays + ' working days elapsed). These figures are salary EARNED TO DATE, not a full month. Generating now records the run as paid up to ' + p.attendanceEnd + '; the remaining days stay unpaid until you run them.'); }
+        if (p.hasAttendance === false) { notes.push('<b style="color:#b91c1c">No attendance found for any employee in this window</b> — check the biometric sync before generating, or every salary will compute as zero.'); }
+        if (p.lop) { notes.push('Attendance proration: ' + p.workingDays + ' working days of ' + p.daysInMonth + ' (excl. weekly offs' + (p.holidays ? ' + ' + p.holidays + ' holiday(s)' : '') + '). Approved paid leave counts as present; an employee with no punches and no approved leave is treated as absent. Non-working days: holidays are added/deleted in Leave &rarr; Holidays; weekly offs (Sunday / 2nd-4th Saturday&hellip;) in Statutory &amp; Compliance &rarr; PF &amp; ESIC &rarr; Edit Rates.'); }
         if (notes.length) { out += '<div class="card" style="padding:12px 16px;margin-bottom:14px;font-size:13px;color:var(--text2);background:#fffbeb;border:1px solid #fde68a">' + notes.join(' · ') + '</div>'; }
         var th = ['Code', 'Employee']; if (p.lop) { th.push('Present'); th.push('Leave'); }
         th = th.concat(['Basic', 'HRA', 'Gross', 'PF', 'ESI', 'PT', 'Deductions', 'Net']);
@@ -11538,26 +11567,34 @@ CSS;
         var f = document.getElementById('att_from'); var t = document.getElementById('att_to');
         attLoad((f && f.value) || attToday(), (t && t.value) || attToday());
     };
+    var EMDASH = String.fromCharCode(8212);
     window.attDownload = function () {
         var rep = window.__ATTREPORT; if (!rep || !rep.rows) { return; }
         var head = ['Employee', 'Code', 'Branch', 'Team', 'Manager', 'Leader', 'Date', 'Shift', 'First In', 'Last Out', 'Last In', 'Total Time', 'Break Time', 'Early Min', 'Overtime Min', 'IN Count', 'OUT Count', 'Rating', 'Remarks'];
         var lines = [head.join(',')];
         attApplyFilters(rep.rows).forEach(function (r) {
-            var row = [r.emp_name, r.emp_code, (r.branch || ''), (r.team || ''), (r.reporting || ''), (r.leader || ''), r.date, (r.weekoff ? 'Week-off' : (r.shift_name || '')), r.first_in, r.last_out, r.last_in, r.total_time, r.break_time, r.early_min, r.overtime_min, r.in_count, r.out_count, (r.rating || ''), (r.remarks || '').replace(/[,\\r\\n]/g, ' ')];
-            lines.push(row.map(function (x) { return '"' + String(x) + '"'; }).join(','));
+            var row = [r.emp_name, r.emp_code, (r.branch || ''), (r.team || ''), (r.reporting || ''), (r.leader || ''), r.date, attStatusText(r), r.first_in, r.last_out, r.last_in, r.total_time, r.break_time, r.early_min, r.overtime_min, r.in_count, r.out_count, (r.rating || ''), (r.remarks || '').replace(/[,\\r\\n]/g, ' ')];
+            // rev191 — the screen's em-dash placeholder is "no value"; in a
+            // spreadsheet it is just a character to trip over. Blank it.
+            lines.push(row.map(function (x) { var s = String(x); if (s === EMDASH) { s = ''; } return '"' + s + '"'; }).join(','));
         });
-        var blob = new Blob([lines.join(String.fromCharCode(10))], { type: 'text/csv' });
+        // rev191 — lead with a UTF-8 BOM. Without it Excel opens the file as
+        // ANSI and every non-ASCII character arrives mojibaked: the em dash
+        // came out as "a€" and rupee signs would too.
+        var blob = new Blob([String.fromCharCode(65279) + lines.join(String.fromCharCode(10))], { type: 'text/csv;charset=utf-8' });
         var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'attendance-report.csv'; a.click();
     };
     // Build a <select> of the distinct values of a field across the report rows.
-    window.__attFilters = { branch: '', team: '', reporting: '', leader: '' };
+    window.__attFilters = { branch: '', team: '', reporting: '', leader: '', emp_code: '' };
     window.attSetFilter = function (k, v) { window.__attFilters[k] = v; if (typeof render === 'function') { render(); } };
     function attDistinct(rows, k) {
         var seen = {}; var out = [];
         rows.forEach(function (r) { var v = r[k]; if (v && !seen[v]) { seen[v] = 1; out.push(v); } });
         out.sort(); return out;
     }
-    function attFilterSelect(label, k, rows) {
+    // rev191 — labelOf(value) lets a filter show something friendlier than the
+    // value it filters on (Employee filters on emp_code but reads as a name).
+    function attFilterSelect(label, k, rows, labelOf) {
         var cur = window.__attFilters[k] || '';
         var vals = attDistinct(rows, k);
         // rev 86b (Ejaz): no punches in the period → the filters looked like a
@@ -11572,7 +11609,7 @@ CSS;
             vals.sort();
         }
         var opts = '<option value="">All</option>' + vals.map(function (v) {
-            return '<option value="' + v.replace(/"/g, '&quot;') + '"' + (v === cur ? ' selected' : '') + '>' + v + '</option>';
+            return '<option value="' + v.replace(/"/g, '&quot;') + '"' + (v === cur ? ' selected' : '') + '>' + (labelOf ? labelOf(v) : v) + '</option>';
         }).join('');
         return attField(label, '<select onchange="attSetFilter(\'' + k + '\',this.value)" style="' + attInp + '">' + opts + '</select>');
     }
@@ -11580,8 +11617,39 @@ CSS;
         var f = window.__attFilters;
         return rows.filter(function (r) {
             return (!f.branch || r.branch === f.branch) && (!f.team || r.team === f.team)
-                && (!f.reporting || r.reporting === f.reporting) && (!f.leader || r.leader === f.leader);
+                && (!f.reporting || r.reporting === f.reporting) && (!f.leader || r.leader === f.leader)
+                && (!f.emp_code || r.emp_code === f.emp_code);
         });
+    }
+    // rev: status badge for a day with no punch (weekly-off/holiday/leave/
+    // half-day/absent) — falls back to the shift name for a normal punch day.
+    // rev191 — one status table for the screen AND the CSV. The export used to
+    // build its own Shift cell and had no idea about these states, so an ABSENT
+    // day exported as an empty cell.
+    var ATT_STATUS = {
+        weekly_off: ['Week-off', '#64748b'],
+        holiday: ['Holiday', '#0891b2'],
+        on_leave: ['On leave', '#7c3aed'],
+        half_day: ['Half day', '#f59e0b'],
+        absent: ['Absent', '#dc2626']
+    };
+    // r.weekoff also fires for a PUNCHED day that's a roster week-off
+    // (someone came in anyway) — r.status is only set on the no-punch
+    // fill-in rows this screen didn't used to have.
+    function attStatusOf(r) { return ATT_STATUS[r.status] || (r.weekoff ? ATT_STATUS.weekly_off : null); }
+    function attStatusText(r) { var b = attStatusOf(r); return b ? b[0] : (r.shift_name || ''); }
+    function attStatusBadge(r) {
+        var b = attStatusOf(r);
+        if (!b) { return r.shift_name || '<span style="color:var(--text3)">—</span>'; }
+        return '<span style="background:' + b[1] + ';color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;font-weight:700">' + b[0].toUpperCase() + '</span>';
+    }
+    // Small map-pin link for a punch's captured GPS (lat/lng nullable — only
+    // self-punches with location permission granted carry these; biometric/
+    // manual punches never do). Opens Google Maps in a new tab — no map
+    // library needed just to show one point.
+    function attPunchPin(lat, lng, title) {
+        if (lat == null || lng == null) { return ''; }
+        return ' <a href="https://maps.google.com/?q=' + lat + ',' + lng + '" target="_blank" rel="noopener" title="' + title + '" style="margin-left:4px;color:var(--accent)"><i class="fas fa-location-dot" style="font-size:11px"></i></a>';
     }
     function attReportScreen() {
         var rep = window.__ATTREPORT;
@@ -11589,10 +11657,16 @@ CSS;
         if (!rep) { setTimeout(function () { if (!window.__ATTREPORT) { attLoad(from, to); } }, 10); }
         var allRows = (rep && rep.rows) || [];
         var pdfQ = '?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to);
-        ['branch', 'team', 'reporting', 'leader'].forEach(function (k) { if (window.__attFilters[k]) { pdfQ += '&' + k + '=' + encodeURIComponent(window.__attFilters[k]); } });
+        ['branch', 'team', 'reporting', 'leader', 'emp_code'].forEach(function (k) { if (window.__attFilters[k]) { pdfQ += '&' + k + '=' + encodeURIComponent(window.__attFilters[k]); } });
+        // rev191 — Employee filter. Filters on emp_code (names repeat; codes do
+        // not) and reads as "Name (CODE)".
+        var attNameOf = {};
+        allRows.forEach(function (r) { if (r.emp_code && !attNameOf[r.emp_code]) { attNameOf[r.emp_code] = r.emp_name || r.emp_code; } });
+        ((typeof DB !== 'undefined' && DB.employees) || []).forEach(function (e2) { if (e2.emp_code && !attNameOf[e2.emp_code]) { attNameOf[e2.emp_code] = e2.name || e2.emp_code; } });
         var controls = '<div class="card" style="padding:16px;margin-bottom:16px;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">'
             + attField('From', '<input type="date" id="att_from" value="' + from + '" style="' + attInp + '">')
             + attField('To', '<input type="date" id="att_to" value="' + to + '" style="' + attInp + '">')
+            + attFilterSelect('Employee', 'emp_code', allRows, function (v) { return (attNameOf[v] || v) + ' (' + v + ')'; })
             + attFilterSelect('Branch', 'branch', allRows)
             + attFilterSelect('Team', 'team', allRows)
             + attFilterSelect('Manager', 'reporting', allRows)
@@ -11601,10 +11675,10 @@ CSS;
             + '<button class="btn btn-outline" onclick="attDownload()"><i class="fas fa-download"></i> Download CSV</button>'
             + '<a class="btn btn-outline" href="' + cfg.attPdfUrl + pdfQ + '" target="_blank"><i class="fas fa-file-pdf"></i> Download PDF</a>'
             + '</div>';
-        if (!rep || !rep.rows) { return pghead('Attendance Report', 'Daily punch summary', '') + controls + '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">Loading…</div></div>'; }
-        if (rep.error) { return pghead('Attendance Report', 'Daily punch summary', '') + controls + '<div class="card"><div style="padding:30px;color:var(--red)"><b>Could not build the report.</b><br><span style="font-size:12px;color:var(--text2)">' + String(rep.error) + '</span></div></div>'; }
+        if (!rep || !rep.rows) { return pghead('Daily Attendance', 'Daily punch summary', '') + controls + '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">Loading…</div></div>'; }
+        if (rep.error) { return pghead('Daily Attendance', 'Daily punch summary', '') + controls + '<div class="card"><div style="padding:30px;color:var(--red)"><b>Could not build the report.</b><br><span style="font-size:12px;color:var(--text2)">' + String(rep.error) + '</span></div></div>'; }
         var rows = attApplyFilters(allRows);
-        if (!rows.length) { return pghead('Attendance Report', 'Daily punch summary', '') + controls + '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">No punch logs match this period/filter.</div></div>'; }
+        if (!rows.length) { return pghead('Daily Attendance', 'Daily punch summary', '') + controls + '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">No punch logs match this period/filter.</div></div>'; }
         var head = ['Employee', 'Branch', 'Team', 'Manager', 'Leader', 'Date', 'Shift', 'First In', 'Last Out', 'Total Time', 'Break Time', 'IN', 'OUT', 'Rating', 'Logs'];
         var th = head.map(function (h) { return '<th style="padding:10px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3);white-space:nowrap">' + h + '</th>'; }).join('');
         var dash = '<span style="color:var(--text3)">—</span>';
@@ -11622,9 +11696,9 @@ CSS;
                 + '<td style="' + c + '">' + (r.reporting || dash) + '</td>'
                 + '<td style="' + c + '">' + (r.leader || dash) + '</td>'
                 + '<td style="' + c + '">' + r.date + '</td>'
-                + '<td style="' + c + ';font-size:12px">' + (r.weekoff ? '<span style="background:#64748b;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;font-weight:700">WEEK-OFF</span>' : (r.shift_name || dash)) + '</td>'
-                + '<td style="' + c + ';color:' + lateCol + ';font-weight:600">' + r.first_in + lateBadge + '</td>'
-                + '<td style="' + c + ';color:var(--red);font-weight:600">' + r.last_out + '</td>'
+                + '<td style="' + c + ';font-size:12px">' + attStatusBadge(r) + '</td>'
+                + '<td style="' + c + ';color:' + lateCol + ';font-weight:600">' + r.first_in + lateBadge + attPunchPin(r.first_in_lat, r.first_in_lng, 'Punch-in location') + '</td>'
+                + '<td style="' + c + ';color:var(--red);font-weight:600">' + r.last_out + attPunchPin(r.last_out_lat, r.last_out_lng, 'Punch-out location') + '</td>'
                 + '<td style="' + c + ';font-weight:600">' + r.total_time + '</td>'
                 + '<td style="' + c + ';' + (brkRed ? 'color:var(--red);font-weight:700' : '') + '">' + r.break_time + (brkRed ? ' <i class="fas fa-triangle-exclamation"></i>' : '') + '</td>'
                 + '<td style="' + c + ';' + (manyPunch ? 'color:var(--amber);font-weight:700' : '') + '">' + r.in_count + '</td>'
@@ -11634,47 +11708,112 @@ CSS;
                 + '</tr>';
         }).join('');
         var sub = 'Punches ' + from + (to !== from ? ' → ' + to : '') + ' · ' + rows.length + ' of ' + allRows.length + ' records · default shift ' + rep.shift.start + '–' + rep.shift.end + ' · late tiers (L1/L2/L3) & over-budget breaks flagged per each company Late Policy';
-        return pghead('Attendance Report', sub, '')
+        return pghead('Daily Attendance', sub, '')
             + controls
             + '<div class="card" style="padding:0;overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr>' + th + '</tr></thead><tbody>' + body + '</tbody></table></div>';
     }
-    // ---- Daily Attendance (today) — punch state per employee + hierarchy ----
+    // ---- Attendance Report (muster) — 26-Sep-2026 (Ejaz): employee × date grid ----
+    // One cell per day: P / A / WO / H / L / HD, then per-employee totals.
+    // Reuses the att-report endpoint (it already fills every no-punch day with
+    // absent|weekly_off|holiday|on_leave|half_day via AbsenceService), but keeps
+    // its OWN state so it never fights the Daily Attendance screen or punchDo().
+    window.__musF = { company: '', branch: '', department: '', team: '', emp_code: '' };
+    window.__musTok = 0;
+    window.musLoad = function () {
+        var f = document.getElementById('mus_from'); var t = document.getElementById('mus_to');
+        var from = (f && f.value) || window.__musFrom; var to = (t && t.value) || window.__musTo;
+        if (from > to) { var x = from; from = to; to = x; }
+        // 26-Sep (Ejaz): max 31 days on screen — a longer range is cut to From + 30.
+        var cap = new Date(from + 'T00:00:00Z'); cap.setUTCDate(cap.getUTCDate() + 30); cap = cap.toISOString().slice(0, 10);
+        if (to > cap) { to = cap; if (typeof toast === 'function') { toast('Range limited to 31 days: ' + from + ' to ' + to); } }
+        window.__musFrom = from; window.__musTo = to; window.__MUSTER = null;
+        var tok = ++window.__musTok;
+        if (typeof render === 'function') { render(); }
+        fetch(cfg.attReportUrl + '?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to), { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (j) { if (tok !== window.__musTok) { return; } window.__MUSTER = j; if (typeof render === 'function') { render(); } })
+            .catch(function () { if (tok !== window.__musTok) { return; } window.__MUSTER = { rows: [], error: 'Could not reach the server.' }; if (typeof render === 'function') { render(); } });
+    };
+    window.musSet = function (k, v) { window.__musF[k] = v; if (typeof render === 'function') { render(); } };
+    // [code, text colour, cell background]. A punched day has no r.status → P
+    // (a punch on a week-off/holiday counts as Present — the person came in).
+    var MUS_CODE = {
+        absent: ['A', '#991b1b', '#fee2e2'], weekly_off: ['WO', '#475569', '#f1f5f9'], holiday: ['H', '#0e7490', '#cffafe'],
+        on_leave: ['L', '#6d28d9', '#ede9fe'], half_day: ['HD', '#b45309', '#fef3c7']
+    };
+    var MUS_P = ['P', '#166534', '#dcfce7'];
+    function musCode(r) { return r.status ? (MUS_CODE[r.status] || MUS_CODE.absent) : MUS_P; }
     function dailyAttendanceScreen() {
-        var rep = window.__ATTREPORT;
-        var today = attToday();
-        // Reuse the report endpoint scoped to today.
-        if (!rep || window.__attFrom !== today || window.__attTo !== today) {
-            setTimeout(function () { if (window.__attFrom !== today) { attLoad(today, today); } }, 10);
-        }
-        var head = '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px">'
-            + '<button class="btn btn-primary" onclick="punchDo()"><i class="fas fa-fingerprint"></i> <span id="punch_btn_lbl">Punch In / Out</span></button>'
-            + '<span style="color:var(--text3);font-size:13px">Punch from biometric device, this web app, or the mobile/desktop app — all land here.</span>'
+        if (!window.__musFrom) { var t0 = attToday(); window.__musFrom = t0.slice(0, 8) + '01'; window.__musTo = t0; setTimeout(musLoad, 10); }
+        var from = window.__musFrom; var to = window.__musTo; var rep = window.__MUSTER; var F = window.__musF;
+        var all = (rep && rep.rows) || [];
+        var keys = ['company', 'branch', 'department', 'team', 'emp_code'];
+        var pass = function (r, skip) { return keys.every(function (k) { return k === skip || !F[k] || r[k] === F[k]; }); };
+        // Options come from rows matching the OTHER filters, so picking a branch narrows teams/employees.
+        var sel = function (label, k) {
+            var seen = {}; var opts = [];
+            all.forEach(function (r) {
+                var v = r[k];
+                if (v && !seen[v] && pass(r, k)) { seen[v] = 1; opts.push([v, k === 'emp_code' ? (r.emp_name + ' (' + v + ')') : v]); }
+            });
+            opts.sort(function (a, b) { return a[1] < b[1] ? -1 : (a[1] > b[1] ? 1 : 0); });
+            return attField(label, '<select onchange="musSet(\'' + k + '\',this.value)" style="' + attInp + ';max-width:220px"><option value="">All</option>'
+                + opts.map(function (o) { return '<option value="' + String(o[0]).replace(/"/g, '&quot;') + '"' + (o[0] === F[k] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>');
+        };
+        var controls = '<div class="card" style="padding:16px;margin-bottom:16px;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">'
+            + attField('From', '<input type="date" id="mus_from" value="' + from + '" style="' + attInp + '">')
+            + attField('To', '<input type="date" id="mus_to" value="' + to + '" style="' + attInp + '">')
+            + sel('Company', 'company') + sel('Branch', 'branch') + sel('Department', 'department') + sel('Team', 'team') + sel('Employee', 'emp_code')
+            + '<button class="btn btn-primary" onclick="musLoad()"><i class="fas fa-magnifying-glass"></i> Submit</button>'
             + '</div>';
-        if (!rep || !rep.rows) { return pghead('Daily Attendance', 'Today · ' + today, '') + head + '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">Loading…</div></div>'; }
-        if (rep.error) { return pghead('Daily Attendance', 'Today · ' + today, '') + head + '<div class="card"><div style="padding:30px;color:var(--red)"><b>Could not load attendance.</b><br><span style="font-size:12px;color:var(--text2)">' + String(rep.error) + '</span></div></div>'; }
-        var rows = attApplyFilters(rep.rows);
-        if (!rows.length) {
-            return pghead('Daily Attendance', 'Today · ' + today, '') + head
-                + '<div class="card"><div style="padding:36px;text-align:center;color:var(--text3)">No attendance yet for today.<br><span style="font-size:12px">Punches will appear here as they come in. If the employee list is empty, run the demo seeder (deploy) or add employees first.</span></div></div>';
-        }
-        var dash = '<span style="color:var(--text3)">—</span>';
-        var th = ['Employee', 'Branch', 'Team', 'Manager', 'Leader', 'First In', 'Last Out', 'Total', 'Status'].map(function (h) { return '<th style="padding:10px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3);white-space:nowrap">' + h + '</th>'; }).join('');
-        var body = rows.map(function (r) {
-            var c = 'padding:10px 12px;font-size:13px;border-top:1px solid var(--border);white-space:nowrap';
-            var present = r.first_in && r.first_in !== '—';
-            var status = present ? '<span style="background:#dcfce7;color:#166534;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600">Present</span>' : '<span style="background:#fee2e2;color:#991b1b;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600">Absent</span>';
-            return '<tr><td style="' + c + ';font-weight:600">' + r.emp_name + ' <span style="color:var(--text3);font-weight:400">(' + r.emp_code + ')</span></td>'
-                + '<td style="' + c + '">' + (r.branch || dash) + '</td><td style="' + c + '">' + (r.team || dash) + '</td>'
-                + '<td style="' + c + '">' + (r.reporting || dash) + '</td><td style="' + c + '">' + (r.leader || dash) + '</td>'
-                + '<td style="' + c + ';color:var(--green);font-weight:600">' + r.first_in + '</td>'
-                + '<td style="' + c + ';color:var(--red);font-weight:600">' + r.last_out + '</td>'
-                + '<td style="' + c + ';font-weight:600">' + r.total_time + '</td>'
-                + '<td style="' + c + '">' + status + '</td></tr>';
+        var days = [];
+        for (var d = new Date(from + 'T00:00:00Z'); d <= new Date(to + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1)) { days.push(d.toISOString().slice(0, 10)); }
+        var msg = function (sub, html) { return pghead('Attendance Report', sub, '') + controls + '<div class="card"><div style="padding:36px;text-align:center;color:var(--text3)">' + html + '</div></div>'; };
+        if (days.length > 31) { return msg(from + ' → ' + to, 'Please pick a range of 31 days or less.'); }
+        if (!rep) { return msg(from + ' → ' + to, 'Loading…'); }
+        if (rep.error) { return msg(from + ' → ' + to, '<span style="color:var(--red)"><b>Could not build the report.</b><br><span style="font-size:12px;color:var(--text2)">' + String(rep.error) + '</span></span>'); }
+        var emps = []; var byCode = {};
+        all.forEach(function (r) {
+            if (!pass(r)) { return; }
+            var e = byCode[r.emp_code];
+            if (!e) { e = byCode[r.emp_code] = { name: r.emp_name, code: r.emp_code, d: {} }; emps.push(e); }
+            e.d[r.date] = r;
+        });
+        if (!emps.length) { return msg(from + ' → ' + to, 'No employees match this period/filter.'); }
+        emps.sort(function (a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0); });
+        var DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        var thS = 'padding:8px 6px;font-size:11px;color:var(--text3);white-space:nowrap;text-align:center;border-bottom:1px solid var(--border)';
+        var stick = 'position:sticky;left:0;z-index:1;background:#fff;text-align:left;min-width:190px';
+        var TOT = [['Total Days', 'days', 'var(--text)'], ['Present', 'P', '#166534'], ['Absent', 'A', '#991b1b'], ['Leave', 'L', '#6d28d9'], ['Half Day', 'HD', '#b45309'], ['Week Off', 'WO', '#475569'], ['Holiday', 'H', '#0e7490']];
+        var th = '<th style="' + thS + ';' + stick + ';text-transform:uppercase">Employee</th>'
+            + days.map(function (ds) {
+                var dw = new Date(ds + 'T00:00:00Z').getUTCDay();
+                return '<th style="' + thS + ';min-width:34px' + (dw === 0 ? ';background:#f8fafc' : '') + '"><div style="font-weight:700;color:var(--text)">' + ds.slice(8) + '</div><div style="font-weight:400">' + DOW[dw] + '</div></th>';
+            }).join('')
+            + TOT.map(function (t) { return '<th style="' + thS + ';background:#f8fafc;text-transform:uppercase">' + t[0] + '</th>'; }).join('');
+        var grand = { days: 0, P: 0, A: 0, L: 0, HD: 0, WO: 0, H: 0 };
+        var body = emps.map(function (e) {
+            var n = { days: days.length, P: 0, A: 0, L: 0, HD: 0, WO: 0, H: 0 };
+            var cells = days.map(function (ds) {
+                var r = e.d[ds];
+                if (!r) { return '<td style="padding:6px 4px;text-align:center;border-top:1px solid var(--border);color:var(--text3)">—</td>'; }
+                var c = musCode(r); n[c[0]] = (n[c[0]] || 0) + 1;
+                var tip = c === MUS_P ? ('In ' + r.first_in + ' · Out ' + r.last_out + ' · ' + r.total_time) : attStatusText(r);
+                return '<td title="' + ds + ' · ' + tip + '" style="padding:6px 4px;text-align:center;border-top:1px solid var(--border)"><span style="display:inline-block;min-width:24px;padding:2px 3px;border-radius:5px;font-size:11px;font-weight:700;color:' + c[1] + ';background:' + c[2] + '">' + c[0] + '</span></td>';
+            }).join('');
+            Object.keys(grand).forEach(function (k) { grand[k] += n[k]; });
+            return '<tr><td style="padding:8px 10px;font-size:13px;font-weight:600;white-space:nowrap;border-top:1px solid var(--border);' + stick + '">' + e.name + ' <span style="color:var(--text3);font-weight:400">(' + e.code + ')</span></td>'
+                + cells
+                + TOT.map(function (t) { return '<td style="padding:6px 10px;text-align:center;font-weight:700;font-size:13px;border-top:1px solid var(--border);background:#f8fafc;color:' + t[2] + '">' + n[t[1]] + '</td>'; }).join('')
+                + '</tr>';
         }).join('');
-        var present = rows.filter(function (r) { return r.first_in && r.first_in !== '—'; }).length;
-        return pghead('Daily Attendance', 'Today · ' + today + ' · ' + present + ' / ' + rows.length + ' present', '')
-            + head
-            + '<div class="card" style="padding:0;overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr>' + th + '</tr></thead><tbody>' + body + '</tbody></table></div>';
+        var chips = '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:14px">'
+            + TOT.slice(1).map(function (t) { return attChip(t[0], grand[t[1]], t[2]); }).join('') + '</div>';
+        var legend = '<div style="font-size:12px;color:var(--text3);margin:10px 2px">P Present · A Absent · L Leave · HD Half day · WO Weekly off · H Holiday · — no data · hover a cell for punch times</div>';
+        return pghead('Attendance Report', from + ' → ' + to + ' · ' + emps.length + ' employees · ' + days.length + ' days', '')
+            + controls + chips
+            + '<div class="card" style="padding:0;overflow:auto"><table style="border-collapse:collapse;width:100%"><thead><tr>' + th + '</tr></thead><tbody>' + body + '</tbody></table></div>'
+            + legend;
     }
     // ---- In-app Punch (web / mobile / desktop), with optional GPS ----
     function punchSource() {
@@ -12011,11 +12150,13 @@ CSS;
         var rows = (d.pairs || []).map(function (p) {
             var bt = (p.break_after != null) ? ('<span style="background:#fde68a;color:#92400e;padding:2px 9px;border-radius:20px;font-size:12px;font-weight:600">' + attHm(p.break_after) + '</span>') : '<span style="color:var(--text3)">—</span>';
             var td = 'padding:9px 12px;border-top:1px solid var(--border)';
+            var loc = attPunchPin(p.in_lat, p.in_lng, 'In-punch location') + attPunchPin(p.out_lat, p.out_lng, 'Out-punch location');
             return '<tr><td style="' + td + ';text-align:center">' + p.no + '</td>'
                 + '<td style="' + td + ';color:var(--green);font-weight:600">' + p.in + '</td>'
                 + '<td style="' + td + ';color:var(--red);font-weight:600">' + p.out + '</td>'
                 + '<td style="' + td + '">' + attHm(p.worked) + '</td>'
-                + '<td style="' + td + '">' + bt + '</td></tr>';
+                + '<td style="' + td + '">' + bt + '</td>'
+                + '<td style="' + td + '">' + (loc || '<span style="color:var(--text3)">—</span>') + '</td></tr>';
         }).join('');
         var rv = d.rating || 5;
         // rev184 — the rating/remarks card is a MANAGER tool; self-service logins
@@ -12043,8 +12184,9 @@ CSS;
             + '<th style="padding:9px 12px;text-align:left;font-size:11px;text-transform:uppercase;color:var(--text3)">Out</th>'
             + '<th style="padding:9px 12px;text-align:left;font-size:11px;text-transform:uppercase;color:var(--text3)">Worked</th>'
             + '<th style="padding:9px 12px;text-align:left;font-size:11px;text-transform:uppercase;color:var(--text3)">Break After</th>'
+            + '<th style="padding:9px 12px;text-align:left;font-size:11px;text-transform:uppercase;color:var(--text3)">Location</th>'
             + '</tr></thead><tbody>' + rows + '</tbody>'
-            + '<tfoot><tr><td colspan="3" style="padding:10px 12px;text-align:right;font-weight:700;background:#0f172a;color:#fff">Total Break Time</td><td colspan="2" style="padding:10px 12px;font-weight:700;background:#0f172a;color:#fff">' + d.total_break_h + '</td></tr></tfoot>'
+            + '<tfoot><tr><td colspan="3" style="padding:10px 12px;text-align:right;font-weight:700;background:#0f172a;color:#fff">Total Break Time</td><td colspan="3" style="padding:10px 12px;font-weight:700;background:#0f172a;color:#fff">' + d.total_break_h + '</td></tr></tfoot>'
             + '</table></div></div>';
         m.innerHTML = inner;
         m.style.display = 'flex';

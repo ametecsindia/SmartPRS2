@@ -57,7 +57,19 @@ class ReportController extends Controller
      */
     private function build(?int $tid, string $dataset, ?string $month, ?int $companyId, ?int $limit): array
     {
-        $end = $month ? Carbon::createFromFormat('Y-m-d', $month.'-01')->endOfMonth()->toDateString() : null;
+        // rev191 — reports run on the company's pay cycle, not the calendar
+        // month. The Muster roll and the attendance export are the registers an
+        // inspector compares against the payslips, so they have to cover exactly
+        // the window payroll paid for. No cut-off configured = calendar month,
+        // i.e. unchanged.
+        $start = null;
+        $end = null;
+        if ($month) {
+            $cn = $companyId ? (string) (DB::table('companies')->where('id', $companyId)->value('name') ?? '') : '';
+            $w = \App\Services\PeriodResolver::window($tid, $cn, $month);
+            $start = $w['start'];
+            $end = $w['end'];
+        }
 
         if ($dataset === 'employees') {
             $cols = ['Code', 'Name', 'Company', 'Type', 'CTC', 'Status', 'Mobile', 'Email'];
@@ -101,7 +113,7 @@ class ReportController extends Controller
                 ->leftJoin('leave_types as t', 't.id', '=', 'l.type_id')
                 ->when($tid, fn ($x) => $x->where('l.tenant_id', $tid))
                 ->when($companyId, fn ($x) => $x->where('l.company_id', $companyId))
-                ->when($month, fn ($x) => $x->where('l.from_date', '<=', $end)->where('l.to_date', '>=', $month.'-01'))
+                ->when($month, fn ($x) => $x->where('l.from_date', '<=', $end)->where('l.to_date', '>=', $start))
                 ->orderByDesc('l.from_date');
             $count = (clone $q)->count();
             $rows = $q->when($limit, fn ($x) => $x->limit($limit))
@@ -120,7 +132,7 @@ class ReportController extends Controller
             $q = DB::table('attendance_logs')
                 ->when($tid, fn ($x) => $x->where('tenant_id', $tid))
                 ->when($companyId, fn ($x) => $x->where('company_id', $companyId))
-                ->when($month, fn ($x) => $x->whereBetween('log_date', [$month.'-01', $end]))
+                ->when($month, fn ($x) => $x->whereBetween('log_date', [$start, $end]))
                 ->orderByDesc('log_date')->orderByDesc('punch_at');
             $count = (clone $q)->count();
             $rows = $q->when($limit, fn ($x) => $x->limit($limit))
@@ -205,7 +217,7 @@ class ReportController extends Controller
             $q = DB::table('attendance_logs as a')
                 ->when($tid, fn ($x) => $x->where('a.tenant_id', $tid))
                 ->when($companyId, fn ($x) => $x->where('a.company_id', $companyId))
-                ->when($month, fn ($x) => $x->whereBetween('a.log_date', [$month.'-01', $end]));
+                ->when($month, fn ($x) => $x->whereBetween('a.log_date', [$start, $end]));
             $rows = (clone $q)->select('a.emp_code', 'a.emp_name', DB::raw('COUNT(DISTINCT a.log_date) as present_days'))
                 ->groupBy('a.emp_code', 'a.emp_name')->orderBy('a.emp_code')->get()
                 ->map(fn ($r) => ['Code' => $r->emp_code, 'Name' => $r->emp_name, 'Present Days' => (int) $r->present_days])->all();
@@ -225,7 +237,7 @@ class ReportController extends Controller
             if ($month && Schema::hasColumn('deductions', 'cycle_month')) {
                 $q->where('d.cycle_month', $month);
             } elseif ($month && Schema::hasColumn('deductions', 'created_at')) {
-                $q->whereBetween('d.created_at', [$month.'-01 00:00:00', $end.' 23:59:59']);
+                $q->whereBetween('d.created_at', [$start.' 00:00:00', $end.' 23:59:59']);
             }
             $count = (clone $q)->count();
             $rows = $q->when($limit, fn ($x) => $x->limit($limit))->orderByDesc('d.id')
@@ -295,7 +307,7 @@ class ReportController extends Controller
             $q = DB::table('overtime as o')->leftJoin('employees as e', 'e.id', '=', 'o.employee_id')
                 ->when($tid, fn ($x) => $x->where('o.tenant_id', $tid))
                 ->when($companyId, fn ($x) => $x->where('o.company_id', $companyId))
-                ->when($month, fn ($x) => $x->whereBetween('o.ot_date', [$month.'-01', $end]))
+                ->when($month, fn ($x) => $x->whereBetween('o.ot_date', [$start, $end]))
                 ->orderByDesc('o.ot_date');
             $count = (clone $q)->count();
             $rows = $q->when($limit, fn ($x) => $x->limit($limit))

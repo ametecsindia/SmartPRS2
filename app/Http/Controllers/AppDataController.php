@@ -2336,11 +2336,46 @@ class AppDataController extends Controller
         ];
     }
 
-    /** Generate the last 12 months of payroll (idempotent) and return runs + payslips history. */
+    /**
+     * Generate the last 12 months of payroll (idempotent) and return runs +
+     * payslips history.
+     *
+     * rev191 — THIS IS DEMO SEEDING and is now gated as such. It runs on every
+     * /app/data call (i.e. every page load) and writes real rows into
+     * payroll_runs and payslips: eleven months stamped 'paid' plus the current
+     * month as 'draft', priced straight off computeSlip(CTC/12) with no
+     * attendance, no LOP, no pay cycle, no commissions — the only payroll path
+     * in the system that ignores all of it. Two consequences:
+     *
+     *   • on a real install it manufactured salary records nobody generated,
+     *   • it made deletion impossible. The "idempotent" guard is "skip the month
+     *     if a run exists", so a purged month was simply re-created on the next
+     *     page load — which is why a freshly purged August came straight back as
+     *     'paid' and blocked regeneration.
+     *
+     * Now: demo builds only (same switch as the demo punches), and never after
+     * payroll:purge has run, which parks the marker below. `payroll:purge
+     * --reseed` clears it.
+     */
     private function ensurePayrollHistory(?int $tenantId, $companyId, $emps, ?array $rates = null): array
     {
         if (! $tenantId || ! $companyId || $emps->isEmpty()) {
             return ['runs' => collect(), 'payslips' => collect()];
+        }
+        if (! AttendanceReportController::demoEnabled()) {
+            return $this->payrollHistoryOf($tenantId, $companyId, $emps);   // read what is really there
+        }
+        try {
+            $off = DB::table('settings')->where('tenant_id', $tenantId)
+                ->where('key', 'payroll_history_seed')->value('value');
+            // settings.value is a JSON column, so the stored marker reads back as
+            // the quoted string "off"; tolerate a bare one too.
+            $off = json_decode((string) $off, true) ?? trim((string) $off, '"');
+            if ($off === 'off') {
+                return $this->payrollHistoryOf($tenantId, $companyId, $emps);
+            }
+        } catch (\Throwable $e) {
+            // no settings table → behave as before
         }
 
         for ($k = 0; $k < 12; $k++) {
@@ -2379,6 +2414,13 @@ class AppDataController extends Controller
             DB::table('payroll_runs')->where('id', $runId)->update(['net_total' => $netTotal]);
         }
 
+        return $this->payrollHistoryOf($tenantId, $companyId, $emps);
+    }
+
+    /** rev191 — READ the payroll history that actually exists. Split out of
+     *  ensurePayrollHistory so the screens can be served without seeding. */
+    private function payrollHistoryOf(?int $tenantId, $companyId, $emps): array
+    {
         $runs = DB::table('payroll_runs')->where('tenant_id', $tenantId)->where('company_id', $companyId)
             ->orderBy('cycle_label', 'desc')->get()->map(fn ($r) => [
                 'id' => 'RUN-'.$r->id,

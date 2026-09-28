@@ -128,11 +128,17 @@ class EssController extends Controller
         if (! Schema::hasTable('attendance_logs')) {
             return $out;
         }
-        $month = now()->format('Y-m');
-        $end = now()->endOfMonth()->toDateString();
+        // rev191 — the employee's own screen shows the SAME window their payslip
+        // will be built from. It hard-coded the calendar month, so staff at a
+        // 21st–20th company saw a present-day count no payslip ever matched.
+        // Capped at today: an unfinished period counts the days actually worked.
+        $cn = (string) (DB::table('companies')->where('id', $e->company_id ?? 0)->value('name') ?? '');
+        $month = \App\Services\PeriodResolver::currentMonthFor($tid, $cn);
+        $w = \App\Services\PeriodResolver::window($tid, $cn, $month, true);
+        $out['month'] = $w['label'];
         $code = $e->emp_code ?? '';
         $out['present'] = (int) DB::table('attendance_logs')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->where('emp_code', $code)
-            ->whereBetween('log_date', [$month.'-01', $end])->distinct()->count('log_date'); // rev172 — tenant-scoped (emp codes repeat across tenants)
+            ->whereBetween('log_date', [$w['start'], $w['attendance_end']])->distinct()->count('log_date'); // rev172 — tenant-scoped (emp codes repeat across tenants)
         $last = DB::table('attendance_logs')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->where('emp_code', $code)->orderByDesc('punch_at')->value('punch_at');
         $out['last_punch'] = $last ? Carbon::parse($last)->format('d M, H:i') : null;
 
