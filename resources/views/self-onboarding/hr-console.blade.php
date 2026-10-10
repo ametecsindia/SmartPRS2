@@ -171,4 +171,5 @@
   loadList();
 })();
 </script>
+<script src="{{ asset('js/smartprs-dates.js') }}"></script>{{-- 7 Oct 2026: DD-MM-YYYY display + pickers --}}
 </body></html>

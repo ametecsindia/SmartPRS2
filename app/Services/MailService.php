@@ -76,9 +76,21 @@ class MailService
             if (empty($msg['to']) || empty($msg['subject'])) {
                 return null;   // nothing to send
             }
+            // 8 Oct 2026 (Ejaz) — TEST REDIRECT: when storage/app/mail-redirect.txt holds an
+            // address (or MAIL_REDIRECT_TO is set in .env), every outgoing mail (greetings,
+            // previews, notifications, payslips…) goes to that one address instead — demo
+            // workspace included — with the real recipient in the subject. Delete the file to stop.
+            $rf = storage_path('app/mail-redirect.txt');
+            $redirect = trim((string) (is_file($rf) ? file_get_contents($rf) : env('MAIL_REDIRECT_TO', '')));
+            if ($redirect !== '' && filter_var($redirect, FILTER_VALIDATE_EMAIL)) {
+                $msg['subject'] = '[for '.$msg['to'].'] '.$msg['subject'];
+                $msg['to'] = $redirect;
+                $msg['to_name'] = null;
+                $msg['tenant_id_demo_ok'] = true;
+            }
             // rev 97: the PUBLIC demo workspace must never send real email —
             // log it as skipped so the demo still "looks" like it worked.
-            if (! empty($msg['tenant_id']) && \App\Http\Controllers\DemoAccessController::isDemoTenant($msg['tenant_id'])) {
+            if (empty($msg['tenant_id_demo_ok']) && ! empty($msg['tenant_id']) && \App\Http\Controllers\DemoAccessController::isDemoTenant($msg['tenant_id'])) {
                 DB::table('mail_log')->insert([
                     'tenant_id' => $msg['tenant_id'], 'company_id' => $msg['company_id'] ?? null,
                     'kind' => $msg['kind'] ?? null, 'recipient' => $msg['to'], 'subject' => $msg['subject'],
@@ -181,6 +193,14 @@ class MailService
                 'ctaLabel' => $msg['cta_label'] ?? '',
                 'ctaUrl' => $msg['cta_url'] ?? '',
             ];
+
+            // 7 Oct 2026 (Ejaz) — every date in a mail reads DD-MM-YYYY.
+            $D = [\App\Support\DateFmt::class, 'text'];
+            foreach (['heading', 'intro', 'bodyText'] as $k) {
+                $data[$k] = $D($data[$k]);
+            }
+            $data['lines'] = is_array($data['lines']) ? array_map(fn ($v) => is_string($v) ? $D($v) : $v, $data['lines']) : $D($data['lines']);
+            $msg['subject'] = $D((string) ($msg['subject'] ?? ''));
 
             Mail::send('emails.generic', $data, function ($mail) use ($msg) {
                 $mail->to($msg['to'], $msg['to_name'] ?? null)->subject($msg['subject']);

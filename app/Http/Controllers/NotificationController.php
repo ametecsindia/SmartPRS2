@@ -34,12 +34,18 @@ class NotificationController extends Controller
         }
     }
 
-    /** POST /app/notifications/{id}/read — mark one item read. */
+    /**
+     * POST /app/notifications/{id}/read — mark one item read.
+     * {unread: 1} marks it UNREAD instead (2026-09-28) — same route, so
+     * routes/web.php is not touched.
+     */
     public function markRead(Request $request, $id)
     {
         try {
             $user = $request->user();
-            $ok = NotificationService::markRead((int) $id, $user->id ?? null);
+            $ok = $request->boolean('unread')
+                ? NotificationService::markUnread((int) $id, $user->id ?? null)
+                : NotificationService::markRead((int) $id, $user->id ?? null);
 
             return response()->json([
                 'ok' => $ok,

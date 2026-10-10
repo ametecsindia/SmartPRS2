@@ -32,7 +32,7 @@
                     @if(!empty($brand['tagline'])) <div style="font-size:10px;color:#666;font-style:italic;">{{ $brand['tagline'] }}</div> @endif
                     <div class="muted">{{ $company->name ?? 'SmartPRS' }}</div>
                 </td>
-                <td style="text-align:right;"><div style="font-size:14px;font-weight:bold;">{{ $title }}</div><div class="muted">{{ $period }}</div></td>
+                <td style="text-align:right;"><div style="font-size:14px;font-weight:bold;">{{ $title }}</div><div class="muted">{{ \App\Support\DateFmt::text($period) }}</div></td>
             </tr>
         </table>
     </div>
@@ -42,12 +42,12 @@
             <thead><tr>@foreach ($columns as $c)<th class="{{ $c['amt'] ?? false ? 'amt' : '' }}">{{ $c['l'] }}</th>@endforeach</tr></thead>
             <tbody>
                 @foreach ($rows as $r)
-                    <tr>@foreach ($columns as $c)<td class="{{ $c['amt'] ?? false ? 'amt' : '' }}">{{ $r[$c['k']] }}</td>@endforeach</tr>
+                    <tr>@foreach ($columns as $c)<td class="{{ $c['amt'] ?? false ? 'amt' : '' }}">{{ \App\Support\DateFmt::text($r[$c['k']]) }}</td>@endforeach</tr>
                 @endforeach
                 <tr class="tot">@foreach ($columns as $c)<td class="{{ $c['amt'] ?? false ? 'amt' : '' }}">{{ $totals[$c['k']] ?? '' }}</td>@endforeach</tr>
             </tbody>
         </table>
-        <div class="foot">Computer-generated statutory report · {{ now()->format('d M Y, H:i') }}. Indicative figures — verify against your registered statutory rates before filing.</div>
+        <div class="foot">Computer-generated statutory report · {{ now()->format('d-m-Y H:i') }}. Indicative figures — verify against your registered statutory rates before filing.</div>
     </div>
 </body>
 </html>

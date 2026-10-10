@@ -836,7 +836,7 @@ class RecruitmentController extends Controller
             $count = 0;
             $skipped = 0;
             foreach ($lines as $line) {
-                $cells = str_getcsv($line);
+                $cells = array_map([\App\Support\DateFmt::class, 'toIso'], str_getcsv($line));   // 7 Oct 2026 — DD-MM-YYYY cells → ISO
                 $get = function ($key) use ($idx, $cells) {
                     $i = $idx($key);
 

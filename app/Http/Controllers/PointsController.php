@@ -254,7 +254,7 @@ class PointsController extends Controller
         }
         $working = 0;
         for ($d = $start->copy(); $d->lte($end); $d->addDay()) {
-            if ($d->dayOfWeek === Carbon::SUNDAY || isset($holidays[$d->toDateString()])) {
+            if (\App\Http\Controllers\PayrollGenController::isWeekOff($d, \App\Http\Controllers\SettingsController::rates($tid)) || isset($holidays[$d->toDateString()])) {   // 7 Oct 2026 — the configured weekly offs, not just Sunday
                 continue;
             }
             $working++;

@@ -124,7 +124,7 @@ class TenantBillingController extends Controller
                     'number' => $i->number,
                     'total' => round((float) $i->amount + (float) $i->tax, 2),
                     'status' => $i->status,
-                    'issued' => ! empty($i->issued_on) ? Carbon::parse($i->issued_on)->format('d M Y') : '',
+                    'issued' => ! empty($i->issued_on) ? Carbon::parse($i->issued_on)->format('d-m-Y') : '',
                     'pdf' => url('/app/my-subscription/invoice/'.$i->id.'/pdf'),
                 ])->values();
 
@@ -148,7 +148,7 @@ class TenantBillingController extends Controller
                     'cycle' => $sub->cycle,
                     'amount' => (float) $sub->amount,
                     'status' => $sub->status,
-                    'end' => $end ? $end->format('d M Y') : '',
+                    'end' => $end ? $end->format('d-m-Y') : '',
                     'daysLeft' => $daysLeft,
                 ] : null,
                 'companiesUsed' => $coUse['used'],
@@ -195,7 +195,7 @@ class TenantBillingController extends Controller
             'remaining_days' => $remainingDays, 'companies' => $companies,
             'company_fee' => $new['company_fee'],
             'new_period_amount' => $new['amount'],   // future renewals bill at this
-            'end' => $end->format('d M Y'),
+            'end' => $end->format('d-m-Y'),
         ];
     }
 
@@ -396,9 +396,9 @@ class TenantBillingController extends Controller
             return response()->json([
                 'ok' => true,
                 'message' => ($r->mode ?? 'renew') === 'upgrade'
-                    ? 'Payment received — your upgrade is live: the new employee/company limits apply immediately. Your period still runs until '.$end->format('d M Y').'.'
-                    : 'Payment received — your subscription is active until '.$end->format('d M Y').'. The tax invoice has been emailed.',
-                'end' => $end->format('d M Y'),
+                    ? 'Payment received — your upgrade is live: the new employee/company limits apply immediately. Your period still runs until '.$end->format('d-m-Y').'.'
+                    : 'Payment received — your subscription is active until '.$end->format('d-m-Y').'. The tax invoice has been emailed.',
+                'end' => $end->format('d-m-Y'),
             ]);
         } catch (\Throwable $e) {
             return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);

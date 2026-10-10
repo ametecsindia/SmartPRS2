@@ -80,7 +80,7 @@ class SaasController extends Controller
                 'gstin' => $t->gstin ?? '',
                 'state' => $t->state ?? '',
                 'docStorageEmpMb' => isset($t->doc_storage_emp_mb) && $t->doc_storage_emp_mb !== null ? (int) $t->doc_storage_emp_mb : null,
-                'created' => $t->created_at ? \Illuminate\Support\Carbon::parse($t->created_at)->format('d M Y') : '',
+                'created' => $t->created_at ? \Illuminate\Support\Carbon::parse($t->created_at)->format('d-m-Y') : '',
             ])->values();
 
             return response()->json([
@@ -396,6 +396,7 @@ class SaasController extends Controller
     {
         try {
             $this->guard($request);
+            self::ensureSetupChargeCol();
             $rows = DB::table('plans')->orderBy('base_price')->get()->map(function ($p) {
                 $feat = json_decode($p->features ?? '[]', true) ?: [];
 
@@ -406,6 +407,7 @@ class SaasController extends Controller
                     'perUserPrice' => (float) $p->per_user_price,
                     'billingCycle' => $p->billing_cycle,
                     'seatMax' => $p->seat_max,
+                    'setupCharge' => (float) ($p->setup_charge ?? 0),
                     'modules' => array_values($feat),
                     'status' => $p->status,
                 ];
@@ -421,10 +423,43 @@ class SaasController extends Controller
         }
     }
 
+    /** 8 Oct 2026 (Ejaz): one-time setup charge per plan. Idempotent - safe on every call. */
+    public static function ensureSetupChargeCol(): void
+    {
+        if (Schema::hasTable('plans') && ! Schema::hasColumn('plans', 'setup_charge')) {
+            Schema::table('plans', function (\Illuminate\Database\Schema\Blueprint $t) {
+                $t->decimal('setup_charge', 12, 2)->default(0);
+            });
+        }
+    }
+
+    /**
+     * 8 Oct 2026 (Ejaz): Setup Charges section on the Plans screen - saves every
+     * plan's one-time setup charge in one go. Body: { setup_charges: { planId: amount } }.
+     * ponytail: rides the existing POST /app/saas/plans so routes/web.php is not rewritten.
+     */
+    private function saveSetupCharges(array $charges)
+    {
+        self::ensureSetupChargeCol();
+        foreach ($charges as $id => $amt) {
+            if (! is_numeric($amt) || $amt < 0) {
+                return response()->json(['ok' => false, 'error' => 'Setup charge must be a number of 0 or more.'], 422);
+            }
+        }
+        foreach ($charges as $id => $amt) {
+            DB::table('plans')->where('id', (int) $id)->update(['setup_charge' => round((float) $amt, 2), 'updated_at' => now()]);
+        }
+
+        return response()->json(['ok' => true]);
+    }
+
     public function savePlan(Request $request)
     {
         try {
             $this->guard($request);
+            if (is_array($request->input('setup_charges'))) {
+                return $this->saveSetupCharges($request->input('setup_charges'));
+            }
             $v = $request->validate([
                 'id' => ['nullable', 'integer'],
                 'name' => ['required', 'string', 'max:120'],

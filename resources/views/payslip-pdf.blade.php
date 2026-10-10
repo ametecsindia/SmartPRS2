@@ -112,7 +112,7 @@
         <tr>
             <td><div class="label">Department</div><div class="val">{{ $emp['department'] }}</div></td>
             <td><div class="label">Branch / Location</div><div class="val">{{ $emp['branch'] }}</div></td>
-            <td><div class="label">Date of Joining</div><div class="val">{{ $emp['doj'] }}</div></td>
+            <td><div class="label">Date of Joining</div><div class="val">{{ \App\Support\DateFmt::display($emp['doj']) }}</div></td>
         </tr>
         <tr>
             <td><div class="label">PAN</div><div class="val">{{ $e->pan ?? '—' }}</div></td>
@@ -127,7 +127,7 @@
         <tr>
             <td><div class="label">Employee Type</div><div class="val">{{ $emp['type'] ?: '—' }}</div></td>
             <td><div class="label">Annual CTC</div><div class="val">{{ $m($e->ctc) }}</div></td>
-            <td><div class="label">Pay Date</div><div class="val">{{ isset($payDate) ? \Illuminate\Support\Carbon::parse($payDate)->format('d M Y') : \Illuminate\Support\Carbon::parse($month.'-01')->endOfMonth()->format('d M Y') }}</div></td>
+            <td><div class="label">Pay Date</div><div class="val">{{ isset($payDate) ? \Illuminate\Support\Carbon::parse($payDate)->format('d-m-Y') : \Illuminate\Support\Carbon::parse($month.'-01')->endOfMonth()->format('d-m-Y') }}</div></td>
         </tr>
     </table>
 
@@ -207,7 +207,7 @@
 
     <div class="foot">
         Computer-generated payslip — no signature required. Statutory deductions (PF/ESI/PT/TDS) computed per configured rates in Settings; reimbursements are non-taxable and excluded from the PF/ESI wage base.
-        Verify authenticity using Payslip ID {{ $payslipId ?? '' }}. Generated {{ now()->format('d M Y, H:i') }}.
+        Verify authenticity using Payslip ID {{ $payslipId ?? '' }}. Generated {{ now()->format('d-m-Y H:i') }}.
     </div>
 </body>
 </html>

@@ -43,8 +43,67 @@ class ApprovalService
     }
 
     /** Add the audit columns to a request table if missing (idempotent). */
+    /**
+     * 30 Sep 2026 (Ejaz) — what an Admin / HR may change on a PENDING request
+     * before deciding it. Only approver-side figures: never the employee's own
+     * reason / purpose / remarks. `amount` becomes the SANCTIONED amount (payroll
+     * already reads `amount`); the employee's figure is kept in requested_amount.
+     */
+    public static function editableFields(): array
+    {
+        return [
+            'expenses' => ['amount' => 'Approved amount (₹)', 'date' => 'Expense date'],
+            'advances' => ['amount' => 'Sanctioned amount (₹)'],
+            'loans' => ['amount' => 'Sanctioned amount (₹)', 'emi' => 'EMI (₹)', 'tenure_months' => 'Tenure (months)'],
+        ];
+    }
+
+    /**
+     * 30 Sep 2026 (Ejaz) — the base expenses / advances / loans tables had no
+     * `reason` (and loans no `tenure_months`), so ApprovalService::safeRow()
+     * silently DROPPED the employee's reason / purpose / tenure on submit and the
+     * approver never saw it. Add what the forms send, plus the sanctioned-amount
+     * and edit trail. Idempotent; once per request.
+     */
+    public static function ensureDetailCols(string $table): void
+    {
+        static $done = [];
+        if (isset($done[$table]) || ! in_array($table, ['expenses', 'advances', 'loans'], true) || ! Schema::hasTable($table)) {
+            return;
+        }
+        $done[$table] = true;
+        try {
+            $want = ['reason' => 'text', 'requested_amount' => 'decimal', 'edited_by' => 'string', 'edited_at' => 'timestamp'];
+            if ($table === 'loans') {
+                $want['tenure_months'] = 'int';
+            }
+            if ($table === 'expenses') {
+                $want['date'] = 'date';
+            }
+            $missing = array_filter($want, fn ($t, $c) => ! Schema::hasColumn($table, $c), ARRAY_FILTER_USE_BOTH);
+            if (! $missing) {
+                return;
+            }
+            Schema::table($table, function (Blueprint $t) use ($missing) {
+                foreach ($missing as $c => $type) {
+                    match ($type) {
+                        'text' => $t->text($c)->nullable(),
+                        'decimal' => $t->decimal($c, 12, 2)->nullable(),
+                        'int' => $t->integer($c)->nullable(),
+                        'date' => $t->date($c)->nullable(),
+                        'timestamp' => $t->timestamp($c)->nullable(),
+                        default => $t->string($c)->nullable(),
+                    };
+                }
+            });
+        } catch (\Throwable $e) {
+            // best-effort — the request still saves, just without the extra detail
+        }
+    }
+
     public static function ensureAuditCols(string $table): void
     {
+        self::ensureDetailCols($table);
         // rev 77: `transfers` is the only request table with no base migration —
         // self-created here (the hook every list/apply/decide/inbox call passes).
         if ($table === 'transfers' && ! Schema::hasTable('transfers')) {
@@ -367,6 +426,12 @@ class ApprovalService
         try {
             $u = $request->user();
             if ($u && ($u->hasRole('super_admin') || $u->hasAnyRole($roles))) {
+                return null;
+            }
+            // 7 Oct 2026 (Ejaz) — Roles & Permissions GRANT: a Company/Group-scope
+            // role whose box is ticked for this module (PermissionGate tags the
+            // request) may do what HR may do here. Admin-only actions stay admin-only.
+            if ($u && in_array('hr_manager', $roles, true) && $request->attributes->get('sp_grant')) {
                 return null;
             }
 

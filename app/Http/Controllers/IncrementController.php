@@ -83,7 +83,7 @@ HR Department, {{company}}';
 
         // DomPDF's default font lacks the ₹ glyph — use "Rs" in the PDF body.
         $money = fn ($n) => 'Rs '.number_format((float) $n, 2);
-        $eff = ! empty($r->effective) ? Carbon::parse($r->effective)->format('d M Y') : now()->format('d M Y');
+        $eff = ! empty($r->effective) ? Carbon::parse($r->effective)->format('d-m-Y') : now()->format('d-m-Y');
         $pct = (float) ($r->pct ?? 0);
         if ($pct <= 0 && (float) ($r->old_ctc ?? 0) > 0 && (float) ($r->new_ctc ?? 0) > 0) {
             $pct = round(((float) $r->new_ctc - (float) $r->old_ctc) / (float) $r->old_ctc * 100, 2);
@@ -120,7 +120,7 @@ HR Department, {{company}}';
             'brand' => $brand,
             'company' => $company ?: 'SmartPRS',
             'companyAddress' => '',
-            'date' => now()->format('d M Y'),
+            'date' => now()->format('d-m-Y'),
             'empName' => $emp->name,
             'empCode' => $emp->emp_code,
         ]);
@@ -144,7 +144,7 @@ HR Department, {{company}}';
             return;
         }
         $b = self::buildLetter($r);
-        $eff = ! empty($r->effective) ? Carbon::parse($r->effective)->format('d M Y') : 'the date on the letter';
+        $eff = ! empty($r->effective) ? Carbon::parse($r->effective)->format('d-m-Y') : 'the date on the letter';
 
         \App\Services\MailService::queue([
             'tenant_id' => $r->tenant_id,
@@ -213,7 +213,7 @@ HR Department, {{company}}';
                 return response()->json(['ok' => false, 'error' => 'Increment not found'], 404);
             }
             if (! empty($r->applied_at)) {
-                return response()->json(['ok' => false, 'error' => 'Already APPLIED to the employee record on '.Carbon::parse($r->applied_at)->format('d M Y').' — it can no longer be edited. Raise a fresh increment instead.'], 422);
+                return response()->json(['ok' => false, 'error' => 'Already APPLIED to the employee record on '.Carbon::parse($r->applied_at)->format('d-m-Y').' — it can no longer be edited. Raise a fresh increment instead.'], 422);
             }
             $isManager = $user->hasAnyRole(['super_admin', 'admin', 'hr_manager']);
             $isApprover = $me && (int) ($r->approver_id ?? 0) === (int) $me->id;
@@ -329,7 +329,7 @@ HR Department, {{company}}';
                 return response()->json(['ok' => false, 'error' => 'Only an APPROVED increment can be applied.'], 422);
             }
             if (! empty($r->applied_at)) {
-                return response()->json(['ok' => false, 'error' => 'Already applied on '.Carbon::parse($r->applied_at)->format('d M Y').' by '.($r->applied_by ?: 'HR').'.'], 422);
+                return response()->json(['ok' => false, 'error' => 'Already applied on '.Carbon::parse($r->applied_at)->format('d-m-Y').' by '.($r->applied_by ?: 'HR').'.'], 422);
             }
             if ((float) ($r->new_ctc ?? 0) <= 0) {
                 return response()->json(['ok' => false, 'error' => 'This increment has no New CTC recorded.'], 422);
@@ -399,7 +399,7 @@ HR Department, {{company}}';
                                 'employee_id' => $r->employee_id,
                                 'purpose' => 'Salary Arrears',
                                 'description' => 'Increment arrears: CTC '.number_format($oldCtc).' -> '.number_format($newCtc)
-                                    .' w.e.f. '.$eff->format('d M Y').' · '.rtrim(rtrim(number_format($months, 2), '0'), '.').' month(s) @ Rs '
+                                    .' w.e.f. '.$eff->format('d-m-Y').' · '.rtrim(rtrim(number_format($months, 2), '0'), '.').' month(s) @ Rs '
                                     .number_format($diffMonthly, 2).'/month (increment #'.$id.')',
                                 'gross_amount' => $arrears,
                                 'tds_rate' => 0,

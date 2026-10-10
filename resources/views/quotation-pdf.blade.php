@@ -76,7 +76,7 @@
                     @if(!empty($s->mobile))<div>{{ $s->mobile }}</div>@endif
                     @if(!empty($s->state))<div>State: {{ $s->state }}</div>@endif
                     @if(!empty($s->gstin))<div><b>GSTIN:</b> {{ $s->gstin }}</div>@endif
-                    <div style="margin-top:6px;"><span class="label">Date</span> {{ \Illuminate\Support\Carbon::parse($s->quoted_at ?? now())->format('d M Y') }}</div>
+                    <div style="margin-top:6px;"><span class="label">Date</span> {{ \Illuminate\Support\Carbon::parse($s->quoted_at ?? now())->format('d-m-Y') }}</div>
                 </td>
             </tr>
         </table>
@@ -97,7 +97,7 @@
             <tr>
                 <td>SmartPRS {{ $plan->name ?? 'Subscription' }} plan — all 16 modules ({{ $cycleLabel }})</td>
                 <td class="amt">{{ (int) $s->seats }} emp</td>
-                <td class="amt">{{ number_format($price['amount_before_coupon'] ?? $price['amount'], 2) }}</td>
+                <td class="amt">{{ number_format($price['amount_before_coupon'] ?? ($price['sub_amount'] ?? $price['amount']), 2) }}</td>
             </tr>
             @if($companies > 1)
             <tr><td style="color:#64748b;">Includes {{ $companies }} companies ({{ $companies - 1 }} additional × ₹1,000/mo)</td><td></td><td></td></tr>
@@ -109,6 +109,9 @@
                 <td></td>
                 <td class="amt" style="color:#166534;font-weight:bold;">− {{ number_format($price['coupon_discount'], 2) }}</td>
             </tr>
+            @endif
+            @if(($price['setup'] ?? 0) > 0)
+            <tr><td>Setup &amp; Onboarding charges (one-time)</td><td></td><td class="amt">{{ number_format($price['setup'], 2) }}</td></tr>
             @endif
             <tr class="tot"><td colspan="2">Taxable value{{ ($price['coupon_discount'] ?? 0) > 0 ? ' (after discount)' : '' }}</td><td class="amt">{{ number_format($price['amount'], 2) }}</td></tr>
         </table>
@@ -133,7 +136,7 @@
         <div class="foot">
             This is a computer-generated quotation. Prices are in INR and include GST as shown. Minimum billing period is 3 months in advance.
             @if(empty($seller['gstin']))<br><b>Note:</b> Seller GSTIN not configured.@endif
-            <br>Generated {{ now()->format('d M Y, H:i') }} · Ametecs India Pvt. Ltd.
+            <br>Generated {{ now()->format('d-m-Y H:i') }} · Ametecs India Pvt. Ltd.
         </div>
     </div>
 </body>

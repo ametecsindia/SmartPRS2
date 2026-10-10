@@ -193,6 +193,7 @@ class PushController extends Controller
             // 'single' makes ETimeOfficeService::import derive IN/OUT from the
             // punch's rank in the day instead of the status byte below.
             'device_mode' => $row->device_mode ?? null,
+            'branch' => $row->branch ?? null,   // 2026-09-28 — branch-aware mapping
             'tenant_id' => $row->tenant_id ?? null,
         ];
     }

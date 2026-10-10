@@ -30,9 +30,31 @@ return Application::configure(basePath: dirname(__DIR__))
             // reasoning as above — its own file, so routes/web.php is never
             // rewritten to add five routes. Each half declares its own stack.
             Route::group([], __DIR__.'/../routes/updates.php');
+
+            // ASSET STOCK + ASSET ISSUE & RETURNS (30 Sep 2026) — same /app stack.
+            Route::middleware([
+                'web',
+                'auth',
+                \App\Http\Middleware\LicenseGate::class,
+                \App\Http\Middleware\EnsureSubscriptionActive::class,
+                \App\Http\Middleware\DemoWriteGuard::class,
+                \App\Http\Middleware\EditionGuard::class,
+            ])->group(function () {
+                require __DIR__.'/../routes/assets.php';
+                require __DIR__.'/../routes/approvals.php';   // 30 Sep 2026 — approver edits
+            });
         },
     )
     ->withMiddleware(function (Middleware $middleware) {
+        // 2026-09-28 — web traffic keeps the scheduler running until an OS task
+        // takes over (App\Services\AutoScheduler). Work happens after the response.
+        $middleware->web(append: [\App\Http\Middleware\AutoSchedulerMiddleware::class]);
+        // 2026-10-07 — DD-MM-YYYY typed/uploaded dates become ISO before any controller sees them.
+        $middleware->web(append: [\App\Http\Middleware\DateInputNormalizer::class]);
+        // 2026-10-07 — Roles & Permissions enforced server-side (view / approve / delete) + Company-scope grants.
+        $middleware->web(append: [\App\Http\Middleware\PermissionGate::class]);
+        // 2026-10-07 — a phone approved without an Employee ID links to whoever signs in on it first.
+        $middleware->web(append: [\App\Http\Middleware\DeviceAutoLink::class]);
         $middleware->alias([
             // 'api-key'         any valid key
             // 'api-key:ingest'  a valid key that also holds the 'ingest' scope

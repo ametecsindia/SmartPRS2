@@ -31,6 +31,22 @@ class UserController extends Controller
         'accountant' => 'Accountant',   // rev 116: confirms collections before commission approval
     ];
 
+    /**
+     * 7 Oct 2026 (Ejaz) — every role a login can hold: the built-ins plus every
+     * role added on Settings → Roles & Permissions (key = login role name).
+     */
+    private static function rolesMap(?int $tid): array
+    {
+        $out = self::ASSIGNABLE;
+        foreach (\App\Services\AccessRoles::matrixLabels($tid) as $l) {
+            if (! \App\Services\AccessRoles::canonical($l, null)) {   // not a built-in
+                $out[$l] = $l;
+            }
+        }
+
+        return $out;
+    }
+
     private function canManage(Request $request): bool
     {
         return $request->user()->hasAnyRole(['super_admin', 'admin', 'hr_manager']);
@@ -108,7 +124,7 @@ class UserController extends Controller
                 'name' => $u->name,
                 'email' => $u->email,
                 'role' => $roleByUser[$u->id] ?? '',
-                'roleLabel' => self::ASSIGNABLE[$roleByUser[$u->id] ?? ''] ?? ucfirst(str_replace('_', ' ', $roleByUser[$u->id] ?? '')),
+                'roleLabel' => ($roleByUser[$u->id] ?? '') !== '' ? AppController::roleLabel($roleByUser[$u->id]) : '',
                 'status' => $u->status ?? 'active',
                 'employeeId' => $u->employee_id ? (int) $u->employee_id : null,
                 'employee' => $u->employee_id ? ($empNames[$u->employee_id] ?? '') : '',
@@ -123,9 +139,27 @@ class UserController extends Controller
                 ->map(fn ($e) => ['id' => (int) $e->id, 'code' => $e->emp_code, 'name' => $e->name, 'email' => $e->email])
                 ->values();
 
+            // 30 Sep 2026 (Ejaz) — every Directory employee appears on User Access: the ones
+            // with no login yet are listed separately so HR can create it in one click.
+            $linkedIds = $users->pluck('employee_id')->filter()->map(fn ($x) => (int) $x)->all();
+            $userEmails = $users->pluck('email')->filter()->map(fn ($x) => strtolower(trim($x)))->all();
+            $noLogin = DB::table('employees')
+                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                ->whereNull('deleted_at')
+                ->when(Schema::hasColumn('employees', 'archived_at'), fn ($q) => $q->whereNull('archived_at'))
+                ->where(fn ($q) => $q->whereNull('status')->orWhereRaw('LOWER(status) NOT IN (?, ?)', ['inactive', 'exited']))
+                ->orderBy('name')->get(array_merge(['id', 'emp_code', 'name', 'email'], Schema::hasColumn('employees', 'access_role') ? ['access_role'] : []))
+                ->reject(fn ($e) => in_array((int) $e->id, $linkedIds, true) || ($e->email && in_array(strtolower(trim($e->email)), $userEmails, true)))
+                ->map(fn ($e) => ['employeeId' => (int) $e->id, 'code' => $e->emp_code, 'name' => $e->name, 'email' => $e->email ?? '',
+                    // 7 Oct 2026 — the Directory's Access Role pre-selects the new login's role.
+                    'roleKey' => ! empty($e->access_role) && ($lab = \App\Services\AccessRoles::canonical($e->access_role, $tid ? (int) $tid : null))
+                        ? (array_search($lab, self::ASSIGNABLE, true) ?: $lab) : 'employee'])
+                ->values();
+
             return response()->json([
                 'rows' => $rows,
-                'roles' => self::ASSIGNABLE,
+                'noLogin' => $noLogin,
+                'roles' => self::rolesMap($tid ? (int) $tid : null),
                 'employees' => $employees,
                 'canManage' => true,
             ]);
@@ -147,8 +181,10 @@ class UserController extends Controller
                 'status' => ['nullable', 'in:active,disabled'],
                 'employee_id' => ['nullable', 'integer'],
             ]);
-            if (! array_key_exists($v['role'], self::ASSIGNABLE)) {
-                return response()->json(['ok' => false, 'error' => 'Invalid role.'], 422);
+            // 7 Oct 2026 — built-in OR a Roles & Permissions role.
+            $roleLabel = \App\Services\AccessRoles::canonical($v['role'], $tid ? (int) $tid : null);
+            if (! $roleLabel) {
+                return response()->json(['ok' => false, 'error' => 'Invalid role — add it in Settings → Roles & Permissions first.'], 422);
             }
 
             $email = strtolower(trim($v['email']));
@@ -190,7 +226,10 @@ class UserController extends Controller
                     'employee_id' => $employeeId,
                     'updated_at' => now(),
                 ]);
-                $this->assignRole($id, $v['role']);
+                if ($err = \App\Services\AccessRoles::assign(\App\Models\User::find($id), $roleLabel, $request->user())) {
+                    return response()->json(['ok' => false, 'error' => $err], 422);
+                }
+                $this->rememberRole($employeeId, $roleLabel);
 
                 return response()->json(['ok' => true, 'id' => $id, 'invited' => false]);
             }
@@ -206,7 +245,8 @@ class UserController extends Controller
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
-            $this->assignRole($newId, $v['role']);
+            \App\Services\AccessRoles::assign(\App\Models\User::find($newId), $roleLabel, $request->user());
+            $this->rememberRole($employeeId, $roleLabel);
             $this->sendInvite($request, $newId, $v['name'], $email, $tid);
 
             return response()->json(['ok' => true, 'id' => $newId, 'invited' => true]);
@@ -291,6 +331,17 @@ class UserController extends Controller
             return response()->json(['ok' => false, 'error' => collect($e->errors())->flatten()->first()], 422);
         } catch (\Throwable $e) {
             return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+        }
+    }
+
+    /** 7 Oct 2026 — the login's role is also the employee's Access Role (Directory / export show it). */
+    private function rememberRole(?int $employeeId, string $label): void
+    {
+        try {
+            if ($employeeId && Schema::hasColumn('employees', 'access_role')) {
+                DB::table('employees')->where('id', $employeeId)->update(['access_role' => $label]);
+            }
+        } catch (\Throwable $e) {
         }
     }
 

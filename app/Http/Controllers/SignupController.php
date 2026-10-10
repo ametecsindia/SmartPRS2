@@ -118,6 +118,37 @@ class SignupController extends Controller
             }
         }
         SaasController::ensureGstCols();
+        // 8 Oct 2026 (Ejaz): one-time Setup & Onboarding charge (plans.setup_charge),
+        // locked on the signup row and shown as its own line on the first invoice.
+        SaasController::ensureSetupChargeCol();
+        foreach (['signups', 'invoices'] as $tbl) {
+            if (Schema::hasTable($tbl) && ! Schema::hasColumn($tbl, 'setup_charge')) {
+                try {
+                    Schema::table($tbl, function (Blueprint $t) {
+                        $t->decimal('setup_charge', 12, 2)->default(0);
+                    });
+                } catch (\Throwable $e) {
+                }
+            }
+        }
+    }
+
+    /**
+     * 8 Oct 2026 (Ejaz): add the plan's one-time Setup & Onboarding charge to a
+     * (possibly coupon-discounted) price. The coupon never discounts setup; GST
+     * is charged on subscription + setup. After this: amount = taxable value,
+     * setup = the setup charge, sub_amount = subscription part of amount.
+     */
+    public static function withSetup(array $price, $plan): array
+    {
+        $setup = round(max(0, (float) ($plan->setup_charge ?? 0)), 2);
+        $price['setup'] = $setup;
+        $price['sub_amount'] = (float) $price['amount'];
+        $price['amount'] = round($price['amount'] + $setup, 2);
+        $price['tax'] = round($price['amount'] * BillingController::GST / 100, 2);
+        $price['total'] = round($price['amount'] + $price['tax'], 2);
+
+        return $price;
     }
 
     private function activePlans()
@@ -125,7 +156,7 @@ class SignupController extends Controller
         return DB::table('plans')->where('status', 'active')
             ->whereIn('name', ['Starter', 'Growth', 'Professional'])
             ->orderBy('base_price')
-            ->get(['id', 'name', 'base_price', 'per_user_price', 'seat_max']);
+            ->get(['id', 'name', 'base_price', 'per_user_price', 'seat_max', 'setup_charge']);
     }
 
     public function show(Request $request)
@@ -207,6 +238,7 @@ class SignupController extends Controller
                 $price = \App\Services\CouponService::apply($price, $coupon);
                 $couponCode = $coupon->code;
             }
+            $price = self::withSetup($price, $plan);
             $paise = (int) round($price['total'] * 100);
 
             $uuid = (string) Str::uuid();
@@ -215,7 +247,7 @@ class SignupController extends Controller
                 'admin_email' => $email, 'mobile' => $v['mobile'] ?? null,
                 'gstin' => $gstin, 'state' => $v['state'], 'subdomain' => $slugReq ?: null,
                 'plan_id' => $plan->id, 'seats' => (int) $v['seats'], 'companies' => $companies, 'cycle' => $v['cycle'],
-                'amount' => $price['amount'], 'tax' => $price['tax'],
+                'amount' => $price['amount'], 'tax' => $price['tax'], 'setup_charge' => $price['setup'],
                 'coupon_code' => $couponCode, 'coupon_discount' => $price['coupon_discount'] ?? 0,
                 'terms_accepted_at' => now(),
                 'status' => 'pending', 'created_at' => now(), 'updated_at' => now(),
@@ -303,8 +335,10 @@ class SignupController extends Controller
             // rev 112: the signup row holds the COUPON-DISCOUNTED amount/tax (what
             // was actually paid); $price stays the FULL rate for the subscription.
             $couponDisc = (float) ($s->coupon_discount ?? 0);
-            $paidAmount = $couponDisc > 0 ? (float) $s->amount : $price['amount'];
-            $paidTax = $couponDisc > 0 ? (float) $s->tax : $price['tax'];
+            $setup = (float) ($s->setup_charge ?? 0);   // 8 Oct 2026: one-time setup, in the row's amount
+            $useRow = $couponDisc > 0 || $setup > 0;
+            $paidAmount = $useRow ? (float) $s->amount : $price['amount'];
+            $paidTax = $useRow ? (float) $s->tax : $price['tax'];
             $paymentLines = [
                 'Plan' => ($plan->name ?? 'Plan').' — includes up to '.($plan->seat_max ?? '—').' employees',
                 'Employees' => $s->seats.' (total across all your companies)',
@@ -314,12 +348,15 @@ class SignupController extends Controller
             if ($couponDisc > 0) {
                 $paymentLines['Coupon ('.$s->coupon_code.')'] = '− '.$fmt($couponDisc);
             }
+            $paymentLines['Subscription amount'] = $fmt($paidAmount - $setup);
+            if ($setup > 0) {
+                $paymentLines['Setup & Onboarding charges (one-time)'] = $fmt($setup);
+            }
             $paymentLines += [
-                'Subscription amount' => $fmt($paidAmount),
                 'GST (18%)' => $fmt($paidTax),
                 'Total paid' => $fmt(round($paidAmount + $paidTax, 2)),
                 'Payment reference' => $paymentId,
-                'Active until' => $end->format('d M Y'),
+                'Active until' => $end->format('d-m-Y'),
             ];
 
             // 1) Tenant + first company + admin (welcome email with credentials +
@@ -353,9 +390,10 @@ class SignupController extends Controller
             //    charged (discounted) — the subscription itself keeps full rate.
             $inv = BillingController::createInvoiceForTenant($tid);
             $invPatch = ['gateway_order_id' => $orderId, 'updated_at' => now()];
-            if ($couponDisc > 0) {
+            if ($useRow) {
                 $invPatch['amount'] = $paidAmount;
                 $invPatch['tax'] = $paidTax;
+                $invPatch['setup_charge'] = $setup;
             }
             DB::table('invoices')->where('id', $inv->id)->update(ApprovalService::safeRow('invoices', $invPatch));
             $inv = DB::table('invoices')->where('id', $inv->id)->first();
@@ -436,9 +474,9 @@ class SignupController extends Controller
                             ($plan->name ?? 'Plan'),                 // {{2}} plan
                             (string) $s->seats,                      // {{3}} employees
                             $cycleLabel,                             // {{4}} billing period
-                            'Rs '.number_format($price['total'], 2), // {{5}} total paid (incl. GST)
+                            'Rs '.number_format($paidAmount + $paidTax, 2), // {{5}} total paid (incl. GST + setup)
                             $paymentId,                              // {{6}} payment reference
-                            $end->format('d M Y'),                   // {{7}} active until
+                            $end->format('d-m-Y'),                   // {{7}} active until
                         ],
                     ]);
                 }
@@ -601,6 +639,7 @@ class SignupController extends Controller
                     $couponCode = $auto->code;
                 }
             }
+            $price = self::withSetup($price, $plan);
 
             // rev 108: optional client-chosen web address (validated lightly here;
             // final uniqueness is re-checked at provisioning with auto fallback).
@@ -627,7 +666,7 @@ class SignupController extends Controller
                 'admin_email' => $email, 'mobile' => $v['mobile'] ?? null,
                 'gstin' => $gstin, 'state' => $v['state'], 'subdomain' => $slugReq ?: null,
                 'plan_id' => $plan->id, 'seats' => (int) $v['seats'], 'companies' => $companies, 'cycle' => $v['cycle'],
-                'amount' => $price['amount'], 'tax' => $price['tax'],
+                'amount' => $price['amount'], 'tax' => $price['tax'], 'setup_charge' => $price['setup'],
                 'coupon_code' => $couponCode, 'coupon_discount' => $price['coupon_discount'] ?? 0,
                 'status' => 'quoted', 'quote_token' => $token, 'quote_no' => $quoteNo, 'quoted_at' => now(),
                 'created_at' => now(), 'updated_at' => now(),
@@ -652,10 +691,11 @@ class SignupController extends Controller
                         'Billing period' => $cycleLabel,
                         // rev 113: the discount is stated CLEARLY on the quotation.
                         'Discount (coupon '.($couponCode ?: '—').')' => $couponCode ? '− ₹'.number_format((float) ($price['coupon_discount'] ?? 0), 2) : null,
-                        'Subscription amount' => '₹'.number_format($price['amount'], 2),
+                        'Subscription amount' => '₹'.number_format($price['sub_amount'], 2),
+                        'Setup & Onboarding charges (one-time)' => $price['setup'] > 0 ? '₹'.number_format($price['setup'], 2) : null,
                         'GST (18%)' => '₹'.number_format($price['tax'], 2),
                         'Total payable' => '₹'.number_format($price['total'], 2),
-                        'Valid until' => now()->addDays(self::QUOTE_VALID_DAYS)->format('d M Y'),
+                        'Valid until' => now()->addDays(self::QUOTE_VALID_DAYS)->format('d-m-Y'),
                     ]),
                     'cta_label' => 'Pay securely & create workspace',
                     'cta_url' => $link,
@@ -690,14 +730,19 @@ class SignupController extends Controller
     {
         $price = BillingController::priceFor($plan, (int) $s->seats, $s->cycle, max(1, (int) ($s->companies ?? 1)));
         $disc = (float) ($s->coupon_discount ?? 0);
+        $setup = (float) ($s->setup_charge ?? 0);   // 8 Oct 2026: locked at quote time
         if ($disc > 0) {
             $price['amount_before_coupon'] = $price['amount'];
             $price['coupon_code'] = $s->coupon_code;
             $price['coupon_discount'] = $disc;
+        }
+        if ($disc > 0 || $setup > 0) {
             $price['amount'] = (float) $s->amount;
             $price['tax'] = (float) $s->tax;
             $price['total'] = round($price['amount'] + $price['tax'], 2);
         }
+        $price['setup'] = $setup;
+        $price['sub_amount'] = round($price['amount'] - $setup, 2);
 
         return $price;
     }
@@ -749,7 +794,7 @@ class SignupController extends Controller
             if ($b && $b['balance'] > 0.01) {
                 $balance = [
                     'total' => $b['total'], 'paid' => $b['paid'], 'balance' => $b['balance'],
-                    'dueOn' => ! empty($b['inv']->due_on) ? \Illuminate\Support\Carbon::parse($b['inv']->due_on)->format('d M Y') : null,
+                    'dueOn' => ! empty($b['inv']->due_on) ? \Illuminate\Support\Carbon::parse($b['inv']->due_on)->format('d-m-Y') : null,
                 ];
             }
         }
@@ -758,7 +803,7 @@ class SignupController extends Controller
             's' => $s, 'plan' => $plan, 'price' => $price, 'token' => $token,
             'balance' => $balance,
             'expired' => $expired, 'paid' => $s->status === 'provisioned',
-            'validUntil' => $s->quoted_at ? \Illuminate\Support\Carbon::parse($s->quoted_at)->addDays(self::QUOTE_VALID_DAYS)->format('d M Y') : '',
+            'validUntil' => $s->quoted_at ? \Illuminate\Support\Carbon::parse($s->quoted_at)->addDays(self::QUOTE_VALID_DAYS)->format('d-m-Y') : '',
             'razorpayKey' => optional(BillingController::razorpayCreds())['key'] ?? null,
         ]);
     }
@@ -929,7 +974,7 @@ class SignupController extends Controller
             'companies' => $companies,
             'cycleLabel' => ['quarterly' => 'Quarterly (3 months)', 'halfyear' => 'Half-yearly (6 months · 10% off)', 'annual' => 'Annual (12 months · 25% off)'][$s->cycle] ?? $s->cycle,
             'intra' => $intra, 'cgst' => round($price['tax'] / 2, 2), 'igst' => $price['tax'],
-            'validUntil' => $s->quoted_at ? \Illuminate\Support\Carbon::parse($s->quoted_at)->addDays(self::QUOTE_VALID_DAYS)->format('d M Y') : now()->addDays(self::QUOTE_VALID_DAYS)->format('d M Y'),
+            'validUntil' => $s->quoted_at ? \Illuminate\Support\Carbon::parse($s->quoted_at)->addDays(self::QUOTE_VALID_DAYS)->format('d-m-Y') : now()->addDays(self::QUOTE_VALID_DAYS)->format('d-m-Y'),
             'payLink' => url('/quote/'.$s->quote_token),
         ]);
     }
@@ -1074,7 +1119,7 @@ class SignupController extends Controller
         $total = round((float) $price['total'], 2);
         $balance = max(0, round($total - $received, 2));
         $couponDisc = (float) ($s->coupon_discount ?? 0);
-        $dueLabel = $dueDate ? \Illuminate\Support\Carbon::parse($dueDate)->format('d M Y') : null;
+        $dueLabel = $dueDate ? \Illuminate\Support\Carbon::parse($dueDate)->format('d-m-Y') : null;
 
         $paymentLines = [
             'Plan' => ($plan->name ?? 'Plan').' — includes up to '.($plan->seat_max ?? '—').' employees',
@@ -1085,8 +1130,11 @@ class SignupController extends Controller
         if ($couponDisc > 0) {
             $paymentLines['Coupon ('.$s->coupon_code.')'] = '− '.$fmt($couponDisc);
         }
+        $paymentLines['Subscription amount'] = $fmt($price['sub_amount'] ?? $price['amount']);
+        if (($price['setup'] ?? 0) > 0) {
+            $paymentLines['Setup & Onboarding charges (one-time)'] = $fmt($price['setup']);
+        }
         $paymentLines += [
-            'Subscription amount' => $fmt($price['amount']),
             'GST (18%)' => $fmt($price['tax']),
             'Total' => $fmt($total),
             'Amount received' => $fmt($received).($received > 0 ? ' ('.$method.($reference ? ' · '.$reference : '').')' : ''),
@@ -1094,7 +1142,7 @@ class SignupController extends Controller
         if ($balance > 0) {
             $paymentLines['Balance payable'] = $fmt($balance).($dueLabel ? ' — by '.$dueLabel : '');
         }
-        $paymentLines['Active until'] = $end->format('d M Y');
+        $paymentLines['Active until'] = $end->format('d-m-Y');
 
         // 1) Tenant + first company + admin (welcome email with credentials).
         $res = SaasController::provisionTenantRecord([
@@ -1127,9 +1175,11 @@ class SignupController extends Controller
         //    credit due date becomes the invoice's due date.
         $inv = BillingController::createInvoiceForTenant($tid);
         $invPatch = ['updated_at' => now()];
-        if ($couponDisc > 0) {
+        $setup = (float) ($s->setup_charge ?? 0);
+        if ($couponDisc > 0 || $setup > 0) {
             $invPatch['amount'] = (float) $s->amount;
             $invPatch['tax'] = (float) $s->tax;
+            $invPatch['setup_charge'] = $setup;
         }
         if ($dueDate) {
             $invPatch['due_on'] = $dueDate;

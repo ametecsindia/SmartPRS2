@@ -35,7 +35,9 @@ class StatutoryController extends Controller
                 ->orderBy('emp_code')
                 ->get(array_values(array_filter(['id', 'emp_code', 'name', 'ctc', 'doj', 'company_id',
                     Schema::hasColumn('employees', 'pt_state') ? 'pt_state' : null,
-                    Schema::hasColumn('employees', 'gender') ? 'gender' : null]))); // rev180 — schema-safe on fresh DBs; gender for MH female PT exemption
+                    Schema::hasColumn('employees', 'gender') ? 'gender' : null,
+                    // 10 Oct 2026 — PT rules by branch / designation
+                    ...array_map(fn ($c) => Schema::hasColumn('employees', $c) ? $c : null, ['branch', 'branch_id', 'designation', 'designation_id'])]))); // rev180 — schema-safe on fresh DBs; gender for MH female PT exemption
 
             if ($type === 'gratuity') {
                 $cols = ['Code', 'Name', 'DOJ', 'Years', 'Monthly Basic', 'Eligible', 'Gratuity'];
@@ -90,10 +92,15 @@ class StatutoryController extends Controller
                         'month' => $month ?? now()->format('Y-m'),
                     ]);
                     $s = AppDataController::computeSlip((float) $e->ctc, $er);
-                    $mpt = AppDataController::ptForGross((float) $s['gross'], $er, (string) ($e->pt_state ?? ''), $month, (string) ($e->gender ?? ''));
+                    $ptx = AppDataController::ptCtx($e);   // 10 Oct 2026 — PT rules (branch / designation / gender)
+                    $ptEmp = ['branch' => $ptx['pt_branch'], 'designation' => $ptx['pt_designation'], 'gender' => (string) ($e->gender ?? '')];
+                    $mpt = AppDataController::ptForGross((float) $s['gross'], $er, (string) ($e->pt_state ?? ''), $month, (string) ($e->gender ?? ''), $companyId ?: ($e->company_id ?? null), $ptEmp);
+                    if (in_array('pt', AppDataController::statDeferred($er, $e->doj ?? null, $month), true)) {
+                        $mpt = 0.0;   // 8 Oct 2026 — statutory deferral (new joiner)
+                    }
                     // Annual: Maharashtra's February ₹300 makes the year ₹2,500 for the top slab.
                     $annual = $mpt * 12;
-                    if (stripos((string) ($e->pt_state ?? ''), 'maharashtra') !== false && $mpt >= 200) {
+                    if (AppDataController::ptCustomRows($er, $companyId ?: ($e->company_id ?? null), $ptEmp) === null && stripos((string) ($e->pt_state ?? ''), 'maharashtra') !== false && $mpt >= 200) {
                         $annual = 200 * 11 + 300;
                     }
                     $total += $annual;
@@ -148,6 +155,13 @@ class StatutoryController extends Controller
                         } catch (\Throwable $ex) {
                             // unparseable DOJ → full year
                         }
+                    }
+                    // 8 Oct 2026 (Ejaz) — statutory deferral: bonus accrues only from the month the deferral ends.
+                    if (in_array('bonus', (array) ($er['stat_defer_items'] ?? []), true) && ($until = AppDataController::statDeferUntil($er, $e->doj ?? null))) {
+                        $u = Carbon::parse($until.'-01');
+                        $fyEnd = $fyStart->copy()->addYear();
+                        $left = $u->gt($fyStart) ? max(0, (int) round($u->diffInMonths($fyEnd, false))) : 12;
+                        $months = (int) min($months, $left);
                     }
                     $bonus = $elig ? round($wage * $months * $pct / 100) : 0.0;
                     $total += $bonus;

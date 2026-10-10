@@ -171,7 +171,7 @@ class ConfigController extends Controller
                     'subject' => $r->subject,
                     'status' => $r->status,
                     'error' => $r->error,
-                    'at' => \Illuminate\Support\Carbon::parse($r->sent_at ?? $r->created_at)->format('d M Y H:i'),
+                    'at' => \Illuminate\Support\Carbon::parse($r->sent_at ?? $r->created_at)->format('d-m-Y H:i'),
                 ])->values(),
                 'counts' => $counts,
                 'canManage' => true,
@@ -186,9 +186,17 @@ class ConfigController extends Controller
         abort_unless($this->canManage($request), 403);
         $tenantId = $request->user()->tenant_id;
         $v = $request->validate([
-            'to' => ['required', 'email'],
+            'to' => ['required', 'string', 'max:1000'],
             'company_id' => ['required', 'string'],
         ]);
+        // 8 Oct 2026 (Ejaz) — one or more addresses, comma / semicolon / space separated.
+        // (The old single-'email' rule rejected "a@x.com,b@x.com" with a bare 422, shown as "Test failed".)
+        $to = array_values(array_unique(array_filter(array_map('trim', preg_split('/[,;\s]+/', (string) $v['to'])))));
+        $bad = array_values(array_filter($to, fn ($a) => ! filter_var($a, FILTER_VALIDATE_EMAIL)));
+        if (! $to || $bad) {
+            return response()->json(['ok' => false, 'error' => 'Not a valid email address: '.($bad ? implode(', ', $bad) : '(blank)')], 422);
+        }
+        $v['to'] = $to;
         $m = self::mailConfigFor($tenantId, $v['company_id']);
         if (empty($m['host']) || empty($m['from_address'])) {
             return response()->json(['ok' => false, 'error' => 'No SMTP for this company (and no tenant default). Set host + From address, Save, then test.'], 422);
@@ -210,10 +218,16 @@ class ConfigController extends Controller
                 $msg->to($v['to'])->subject('SmartPRS SMTP test');
             });
         } catch (\Throwable $e) {
-            return response()->json(['ok' => false, 'error' => 'Send failed: '.$e->getMessage()], 422);
+            $err = $e->getMessage();
+            // Gmail / Google Workspace refuse the normal account password over SMTP.
+            if (stripos($err, 'authenticate') !== false && stripos((string) $m['host'], 'gmail') !== false) {
+                $err .= ' — Gmail needs a 16-character App Password (Google Account → Security → 2-Step Verification → App passwords), not the normal login password. The USERNAME must be the same Gmail / Workspace account that created it.';
+            }
+
+            return response()->json(['ok' => false, 'error' => 'Send failed: '.$err], 422);
         }
 
-        return response()->json(['ok' => true, 'message' => 'Test email sent to '.$v['to']]);
+        return response()->json(['ok' => true, 'message' => 'Test email sent to '.implode(', ', $v['to'])]);
     }
 
     // ============================================================ branding ===

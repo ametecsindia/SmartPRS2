@@ -130,7 +130,11 @@ class ProbationService
      * computed end date + days-left — powers the HR "Probation" screen and the
      * reminder sweep.
      */
-    public static function board(int $tenantId, $onDate = null, ?array $cfg = null): array
+    // 2026-09-28 — $tenantId is nullable everywhere: self-hosted installs run with
+    // tenant_id NULL, and where('tenant_id', null) is whereNull in Laravel. Before,
+    // the controller passed 0 / skipped null, so on-prem the board was always
+    // empty, reminders never fired and Confirm matched no row.
+    public static function board(?int $tenantId, $onDate = null, ?array $cfg = null): array
     {
         $cfg ??= self::config($tenantId);
         $today = self::toCarbon($onDate)->startOfDay();
@@ -153,7 +157,9 @@ class ProbationService
                 }
                 $out[] = [
                     'employee_id' => (int) $e->id,
+                    'emp_code' => $e->emp_code ?? '',
                     'name' => $e->name ?? '',
+                    'months' => (int) ($e->probation_months ?? 0) ?: (int) ($cfg['default_months'] ?? 6),
                     'doj' => $e->doj ?? null,
                     'probation_end' => $end->toDateString(),
                     'days_left' => (int) $today->diffInDays($end, false),
@@ -178,10 +184,10 @@ class ProbationService
         $sent = 0;
         $today = self::toCarbon($onDate)->startOfDay();
         $tenantIds = $tenantId !== null ? [$tenantId]
-            : DB::table('employees')->distinct()->pluck('tenant_id')->filter()->values()->all();
+            : DB::table('employees')->distinct()->pluck('tenant_id')->unique()->values()->all();   // includes NULL (self-hosted)
 
         foreach ($tenantIds as $tid) {
-            $tid = (int) $tid;
+            $tid = $tid === null ? null : (int) $tid;
             $cfg = self::config($tid);
             $milestones = array_map('intval', (array) ($cfg['reminder_days'] ?? [30, 15, 7, 0]));
             foreach (self::board($tid, $today, $cfg) as $row) {
@@ -203,7 +209,7 @@ class ProbationService
     }
 
     /** Notify HR + manager about one employee's probation milestone (idempotent). */
-    private static function notify(int $tid, array $row, string $milestone, array $cfg): int
+    private static function notify(?int $tid, array $row, string $milestone, array $cfg): int
     {
         $empId = $row['employee_id'];
         $end = $row['probation_end'];
@@ -211,7 +217,7 @@ class ProbationService
             ? "is overdue (ended {$end})"
             : ($milestone === '0' ? "completes today ({$end})" : "completes in {$milestone} days ({$end})");
         $title = "Probation review: {$row['name']} {$when}";
-        $body = "{$row['name']}'s probation {$when}. Please confirm, extend, or update their status in the Probation screen.";
+        $body = "{$row['name']}'s probation {$when}. Open People → Probation to Confirm (sets Employment Stage to Permanent in the Directory) or Extend.";
         $dedupeBase = "probation:{$empId}:{$end}:{$milestone}";
 
         $recipients = self::recipientUserIds($tid, $empId, $cfg);
@@ -236,7 +242,7 @@ class ProbationService
     }
 
     /** HR/admin users of the tenant + the employee's reporting manager's user. */
-    private static function recipientUserIds(int $tid, int $empId, array $cfg): array
+    private static function recipientUserIds(?int $tid, int $empId, array $cfg): array
     {
         $ids = [];
         try {
@@ -278,7 +284,7 @@ class ProbationService
      * PF/PT/TDS resume next run; stamps confirmed_on/by; logs history + audit.
      * Guarded by the caller (FeaturePermissions 'probation.manage').
      */
-    public static function confirm(int $tid, int $empId, string $by, ?string $remarks = null, $onDate = null): bool
+    public static function confirm(?int $tid, int $empId, string $by, ?string $remarks = null, $onDate = null): bool
     {
         self::ensureSchema();
         try {
@@ -321,7 +327,7 @@ class ProbationService
      * Extend probation to a new end date (mandatory remarks per the roadmap).
      * Keeps employment_stage='probation'; logs history + audit.
      */
-    public static function extend(int $tid, int $empId, string $newEnd, string $by, string $remarks): bool
+    public static function extend(?int $tid, int $empId, string $newEnd, string $by, string $remarks): bool
     {
         self::ensureSchema();
         try {
@@ -340,7 +346,7 @@ class ProbationService
     }
 
     /** History rows for one employee (newest first). */
-    public static function history(int $tid, int $empId): array
+    public static function history(?int $tid, int $empId): array
     {
         try {
             if (! Schema::hasTable('probation_events')) {
@@ -354,7 +360,7 @@ class ProbationService
         }
     }
 
-    private static function event(int $tid, int $empId, string $action, ?string $details, ?string $effective, string $by): void
+    private static function event(?int $tid, int $empId, string $action, ?string $details, ?string $effective, string $by): void
     {
         try {
             DB::table('probation_events')->insert([

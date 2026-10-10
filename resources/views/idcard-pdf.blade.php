@@ -53,7 +53,7 @@
             <tr><td class="k">Designation</td><td class="v">{{ $designation ?: '—' }}</td></tr>
             <tr><td class="k">Department</td><td class="v">{{ $department ?: '—' }}</td></tr>
             <tr><td class="k">Company</td><td class="v">{{ $company ?: '—' }}</td></tr>
-            <tr><td class="k">Date of Joining</td><td class="v">{{ $e->doj ? \Illuminate\Support\Carbon::parse($e->doj)->format('d M Y') : '—' }}</td></tr>
+            <tr><td class="k">Date of Joining</td><td class="v">{{ $e->doj ? \Illuminate\Support\Carbon::parse($e->doj)->format('d-m-Y') : '—' }}</td></tr>
             <tr><td class="k">Mobile</td><td class="v">{{ $e->mobile ?: '—' }}</td></tr>
         </table>
     </div>

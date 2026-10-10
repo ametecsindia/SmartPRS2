@@ -43,6 +43,18 @@ class AppStateController extends Controller
         if (! is_array($state)) {
             return response()->json(['ok' => false], 422);
         }
+        // 29 Sep 2026 — every screen saves the whole state, so a non-admin could
+        // rewrite their own role's permissions. Only Admin / Super Admin may
+        // change Roles & Permissions; for anyone else the stored roles are kept.
+        if (! $request->user()->hasAnyRole(['super_admin', 'admin'])) {
+            $old = json_decode((string) DB::table('settings')->where('tenant_id', $this->tenantKey($request))
+                ->where('key', 'app_state')->value('value'), true);
+            if (is_array($old) && array_key_exists('roles', $old)) {
+                $state['roles'] = $old['roles'];
+            } else {
+                unset($state['roles']);
+            }
+        }
 
         DB::table('settings')->updateOrInsert(
             ['tenant_id' => $this->tenantKey($request), 'key' => 'app_state'],

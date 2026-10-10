@@ -47,7 +47,7 @@
         <td><div class="k">Designation</div><div class="val">{{ $e->designation ?? '—' }}</div></td>
         <td><div class="k">Status</div><div class="val">{{ ucfirst($e->status ?? 'active') }}</div></td>
     </tr><tr>
-        <td><div class="k">Date of Joining</div><div class="val">{{ $e->doj ?? '—' }}</div></td>
+        <td><div class="k">Date of Joining</div><div class="val">{{ $e->doj ? \App\Support\DateFmt::display($e->doj) : '—' }}</div></td>
         <td><div class="k">Mobile</div><div class="val">{{ $e->mobile ?? '—' }}</div></td>
         <td><div class="k">Department</div><div class="val">{{ $e->department ?? '—' }}</div></td>
         <td><div class="k">Compliance Score</div><div class="val" style="color:{{ $verdictColor }}">{{ $score }}%</div></td>

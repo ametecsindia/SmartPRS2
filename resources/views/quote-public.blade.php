@@ -68,7 +68,10 @@
                 <div class="row"><span>Amount before discount</span><b>₹{{ number_format($price['amount_before_coupon'] ?? 0, 2) }}</b></div>
                 <div class="row" style="color:#16a34a;"><span><i class="fas fa-gift"></i> Discount — coupon {{ $price['coupon_code'] }}</span><b>− ₹{{ number_format($price['coupon_discount'], 2) }}</b></div>
                 @endif
-                <div class="row"><span>Subscription amount{{ ($price['coupon_discount'] ?? 0) > 0 ? ' (after discount)' : '' }}</span><b>₹{{ number_format($price['amount'], 2) }}</b></div>
+                <div class="row"><span>Subscription amount{{ ($price['coupon_discount'] ?? 0) > 0 ? ' (after discount)' : '' }}</span><b>₹{{ number_format($price['sub_amount'] ?? $price['amount'], 2) }}</b></div>
+                @if(($price['setup'] ?? 0) > 0)
+                <div class="row"><span>Setup &amp; Onboarding charges (one-time)</span><b>₹{{ number_format($price['setup'], 2) }}</b></div>
+                @endif
                 <div class="row"><span>GST (18%)</span><b>₹{{ number_format($price['tax'], 2) }}</b></div>
                 <div class="total"><span>Total payable</span><span>₹{{ number_format($price['total'], 2) }}</span></div>
 

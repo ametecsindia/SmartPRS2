@@ -111,7 +111,7 @@ class AttendanceReportController extends Controller
         $selfScope = \App\Http\Controllers\AppDataController::selfScope($request, true);
         $logsQ = DB::table('attendance_logs')
             ->when($tenantId, fn ($q) => $q->where('tenant_id', $tenantId))
-            ->when($selfScope, fn ($q) => $q->where('emp_code', $selfScope['code']))
+            ->when($selfScope, fn ($q) => $q->whereIn('emp_code', $selfScope['codes']))
             ->whereBetween('log_date', [$from, $to])
             ->orderBy('emp_code')->orderBy('punch_at');
         $logs = $logsQ->get();
@@ -124,7 +124,11 @@ class AttendanceReportController extends Controller
 
         // Group punches by employee + day.
         $groups = [];
+        $active = $this->activeCodes($tenantId);   // 28-Sep (Ejaz): only active employees
         foreach ($logs as $l) {
+            if (! isset($active[$l->emp_code])) {
+                continue;
+            }
             $key = $l->emp_code.'|'.$l->log_date;
             $groups[$key][] = $l;
         }
@@ -180,20 +184,17 @@ class AttendanceReportController extends Controller
             if ($rangeDays > 0 && $rangeDays <= self::MAX_ENUMERATE_DAYS) {
                 $holidaySet = \App\Services\AbsenceService::holidaysInRange($tenantId, $from, $to);
                 $leavesByEmp = \App\Services\AbsenceService::leavesInRange($tenantId, $from, $to);
-                $workingDays = [1, 2, 3, 4, 5, 6];
-                try {
-                    $workingDays = array_map('intval', (array) (\App\Services\AbsenceService::config($tenantId)['working_days'] ?? $workingDays));
-                } catch (\Throwable $e) {
-                    // config() is already fail-soft, but keep the default either way
-                }
+                // Weekly Offs setting (Attendance -> Working Shifts) — same rules as payroll.
+                $offRules = \App\Http\Controllers\SettingsController::rates($tenantId);
+                $todayStr = now()->toDateString();
 
                 // Active-ish employees in scope (same leniency ensureDemo() already
                 // uses in this file: exclude only an explicit 'exited' status).
                 // 'shift' is selected only when the column exists — same tolerance
                 // employeeMeta() already applies to this optional column.
                 $scopeCols = array_values(array_filter(
-                    ['id', 'emp_code', 'name', 'shift'],
-                    fn ($c) => $c === 'shift' ? Schema::hasColumn('employees', 'shift') : true
+                    ['id', 'emp_code', 'name', 'shift', 'company_id', 'branch', 'doj'],   // 7 Oct 2026 — company offs/holidays, DOJ
+                    fn ($c) => in_array($c, ['shift', 'branch', 'doj', 'company_id'], true) ? Schema::hasColumn('employees', $c) : true
                 ));
                 $scopeEmps = DB::table('employees')
                     ->when($tenantId, fn ($q) => $q->where('tenant_id', $tenantId))
@@ -201,11 +202,14 @@ class AttendanceReportController extends Controller
                     ->where(function ($q) {
                         $q->whereNull('status')->orWhereRaw('LOWER(status) <> ?', ['exited']);
                     })
-                    ->when($selfScope, fn ($q) => $q->where('emp_code', $selfScope['code']))
+                    ->when($selfScope, fn ($q) => $q->whereIn('emp_code', $selfScope['codes']))
                     ->get($scopeCols);
 
                 foreach ($scopeEmps as $e) {
                     $code = $e->emp_code;
+                    if (! isset($active[$code])) {
+                        continue;   // inactive / backed-up (Old data)
+                    }
                     $m = $meta[$code] ?? [];
                     $empName = ($m['name'] ?? '') ?: ($e->name ?: $code);
                     for ($d = Carbon::parse($from); $d->lte(Carbon::parse($to)); $d->addDay()) {
@@ -213,9 +217,17 @@ class AttendanceReportController extends Controller
                         if (isset($groups[$code.'|'.$date])) {
                             continue; // already has a detailed punch row above
                         }
+                        // 7 Oct 2026 — days that have not happened, or before the
+                        // employee joined, are not absences.
+                        if ($date > $todayStr || (! empty($e->doj) && $date < substr((string) $e->doj, 0, 10))) {
+                            continue;
+                        }
                         $status = \App\Services\AbsenceService::classifyNoPunchDay(
-                            (array) $e, $date, $holidaySet, $leavesByEmp, $shiftDefs, $rosterMap, $workingDays
+                            (array) $e, $date, $holidaySet, $leavesByEmp, $shiftDefs, $rosterMap, $offRules
                         );
+                        if ($status === 'absent' && $date === $todayStr) {
+                            $status = 'not_marked';   // today, no punch YET — not an absence until the day is over
+                        }
                         $sh = $shiftDefs
                             ? \App\Services\ShiftResolver::resolve($shiftDefs, $rosterMap, $empName, $m['shift'] ?? null, $date)
                             : null;
@@ -265,6 +277,24 @@ class AttendanceReportController extends Controller
             'shift' => ['start' => self::SHIFT_START, 'end' => self::SHIFT_END],
             'rows' => $rows,
         ]);
+    }
+
+    /**
+     * emp_code => true for ACTIVE employees only: not deleted, not backed-up
+     * (archived_at, "Old data"), and status not inactive / exited. Attendance
+     * screens, CSV and PDF all go through this so removed staff never show.
+     */
+    private function activeCodes(?int $tenantId): array
+    {
+        $q = DB::table('employees')
+            ->when($tenantId, fn ($q) => $q->where('tenant_id', $tenantId))
+            ->whereNull('deleted_at')
+            ->where(fn ($q) => $q->whereNull('status')->orWhereRaw('LOWER(status) NOT IN (?, ?)', ['inactive', 'exited']));
+        if (Schema::hasColumn('employees', 'archived_at')) {
+            $q->whereNull('archived_at');
+        }
+
+        return array_fill_keys($q->pluck('emp_code')->filter()->all(), true);
     }
 
     /**
@@ -539,6 +569,11 @@ class AttendanceReportController extends Controller
     {
         $this->ensureTables();
         $tenantId = $request->user()->tenant_id;
+        // 7 Oct 2026 — own punches or a reportee's only (hierarchy scope).
+        $sc = \App\Http\Controllers\AppDataController::selfScope($request, true);
+        if ($sc && ! in_array(strtolower($code), array_map('strtolower', $sc['codes']), true)) {
+            return response()->json(['ok' => false, 'error' => 'Not in your reporting line.'], 403);
+        }
         try {
             $date = Carbon::parse($date)->toDateString();
         } catch (\Exception $e) {
@@ -632,7 +667,7 @@ class AttendanceReportController extends Controller
         $selfScope = \App\Http\Controllers\AppDataController::selfScope($request, true);
         $logs = DB::table('attendance_logs')
             ->when($tenantId, fn ($q) => $q->where('tenant_id', $tenantId))
-            ->when($selfScope, fn ($q) => $q->where('emp_code', $selfScope['code']))
+            ->when($selfScope, fn ($q) => $q->whereIn('emp_code', $selfScope['codes']))
             ->whereBetween('log_date', [$from, $to])
             ->orderBy('emp_code')->orderBy('punch_at')->get();
 
@@ -642,8 +677,11 @@ class AttendanceReportController extends Controller
             ->keyBy(fn ($r) => $r->emp_code.'|'.$r->log_date);
 
         $groups = [];
+        $active = $this->activeCodes($tenantId);   // 28-Sep (Ejaz): only active employees
         foreach ($logs as $l) {
-            $groups[$l->emp_code.'|'.$l->log_date][] = $l;
+            if (isset($active[$l->emp_code])) {
+                $groups[$l->emp_code.'|'.$l->log_date][] = $l;
+            }
         }
 
         try {
@@ -681,7 +719,7 @@ class AttendanceReportController extends Controller
         }
 
         // Optional filters (mirror the on-screen dropdowns) so the PDF matches.
-        foreach (['company', 'branch', 'team', 'reporting', 'leader'] as $fk) {
+        foreach (['company', 'branch', 'team', 'reporting', 'leader', 'emp_code'] as $fk) {
             $val = $request->query($fk);
             if ($val !== null && $val !== '') {
                 $rows = array_values(array_filter($rows, fn ($r) => ($r[$fk] ?? '') === $val));
@@ -703,7 +741,7 @@ class AttendanceReportController extends Controller
             'brand' => $brand,
         ])->setPaper('a4', 'landscape');
 
-        return $pdf->download('attendance-report-'.$from.($to !== $from ? '_'.$to : '').'.pdf');
+        return $pdf->download('daily-attendance-'.$from.($to !== $from ? '_'.$to : '').'.pdf');
     }
 
     /**

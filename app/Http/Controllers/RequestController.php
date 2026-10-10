@@ -54,6 +54,13 @@ class RequestController extends Controller
         return $request->user()->hasAnyRole(['super_admin', 'admin', 'hr_manager']);
     }
 
+    /** 7 Oct 2026 — request module → Roles & Permissions module (for the Approve tick). */
+    private const MATRIX = [
+        'expenses' => 'expenses', 'advances' => 'expenses', 'loans' => 'loans',
+        'commissions' => 'commissions', 'clawbacks' => 'commissions', 'bonus' => 'commissions',
+        'increments' => 'performance', 'exits' => 'performance', 'transfers' => 'employees',
+    ];
+
     /** rev 116: Accounts dept — confirms money received BEFORE manager approval. */
     private function isAccounts(Request $request): bool
     {
@@ -135,6 +142,9 @@ class RequestController extends Controller
             $me = $this->currentEmployee($request);
             $myId = $me->id ?? null;
             $manager = $this->isManager($request);
+            $u = $request->user();
+            $vis = \App\Services\Hierarchy::visibleIds($u);
+            $mxModule = self::MATRIX[$module] ?? null;
             $amountCol = $cfg['amount'];
 
             // Some request tables have no company_id column — only join companies
@@ -150,17 +160,12 @@ class RequestController extends Controller
                 ->leftJoin('employees as e', 'e.id', '=', 'r.employee_id')
                 ->when($hasCompany, fn ($q) => $q->leftJoin('companies as c', 'c.id', '=', 'r.company_id'))
                 ->when($tid, fn ($q) => $q->where('r.tenant_id', $tid))
-                // rev 84 (Ejaz): self-claims — a non-Admin/HR user sees their
-                // OWN entries plus their reportees' (as approver / manager).
-                ->when($module === 'commissions' && ! $manager, function ($q) use ($myId, $me) {
-                    $q->where(function ($w) use ($myId, $me) {
-                        $w->where('r.employee_id', (int) ($myId ?? 0))
-                            ->orWhere('r.approver_id', (int) ($myId ?? 0))
-                            ->orWhere('e.reporting_manager_id', (int) ($myId ?? 0));
-                        if ($me && ! empty($me->name)) {
-                            $w->orWhere('e.reporting_manager', $me->name);
-                        }
-                    });
+                // 7 Oct 2026 (Ejaz) — HIERARCHY for EVERY module (it used to apply to
+                // commissions only, so a non-admin listed every advance / loan in the
+                // tenant): own entries + the whole reporting line below + anything
+                // naming them approver. Admin / HR / Company-scope roles see all.
+                ->when(! $manager && $vis !== null, function ($q) use ($vis, $myId) {
+                    $q->where(fn ($w) => $w->whereIn('r.employee_id', $vis)->orWhere('r.approver_id', (int) ($myId ?? -1)));
                 })
                 ->when($fy !== '' && $fy !== 'all', function ($q) use ($fy, $hasFinYear) {
                     [$from, $to] = FinYearController::range($fy);
@@ -203,10 +208,11 @@ class RequestController extends Controller
                 }
             }
 
-            $out = $rows->map(function ($r) use ($myId, $manager, $amountCol, $module, $onb, $paidMap) {
+            $out = $rows->map(function ($r) use ($myId, $manager, $amountCol, $module, $onb, $paidMap, $u, $mxModule) {
                 $a = (array) $r;
                 $pending = ($a['status'] ?? '') === 'pending';
-                $canDecide = $pending && ($manager || ($myId && (int) ($a['approver_id'] ?? 0) === (int) $myId));
+                // 7 Oct 2026 — Admin/HR, the named approver, or any manager above them.
+                $canDecide = $pending && \App\Services\Hierarchy::canApprove($u, (int) ($a['employee_id'] ?? 0), ! empty($a['approver_id']) ? (int) $a['approver_id'] : null, $mxModule);
 
                 $timeline = [];
                 if ($module === 'transfers') {
@@ -273,11 +279,21 @@ class RequestController extends Controller
                     'status' => ucfirst($a['status'] ?? 'pending'),
                     'approver' => $a['approver_name'] ?? '',
                     'decidedBy' => $a['decided_by'] ?? '',
-                    'decidedAt' => ! empty($a['decided_at']) ? Carbon::parse($a['decided_at'])->format('d M Y H:i') : '',
+                    'decidedAt' => ! empty($a['decided_at']) ? Carbon::parse($a['decided_at'])->format('d-m-Y H:i') : '',
                     'remarks' => $a['remarks'] ?? '',
                     'reason' => $a['reason'] ?? '',
                     'extra' => $this->extraSummary($a),
                     'canDecide' => $canDecide,
+                    // 30 Sep 2026 (Ejaz) — full detail for the View dialog + approver edit.
+                    'requestedAmount' => isset($a['requested_amount']) ? (float) $a['requested_amount'] : null,
+                    'type' => $a['type'] ?? '',
+                    'emi' => isset($a['emi']) ? (float) $a['emi'] : null,
+                    'tenureMonths' => isset($a['tenure_months']) ? (int) $a['tenure_months'] : (isset($a['tenure']) && (int) $a['tenure'] > 1 ? (int) $a['tenure'] : null),
+                    'expenseDate' => ! empty($a['date']) ? substr((string) $a['date'], 0, 10) : '',
+                    'submittedAt' => ! empty($a['created_at']) ? Carbon::parse($a['created_at'])->format('d-m-Y H:i') : '',
+                    'editedBy' => $a['edited_by'] ?? '',
+                    'editedAt' => ! empty($a['edited_at']) ? Carbon::parse($a['edited_at'])->format('d-m-Y H:i') : '',
+                    'canEdit' => $manager && ($a['status'] ?? 'pending') === 'pending' && isset(ApprovalService::editableFields()[$module]),
                 ];
             })->values();
 
@@ -285,6 +301,77 @@ class RequestController extends Controller
                 'canAccounts' => $module === 'commissions' ? $this->isAccounts($request) : false]);
         } catch (\Throwable $e) {
             return response()->json(['rows' => [], 'error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * POST /app/requests/{module}/{id}/edit  {amount?, date?, emi?, tenure_months?}
+     * 30 Sep 2026 (Ejaz) — Admin / HR adjust a PENDING request before deciding:
+     * only the approver-side fields in ApprovalService::editableFields(). The
+     * employee's reason / purpose / remarks cannot be changed here. The first
+     * amount change keeps the employee's figure in requested_amount.
+     */
+    public function editFields(Request $request, string $module, int $id)
+    {
+        try {
+            if (! $this->isManager($request)) {
+                return response()->json(['ok' => false, 'error' => 'Only Admin / HR can edit a request.'], 403);
+            }
+            $cfg = $this->cfg($module);
+            $allowed = ApprovalService::editableFields()[$module] ?? null;
+            if (! $cfg || ! $allowed) {
+                return response()->json(['ok' => false, 'error' => 'This request type cannot be edited.'], 422);
+            }
+            $table = $cfg['table'];
+            ApprovalService::ensureAuditCols($table);
+            $tid = $request->user()->tenant_id;
+            $row = DB::table($table)->where('id', $id)->when($tid, fn ($q) => $q->where('tenant_id', $tid))->first();
+            if (! $row) {
+                return response()->json(['ok' => false, 'error' => 'Request not found.'], 404);
+            }
+            if (($row->status ?? 'pending') !== 'pending') {
+                return response()->json(['ok' => false, 'error' => 'Only a pending request can be edited — it is already '.($row->status ?? 'decided').'.'], 422);
+            }
+            $upd = [];
+            $changes = [];
+            foreach ($allowed as $col => $label) {
+                if (! $request->has($col) || ! Schema::hasColumn($table, $col)) {
+                    continue;
+                }
+                $v = $request->input($col);
+                if ($col === 'date') {
+                    if ($v !== null && $v !== '' && ! preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $v)) {
+                        return response()->json(['ok' => false, 'error' => $label.' is not a valid date.'], 422);
+                    }
+                    $v = $v ?: null;
+                } else {
+                    if (! is_numeric($v) || (float) $v < 0) {
+                        return response()->json(['ok' => false, 'error' => $label.' must be a number of 0 or more.'], 422);
+                    }
+                    $v = $col === 'tenure_months' ? (int) $v : round((float) $v, 2);
+                }
+                $old = $row->{$col} ?? null;
+                if ((string) $old !== (string) $v && ! (is_numeric($old) && is_numeric($v) && (float) $old === (float) $v)) {
+                    $upd[$col] = $v;
+                    $changes[] = $label.': '.($old === null || $old === '' ? '—' : $old).' → '.($v === null ? '—' : $v);
+                }
+            }
+            if (isset($upd['amount']) && Schema::hasColumn($table, 'requested_amount') && $row->requested_amount === null) {
+                $upd['requested_amount'] = $row->amount;   // keep what the employee asked for
+            }
+            if (! $changes) {
+                return response()->json(['ok' => true, 'message' => 'Nothing changed.']);
+            }
+            $by = trim((string) ($request->user()->name ?? '')) ?: (string) ($request->user()->email ?? 'Admin');
+            $upd['edited_by'] = $by;
+            $upd['edited_at'] = now();
+            $upd['updated_at'] = now();
+            DB::table($table)->where('id', $id)->update(ApprovalService::safeRow($table, $upd));
+            \App\Services\Audit::record($tid ? (int) $tid : null, optional($request->user())->id, 'edit', $module, $id, ['changes' => $changes], $request->ip());
+
+            return response()->json(['ok' => true, 'message' => 'Updated — '.implode(' · ', $changes)]);
+        } catch (\Throwable $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
         }
     }
 
@@ -409,10 +496,8 @@ class RequestController extends Controller
                 if (! $this->isManager($request)) {
                     $meEmp = $this->currentEmployee($request);
                     $isSelf = $meEmp && (int) $meEmp->id === (int) $emp->id;
-                    $isMyReportee = $meEmp && (
-                        (int) ($emp->reporting_manager_id ?? 0) === (int) $meEmp->id
-                        || (! empty($emp->reporting_manager) && trim((string) $emp->reporting_manager) === trim((string) $meEmp->name))
-                    );
+                    // 7 Oct 2026 — any level below them in the reporting line.
+                    $isMyReportee = $meEmp && \App\Services\Hierarchy::isAbove((int) $meEmp->id, (int) $emp->id, $request->user()->tenant_id ? (int) $request->user()->tenant_id : null);
                     if (! $isSelf && ! $isMyReportee) {
                         return response()->json(['ok' => false, 'error' => 'You can claim for yourself, or enter for your own reportees only.'], 403);
                     }
@@ -543,6 +628,7 @@ class RequestController extends Controller
             ]);
             if ($cfg['amount'] && $amount !== null) {
                 $row[$cfg['amount']] = $amount;
+                $row['requested_amount'] = $amount;   // 30 Sep 2026 — the employee's own figure, kept if HR sanctions a different amount
             }
             $fy = FinYearController::stamp($table, $request->user()->tenant_id);
             if ($fy) {
@@ -565,6 +651,14 @@ class RequestController extends Controller
                     .' · approver '.$approverName,
                     $fields['entered_by'] ?? '');
             }
+
+            // 30 Sep 2026 (Ejaz) — bell notification to the whole hierarchy above
+            // the employee + every Company Admin / HR Manager. Opens this module's tab.
+            $screens = ['expenses' => 'expenses', 'advances' => 'advance', 'loans' => 'loans', 'commissions' => 'commissions',
+                'clawbacks' => 'clawbacks', 'increments' => 'increments', 'exits' => 'exits', 'bonus' => 'bonus-enc', 'transfers' => 'transfers'];
+            \App\Services\NotificationService::notifyUpline($emp, 'request.'.$module, $cfg['label'].' request · '.$emp->name,
+                trim(($amount !== null ? 'Rs '.number_format((float) $amount, 2).' · ' : '').(is_scalar($fields['reason'] ?? $fields['purpose'] ?? '') ? (string) ($fields['reason'] ?? $fields['purpose'] ?? '') : '').' · awaiting '.$approverName, ' ·'),
+                $screens[$module] ?? 'approvals-inbox', (int) $newId, $approverId ? (int) $approverId : null, optional($request->user())->id);
 
             // Notify the approver that a new request awaits them. Fail-soft.
             try {
@@ -775,9 +869,10 @@ class RequestController extends Controller
             }
             $me = $this->currentEmployee($request);
             $allowed = $this->isManager($request)
-                || ($me && (int) ($rec->approver_id ?? 0) === (int) $me->id);
+                || ($me && (int) ($rec->approver_id ?? 0) === (int) $me->id)
+                || ($me && \App\Services\Hierarchy::isAbove((int) $me->id, (int) ($rec->employee_id ?? 0), $tid ? (int) $tid : null));   // 7 Oct 2026
             if (! $allowed) {
-                return response()->json(['ok' => false, 'error' => 'Only Admin / HR or the approver can edit an entry.'], 403);
+                return response()->json(['ok' => false, 'error' => 'Only Admin / HR or a manager above this employee can edit an entry.'], 403);
             }
 
             $v = $request->validate([
@@ -1307,7 +1402,8 @@ class RequestController extends Controller
             $me = $this->currentEmployee($request);
             $allowed = $this->isManager($request)
                 || ($me && (int) ($rec->approver_id ?? 0) === (int) $me->id)
-                || ($me && (int) ($rec->employee_id ?? 0) === (int) $me->id);
+                || ($me && (int) ($rec->employee_id ?? 0) === (int) $me->id)
+                || ($me && \App\Services\Hierarchy::isAbove((int) $me->id, (int) ($rec->employee_id ?? 0), $request->user()->tenant_id ? (int) $request->user()->tenant_id : null));   // 7 Oct 2026
             if (! $allowed) {
                 return response()->json(['rows' => [], 'error' => 'Not your entry.']);
             }
@@ -1395,9 +1491,10 @@ class RequestController extends Controller
 
             $me = $this->currentEmployee($request);
             $myId = $me->id ?? null;
-            $allowed = $this->isManager($request) || ($myId && (int) (($rec->approver_id ?? 0)) === (int) $myId);
+            // 7 Oct 2026 (Ejaz) — any manager above the employee may decide (first decision closes it).
+            $allowed = \App\Services\Hierarchy::canApprove($request->user(), (int) ($rec->employee_id ?? 0), ! empty($rec->approver_id) ? (int) $rec->approver_id : null, self::MATRIX[$module] ?? null);
             if (! $allowed) {
-                return response()->json(['ok' => false, 'error' => 'You are not the approver for this request.'], 403);
+                return response()->json(['ok' => false, 'error' => 'Only a manager above this employee in the reporting line (or HR / Admin) can decide this request.'], 403);
             }
 
             $newStatus = $v['action'] === 'approve' ? 'approved' : ($v['action'] === 'reject' ? 'rejected' : 'pending');
@@ -1412,6 +1509,13 @@ class RequestController extends Controller
 
             // J2 — audit every approval decision.
             \App\Services\Audit::record($tid ? (int) $tid : null, optional($request->user())->id, $newStatus, $module, (int) $id, ['remarks' => $v['remarks'] ?? null], $request->ip());
+
+            // 8 Oct 2026 (Ejaz) — bell to the employee: their request was decided.
+            $scr = ['expenses' => 'expenses', 'advances' => 'advance', 'loans' => 'loans', 'commissions' => 'commissions',
+                'clawbacks' => 'clawbacks', 'increments' => 'increments', 'exits' => 'exits', 'bonus' => 'bonus-enc', 'transfers' => 'transfers'];
+            \App\Services\NotificationService::notifyEmployee($rec->employee_id ?? null, 'decision.'.$module.'.'.$newStatus,
+                $cfg['label'].' request '.str_replace('_', ' ', (string) $newStatus).' by '.($request->user()->name ?? 'your manager'),
+                ! empty($v['remarks']) ? (string) $v['remarks'] : null, $scr[$module] ?? 'dashboard', (int) $id, optional($request->user())->id);
 
             // F1 — compliance-gated incentive (warn + allow + audit). Approving a
             // commission for a low-compliance agent is allowed but recorded.
@@ -1536,6 +1640,9 @@ class RequestController extends Controller
             $me = $this->currentEmployee($request);
             $myId = $me->id ?? null;
             $manager = $this->isManager($request);
+            $u = $request->user();
+            // 7 Oct 2026 — a manager's inbox holds everything pending from their whole reporting line.
+            $down = \App\Services\Hierarchy::downline($myId ? (int) $myId : null, $tid ? (int) $tid : null);
             $items = [];
 
             // 1) Leaves (own table/shape).
@@ -1543,10 +1650,13 @@ class RequestController extends Controller
                 $q = DB::table('leaves as l')->leftJoin('employees as e', 'e.id', '=', 'l.employee_id')
                     ->when($tid, fn ($qq) => $qq->where('l.tenant_id', $tid))->where('l.status', 'pending');
                 if (! $manager) {
-                    $q->where('l.approver_id', $myId ?? -1);
+                    $q->where(fn ($w) => $w->whereIn('l.employee_id', $down ?: [-1])->orWhere('l.approver_id', $myId ?? -1));
                 }
                 foreach ($q->orderByDesc('l.id')->get(['l.*', 'e.name as emp_name']) as $r) {
                     $a = (array) $r;
+                    if (! \App\Services\Hierarchy::canApprove($u, (int) $a['employee_id'], ! empty($a['approver_id']) ? (int) $a['approver_id'] : null, 'leave')) {
+                        continue;
+                    }
                     $items[] = [
                         'module' => 'leave',
                         'kind' => 'Leave',
@@ -1568,17 +1678,20 @@ class RequestController extends Controller
                 $q = DB::table($table.' as r')->leftJoin('employees as e', 'e.id', '=', 'r.employee_id')
                     ->when($tid, fn ($qq) => $qq->where('r.tenant_id', $tid))->where('r.status', 'pending');
                 if (! $manager) {
-                    $q->where('r.approver_id', $myId ?? -1);
+                    $q->where(fn ($w) => $w->whereIn('r.employee_id', $down ?: [-1])->orWhere('r.approver_id', $myId ?? -1));
                 }
                 foreach ($q->orderByDesc('r.id')->get(['r.*', 'e.name as emp_name']) as $r) {
                     $a = (array) $r;
+                    if (! \App\Services\Hierarchy::canApprove($u, (int) ($a['employee_id'] ?? 0), ! empty($a['approver_id']) ? (int) $a['approver_id'] : null, self::MATRIX[$key] ?? null)) {
+                        continue;
+                    }
                     $amt = ($cfg['amount'] && isset($a[$cfg['amount']])) ? ' · ₹'.number_format((float) $a[$cfg['amount']]) : '';
                     $items[] = [
                         'module' => $key,
                         'kind' => $cfg['label'],
                         'id' => $a['id'],
                         'employee' => $a['emp_name'] ?: ('#'.($a['employee_id'] ?? '').' (employee record no longer exists)'),
-                        'detail' => $this->extraSummary($a).$amt,
+                        'detail' => trim($this->extraSummary($a).$amt.(! empty($a['reason']) ? ' · Reason: '.$a['reason'] : ''), ' ·'),
                         'approver' => $a['approver_name'] ?? '',
                     ];
                 }

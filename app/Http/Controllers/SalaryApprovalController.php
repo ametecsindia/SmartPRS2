@@ -205,15 +205,15 @@ class SalaryApprovalController extends Controller
                     'id' => $a['id'],
                     'company' => $a['company_name'] ?? '',
                     'cycle' => $a['cycle_label'] ?? '',
-                    'payDate' => ! empty($a['pay_date']) ? Carbon::parse($a['pay_date'])->format('d M Y') : '',
+                    'payDate' => ! empty($a['pay_date']) ? Carbon::parse($a['pay_date'])->format('d-m-Y') : '',
                     'employees' => (int) ($a['employees_count'] ?? 0),
                     'net' => (float) ($a['net_total'] ?? 0),
                     'status' => $status,
                     'statusLabel' => $this->statusLabel($status),
                     'hrBy' => $a['hr_by'] ?? '',
-                    'hrAt' => ! empty($a['hr_at']) ? Carbon::parse($a['hr_at'])->format('d M Y H:i') : '',
+                    'hrAt' => ! empty($a['hr_at']) ? Carbon::parse($a['hr_at'])->format('d-m-Y H:i') : '',
                     'finBy' => $a['fin_by'] ?? '',
-                    'finAt' => ! empty($a['fin_at']) ? Carbon::parse($a['fin_at'])->format('d M Y H:i') : '',
+                    'finAt' => ! empty($a['fin_at']) ? Carbon::parse($a['fin_at'])->format('d-m-Y H:i') : '',
                     'remarks' => $a['remarks'] ?? '',
                     'next' => $next,            // 'hr' | 'finance' | null
                     'canApprove' => $canHR || $canFin,
@@ -280,11 +280,11 @@ class SalaryApprovalController extends Controller
                 $mine = $meId && (int) $p->employee_id === (int) $meId;
                 $stamp = '';
                 if ($st === 'acknowledged' && $p->ack_at) {
-                    $stamp = ($p->ack_name ?: 'Employee').' · '.Carbon::parse($p->ack_at)->format('d M Y H:i');
+                    $stamp = ($p->ack_name ?: 'Employee').' · '.Carbon::parse($p->ack_at)->format('d-m-Y H:i');
                 } elseif ($st === 'disbursed' && $p->disbursed_by) {
-                    $stamp = $p->disbursed_by.($p->disbursed_at ? ' · '.Carbon::parse($p->disbursed_at)->format('d M Y H:i') : '');
+                    $stamp = $p->disbursed_by.($p->disbursed_at ? ' · '.Carbon::parse($p->disbursed_at)->format('d-m-Y H:i') : '');
                 } elseif ($st === 'approved' && $p->approved_by) {
-                    $stamp = $p->approved_by.($p->approved_at ? ' · '.Carbon::parse($p->approved_at)->format('d M Y H:i') : '');
+                    $stamp = $p->approved_by.($p->approved_at ? ' · '.Carbon::parse($p->approved_at)->format('d-m-Y H:i') : '');
                 }
 
                 return [
@@ -788,7 +788,7 @@ class SalaryApprovalController extends Controller
                         'lines' => [
                             'Signed by' => $v['name'],
                             'Pay period' => $monthLabel ?: '-',
-                            'Date & time' => $now->format('d M Y H:i'),
+                            'Date & time' => $now->format('d-m-Y H:i'),
                         ],
                         'body' => 'This serves as your e-signed confirmation of receipt. No further action is needed.',
                         'kind' => 'salary.acknowledged',

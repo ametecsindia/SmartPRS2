@@ -120,7 +120,9 @@ class PeriodResolver
         }
         $end = self::toDate($periodEnd);
         $cand = self::clamp($end->year, $end->month, $payDay);
-        if ($cand->lt($end)) {
+        // 7 Oct 2026 (Ejaz) — the pay day is NEVER inside the attendance period:
+        // a pay day on or before the period end moves to the next month.
+        if ($cand->lte($end)) {
             $next = $end->copy()->addMonthNoOverflow();
             $cand = self::clamp($next->year, $next->month, $payDay);
         }
@@ -295,13 +297,10 @@ class PeriodResolver
         $p['attendance_end'] = ($capToday && $p['open']) ? $today : $p['end'];
         $p['end_day'] = $endDay ?: null;
         $payDay = self::masterDay($tenantId, $companyName, 'pay_day', 1, 28);
-        // A cut-off cycle pays inside the run month; a calendar cycle pays the
-        // month after. Same rule AppDataController::payDateFor has always used.
-        $p['pay_date'] = $payDay
-            ? ($endDay >= 2 && $endDay <= 28
-                ? self::clamp((int) substr($payrollMonth, 0, 4), (int) substr($payrollMonth, 5, 2), $payDay)->toDateString()
-                : self::clamp((int) substr($payrollMonth, 0, 4), (int) substr($payrollMonth, 5, 2), 1)->addMonthNoOverflow()->day(min($payDay, 28))->toDateString())
-            : null;
+        // 7 Oct 2026 (Ejaz) — pay on the first pay day AFTER the period ends.
+        // (The old "cut-off cycle pays inside the run month" rule put a pay day
+        // of 1–cutoff BEFORE the period closed, e.g. 26 Aug–25 Sep paid 01-09.)
+        $p['pay_date'] = self::payDate($p['end'], $payDay ?: null);
 
         return $p;
     }
@@ -376,14 +375,13 @@ class PeriodResolver
         return Carbon::create($year, $month, min(max(1, $day), $last))->startOfDay();
     }
 
-    /** "21 Jun – 20 Jul 2026 (30 days)" style label for payslips and reports. */
+    /** "21-06-2026 – 20-07-2026 (30 days)" style label for payslips and reports. */
     public static function label(Carbon $start, Carbon $end): string
     {
         $days = (int) $start->diffInDays($end) + 1;
-        $sameYear = $start->year === $end->year;
 
-        return $start->format('j M') . ($sameYear ? '' : ' ' . $start->format('Y'))
-            . ' – ' . $end->format('j M Y')
+        return $start->format('d-m-Y')
+            . ' – ' . $end->format('d-m-Y')
             . ' (' . $days . ' days)';
     }
 

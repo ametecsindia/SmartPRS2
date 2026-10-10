@@ -390,6 +390,7 @@ class BiometricConfigController extends Controller
             'in_machine_id' => trim((string) $request->input('in_machine_id', $r->in_machine_id ?? '')),
             'out_machine_id' => trim((string) $request->input('out_machine_id', $r->out_machine_id ?? '')),
             'device_mode' => strtolower(trim((string) $request->input('device_mode', $r->device_mode ?? ''))) === 'single' ? 'single' : 'dual',
+            'branch' => trim((string) $request->input('branch', $r->branch ?? '')),   // 2026-09-28 — branch-aware mapping
             'tenant_id' => self::tid($request),
         ];
     }
@@ -473,39 +474,54 @@ class BiometricConfigController extends Controller
             return $deny;
         }
         $cfg = $this->effectiveConfig($request);
-        $days = max(1, min(31, (int) $request->input('days', 1)));
+        // Up to 93 days, pulled in <=31-day windows (vendor APIs cap a single
+        // request). 2026-09-28: mapping an ID re-pulls 93 days, so punches that
+        // came in weeks before the mapping are recovered with no manual command.
+        $days = max(1, min(93, (int) $request->input('days', 1)));
         $to = now();
-        $from = (clone $to)->subDays($days);
+        $start = (clone $to)->subDays($days);
 
-        if (($cfg['provider'] ?? '') === 'etimetracklite') {
-            if (! ETimeTrackLiteService::configured($cfg)) {
-                return response()->json(['ok' => false, 'error' => 'Save the WebAPI URL, Serial Number, Username and Password first.'], 422);
+        $provider = $cfg['provider'] ?? '';
+        if ($provider === 'etimetracklite' && ! ETimeTrackLiteService::configured($cfg)) {
+            return response()->json(['ok' => false, 'error' => 'Save the WebAPI URL, Serial Number, Username and Password first.'], 422);
+        }
+        if ($provider === 'generic' && ! GenericApiService::configured($cfg)) {
+            return response()->json(['ok' => false, 'error' => 'Set the API URL and Response format first.'], 422);
+        }
+        if (! in_array($provider, ['etimetracklite', 'generic'], true) && ! ETimeOfficeService::configured($cfg)) {
+            return response()->json(['ok' => false, 'error' => 'Save the connection details first.'], 422);
+        }
+        if ($days > 31) {
+            @set_time_limit(600);
+        }
+        $punches = [];
+        for ($from = clone $start; $from->lt($to); $from = $wTo) {
+            $wTo = (clone $from)->addDays(31);
+            if ($wTo->gt($to)) {
+                $wTo = clone $to;
             }
-            $res = ETimeTrackLiteService::fetch($cfg, $from, $to);
-            if (! $res['ok']) {
-                return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
+            if ($provider === 'etimetracklite') {
+                $res = ETimeTrackLiteService::fetch($cfg, $from, $wTo);
+                if (! $res['ok']) {
+                    return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
+                }
+                $cfg['source'] = 'etimetracklite';
+                $batch = ETimeTrackLiteService::parse((string) $res['raw'], $cfg);
+            } elseif ($provider === 'generic') {
+                $res = GenericApiService::fetch($cfg, $from, $wTo);
+                if (! $res['ok']) {
+                    return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
+                }
+                $cfg['source'] = 'generic';
+                $batch = GenericApiService::parse((string) $res['raw'], $cfg);
+            } else {
+                $res = ETimeOfficeService::fetch($cfg, $from, $wTo);
+                if (! $res['ok']) {
+                    return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
+                }
+                $batch = ETimeOfficeService::parse($res['json'], $cfg);
             }
-            $cfg['source'] = 'etimetracklite';
-            $punches = ETimeTrackLiteService::parse((string) $res['raw'], $cfg);
-        } elseif (($cfg['provider'] ?? '') === 'generic') {
-            if (! GenericApiService::configured($cfg)) {
-                return response()->json(['ok' => false, 'error' => 'Set the API URL and Response format first.'], 422);
-            }
-            $res = GenericApiService::fetch($cfg, $from, $to);
-            if (! $res['ok']) {
-                return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
-            }
-            $cfg['source'] = 'generic';
-            $punches = GenericApiService::parse((string) $res['raw'], $cfg);
-        } else {
-            if (! ETimeOfficeService::configured($cfg)) {
-                return response()->json(['ok' => false, 'error' => 'Save the connection details first.'], 422);
-            }
-            $res = ETimeOfficeService::fetch($cfg, $from, $to);
-            if (! $res['ok']) {
-                return response()->json(['ok' => false, 'error' => 'Connection failed: '.($res['error'] ?? 'unknown')], 422);
-            }
-            $punches = ETimeOfficeService::parse($res['json'], $cfg);
+            $punches = array_merge($punches, $batch);
         }
         $r = ETimeOfficeService::import($punches, $cfg);
 
@@ -545,15 +561,18 @@ class BiometricConfigController extends Controller
         $mappings = [];
         $employees = [];
         try {
+            $cols = array_values(array_filter(['id', 'emp_code', 'name', 'device_user_id', 'branch', 'branch_id'],
+                fn ($c) => ! in_array($c, ['branch', 'branch_id'], true) || Schema::hasColumn('employees', $c)));
             $rows = DB::table('employees')
                 ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
                 ->whereNull('deleted_at')
                 ->orderBy('name')
-                ->get(['id', 'emp_code', 'name', 'device_user_id']);
+                ->get($cols);
             foreach ($rows as $e) {
-                $employees[] = ['code' => $e->emp_code, 'name' => $e->name];
+                $br = ETimeOfficeService::branchOf($e);   // 2026-09-28 — a Biometric ID is unique per BRANCH
+                $employees[] = ['code' => $e->emp_code, 'name' => $e->name, 'branch' => $br];
                 if (trim((string) ($e->device_user_id ?? '')) !== '') {
-                    $mappings[] = ['code' => $e->emp_code, 'name' => $e->name, 'deviceId' => $e->device_user_id];
+                    $mappings[] = ['code' => $e->emp_code, 'name' => $e->name, 'deviceId' => $e->device_user_id, 'branch' => $br];
                 }
             }
         } catch (\Throwable $e) {
@@ -613,22 +632,30 @@ class BiometricConfigController extends Controller
             return response()->json(['ok' => false, 'error' => 'Employee not found.'], 404);
         }
 
-        // SmartEPT rule: one device ID belongs to ONE employee. If another
-        // employee already holds this ID, ask for an explicit confirmation
-        // (force) — then move it (the old employee loses the mapping).
-        $holder = DB::table('employees')
+        // One Biometric ID belongs to ONE employee PER BRANCH (2026-09-28). Each
+        // branch has its own device(s), so PIN 1044 in Hyderabad and PIN 1044 in
+        // Chennai are different people; a punch is matched to the holder in the
+        // punching device's branch (ETimeOfficeService::matchEmployee). If another
+        // employee in the SAME branch holds this ID, ask for confirmation (force)
+        // — then move it (that employee loses the mapping).
+        $empBranch = mb_strtolower(ETimeOfficeService::branchOf($emp));
+        $others = DB::table('employees')
             ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
             ->whereRaw('LOWER(device_user_id) = ?', [strtolower($deviceId)])
-            ->whereNull('deleted_at')->where('id', '!=', $emp->id)->first();
+            ->whereNull('deleted_at')->where('id', '!=', $emp->id)->get();
+        $holders = $others->filter(fn ($o) => mb_strtolower(ETimeOfficeService::branchOf($o)) === $empBranch)->values();
+        $holder = $holders->first();
         if ($holder && ! $request->boolean('force')) {
+            $bn = ETimeOfficeService::branchOf($holder);
             return response()->json([
                 'ok' => false, 'needForce' => true,
-                'error' => 'Biometric ID "'.$deviceId.'" is already mapped to '.$holder->name.' ('.$holder->emp_code.'). Save again to move it.',
+                'error' => 'Biometric ID "'.$deviceId.'" is already mapped to '.$holder->name.' ('.$holder->emp_code.')'.($bn !== '' ? ' in '.$bn : '').'. Save again to move it.',
             ], 409);
         }
-        if ($holder) {
-            DB::table('employees')->where('id', $holder->id)->update(['device_user_id' => null, 'updated_at' => now()]);
+        foreach ($holders as $h) {
+            DB::table('employees')->where('id', $h->id)->update(['device_user_id' => null, 'updated_at' => now()]);
         }
+        $sharedElsewhere = $others->count() > $holders->count();   // same ID in other branches
 
         DB::table('employees')->where('id', $emp->id)->update(['device_user_id' => $deviceId, 'updated_at' => now()]);
 
@@ -638,7 +665,9 @@ class BiometricConfigController extends Controller
         // automatically via the mapping.
         $backfilled = 0;
         try {
-            if (Schema::hasTable('attendance_logs') && strcasecmp($deviceId, (string) $emp->emp_code) !== 0) {
+            // Skipped when the ID is also used in another branch: a raw-code row
+            // carries no device, so it can't be told apart (it stays for that branch).
+            if (! $sharedElsewhere && Schema::hasTable('attendance_logs') && strcasecmp($deviceId, (string) $emp->emp_code) !== 0) {
                 $q = DB::table('attendance_logs')->whereRaw('LOWER(emp_code) = ?', [strtolower($deviceId)]);
                 if ($tid && Schema::hasColumn('attendance_logs', 'tenant_id')) {
                     $q->where(fn ($w) => $w->where('tenant_id', $tid)->orWhereNull('tenant_id'));

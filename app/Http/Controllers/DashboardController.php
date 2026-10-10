@@ -82,7 +82,7 @@ class DashboardController extends Controller
         // the Directory exactly by also excluding archived rows.
         $hasArchived = Schema::hasColumn('employees', 'archived_at');
         $headcount = (int) DB::table('employees')->when($tid, fn ($q) => $q->where('tenant_id', $tid))
-            ->when($self, fn ($q) => $q->where('id', $self['id']))
+            ->when($self, fn ($q) => $q->whereIn('id', $self['ids']))
             ->when($hasArchived, fn ($q) => $q->whereNull('archived_at'))
             ->where('status', 'active')->whereNull('deleted_at')->count();
 
@@ -98,14 +98,14 @@ class DashboardController extends Controller
                 $codes = DB::table('attendance_logs')
                     ->when($tid && Schema::hasColumn('attendance_logs', 'tenant_id'),
                         fn ($q) => $q->where(fn ($w) => $w->where('tenant_id', $tid)->orWhereNull('tenant_id')))
-                    ->when($self, fn ($q) => $q->whereRaw('LOWER(emp_code) = ?', [strtolower($self['code'])]))
+                    ->when($self, fn ($q) => $q->whereIn(DB::raw('LOWER(emp_code)'), array_map('strtolower', $self['codes'])))
                     ->whereDate('log_date', now()->toDateString())
                     ->distinct()->pluck('emp_code');
                 if ($codes->isNotEmpty()) {
                     $lower = $codes->map(fn ($c) => strtolower(trim((string) $c)))->filter()->unique()->values()->all();
                     $presentToday = (int) DB::table('employees')
                         ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
-                        ->when($self, fn ($q) => $q->where('id', $self['id']))
+                        ->when($self, fn ($q) => $q->whereIn('id', $self['ids']))
                         ->where('status', 'active')->whereNull('deleted_at')
                         ->whereIn(DB::raw('LOWER(emp_code)'), $lower)
                         ->count();
@@ -113,30 +113,30 @@ class DashboardController extends Controller
             } catch (\Throwable $e) {
                 // fall back to the old raw count rather than showing nothing
                 $presentToday = (int) DB::table('attendance_logs')->when($tid, fn ($q) => $q->where('tenant_id', $tid))
-                    ->when($self, fn ($q) => $q->where('emp_code', $self['code']))
+                    ->when($self, fn ($q) => $q->whereIn('emp_code', $self['codes']))
                     ->whereDate('log_date', now()->toDateString())->distinct()->count('emp_code');
             }
         }
 
         $pending = Schema::hasTable('leaves')
-            ? (int) DB::table('leaves')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->when($self, fn ($q) => $q->where('employee_id', $self['id']))->where('status', 'pending')->count()
+            ? (int) DB::table('leaves')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->when($self, fn ($q) => $q->whereIn('employee_id', $self['ids']))->where('status', 'pending')->count()
             : 0;
         foreach (ApprovalService::modules() as $m) {
             $t = $m['table'];
             if (Schema::hasTable($t) && Schema::hasColumn($t, 'status')) {
-                $pending += (int) DB::table($t)->when($tid, fn ($q) => $q->where('tenant_id', $tid))->when($self && Schema::hasColumn($t, 'employee_id'), fn ($q) => $q->where('employee_id', $self['id']))->where('status', 'pending')->count();
+                $pending += (int) DB::table($t)->when($tid, fn ($q) => $q->where('tenant_id', $tid))->when($self && Schema::hasColumn($t, 'employee_id'), fn ($q) => $q->whereIn('employee_id', $self['ids']))->where('status', 'pending')->count();
             }
         }
 
         $compliance = 0;
         if (Schema::hasColumn('employees', 'dra_expiry')) {
             $soon = now()->addDays(30)->toDateString();
-            $compliance = (int) DB::table('employees')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->when($self, fn ($q) => $q->where('id', $self['id']))->whereNull('deleted_at')
+            $compliance = (int) DB::table('employees')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->when($self, fn ($q) => $q->whereIn('id', $self['ids']))->whereNull('deleted_at')
                 ->where(fn ($q) => $q->where('dra_expiry', '<=', $soon)->orWhere('pcc_expiry', '<=', $soon))->count();
         }
 
         $tickets = Schema::hasTable('helpdesk')
-            ? (int) DB::table('helpdesk')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->when($self && Schema::hasColumn('helpdesk', 'employee_id'), fn ($q) => $q->where('employee_id', $self['id']))->where('status', 'open')->count()
+            ? (int) DB::table('helpdesk')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->when($self && Schema::hasColumn('helpdesk', 'employee_id'), fn ($q) => $q->whereIn('employee_id', $self['ids']))->where('status', 'open')->count()
             : 0;
 
         $payroll = ['cycle' => '—', 'net' => 0, 'status' => '—'];

@@ -35,8 +35,8 @@
                     <div class="muted">{{ $company->name ?? 'SmartPRS' }}</div>
                 </td>
                 <td style="text-align:right;">
-                    <div style="font-size:14px;font-weight:bold;">Attendance Report</div>
-                    <div class="muted">{{ $from }}@if($to !== $from) &rarr; {{ $to }} @endif &middot; Shift {{ $shift['start'] }}&ndash;{{ $shift['end'] }}</div>
+                    <div style="font-size:14px;font-weight:bold;">Daily Attendance</div>
+                    <div class="muted">{{ \App\Support\DateFmt::display($from) }}@if($to !== $from) &rarr; {{ \App\Support\DateFmt::display($to) }} @endif &middot; Shift {{ $shift['start'] }}&ndash;{{ $shift['end'] }}</div>
                 </td>
             </tr>
         </table>
@@ -60,7 +60,7 @@
                         <td>{{ $r['team'] ?? '' }}</td>
                         <td>{{ $r['reporting'] ?? '' }}</td>
                         <td>{{ $r['leader'] ?? '' }}</td>
-                        <td>{{ $r['date'] }}</td>
+                        <td>{{ \App\Support\DateFmt::display($r['date']) }}</td>
                         <td class="in">{{ $r['first_in'] }}</td>
                         <td class="out">{{ $r['last_out'] }}</td>
                         <td>{{ $r['total_time'] }}</td>
@@ -75,7 +75,7 @@
                 @endforelse
             </tbody>
         </table>
-        <div class="foot">Computer-generated attendance report &middot; breaks over 1h30m shown in red &middot; generated {{ now()->format('d M Y, H:i') }}.</div>
+        <div class="foot">Computer-generated attendance report &middot; breaks over 1h30m shown in red &middot; generated {{ now()->format('d-m-Y H:i') }}.</div>
     </div>
 </body>
 </html>

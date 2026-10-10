@@ -75,6 +75,7 @@ class ETimeOfficeService
             'in_machine_id' => $r->in_machine_id ?? '',    // rev173e
             'out_machine_id' => $r->out_machine_id ?? '',  // rev173e
             'device_mode' => $r->device_mode ?? null,      // 'single' | 'dual' | null (legacy = dual)
+            'branch' => $r->branch ?? null,                // 2026-09-28 — device's branch for branch-aware mapping
             'tenant_id' => $r->tenant_id ?? null,
         ];
     }
@@ -309,9 +310,10 @@ class ETimeOfficeService
      * (employees.device_user_id — set in the Directory profile / mapping card).
      * Tries the prefixed code, then the raw device code, for both columns.
      */
-    public static function matchEmployee(string $full, string $raw, ?int $tid = null)
+    public static function matchEmployee(string $full, string $raw, ?int $tid = null, ?string $branch = null)
     {
         $codes = array_values(array_unique(array_filter([strtolower($full), strtolower($raw)], fn ($c) => $c !== '')));
+        $cols = self::empCols();
         foreach (['emp_code', 'device_user_id'] as $col) {
             if ($col === 'device_user_id' && ! Schema::hasColumn('employees', 'device_user_id')) {
                 continue;
@@ -321,30 +323,104 @@ class ETimeOfficeService
                     ->whereRaw('LOWER('.$col.') = ?', [$c])
                     ->whereNull('deleted_at');
                 if (Schema::hasColumn('employees', 'tenant_id')) {
-                    // 18 Aug 2026 HOTFIX — SYMMETRIC tenant filter.
-                    // Previously: if ($tid && ...) { $q->where('tenant_id', $tid); }
-                    // With $tid null the filter never ran, so the lookup matched
-                    // emp_code across EVERY tenant on the server. $tid is null
-                    // routinely, not rarely: PushController::rowForSn() auto-creates
-                    // a biometric_configs row for any unknown serial with
-                    // tenant_id = null, and cfgForSn() passes that null straight
-                    // through — so the FIRST punch from a newly installed bridge
-                    // was matched against every customer's employee table. Two
-                    // customers both holding EMP001 could file a punch against the
-                    // wrong company's payroll.
-                    // A null tenant must now match ONLY null-tenant employees —
-                    // never "any tenant". Fail-closed. Same idiom already used in
-                    // this file by configForTenant() and recordUnmapped().
+                    // 18 Aug 2026 HOTFIX — SYMMETRIC tenant filter: a null tenant
+                    // matches ONLY null-tenant employees, never "any tenant"
+                    // (an unclaimed bridge must not file punches into another
+                    // customer's payroll). Fail-closed.
                     $tid ? $q->where('tenant_id', $tid) : $q->whereNull('tenant_id');
                 }
-                $emp = $q->first(['id', 'emp_code', 'name', 'tenant_id', 'company_id']);
-                if ($emp) {
-                    return $emp;
+                if ($col === 'emp_code') {
+                    $emp = $q->first($cols);
+                    if ($emp) {
+                        return $emp;
+                    }
+
+                    continue;
+                }
+                // 2026-09-28 — branch-aware mapping. The same Biometric ID may be
+                // held by several employees in DIFFERENT branches (PIN 1044 on the
+                // Hyderabad device and PIN 1044 on the Chennai device are two
+                // people). One holder → that person. Several → the one in the
+                // punching device's branch. Still ambiguous (device has no branch,
+                // or no/several holders in it) → null, so the punch is quarantined
+                // and shows as unmapped instead of silently going to whoever
+                // happened to be first (the old behaviour).
+                $rows = $q->get($cols)->all();
+                if (count($rows) === 1) {
+                    return $rows[0];
+                }
+                if (count($rows) > 1) {
+                    $b = mb_strtolower(trim((string) $branch));
+                    $hit = $b === '' ? [] : array_values(array_filter($rows, fn ($e) => mb_strtolower(self::branchOf($e)) === $b));
+
+                    return count($hit) === 1 ? $hit[0] : null;
                 }
             }
         }
 
         return null;
+    }
+
+    /** employees columns matchEmployee() returns (branch cols only when present). */
+    private static function empCols(): array
+    {
+        static $cols = null;
+        if ($cols === null) {
+            $cols = ['id', 'emp_code', 'name', 'tenant_id', 'company_id'];
+            foreach (['branch', 'branch_id'] as $c) {
+                if (Schema::hasColumn('employees', $c)) {
+                    $cols[] = $c;
+                }
+            }
+        }
+
+        return $cols;
+    }
+
+    /**
+     * An employee's branch NAME: employees.branch, else branches.name via
+     * branch_id (same resolution AttendanceReportController::employeeMeta uses).
+     * Compare case-insensitively with a device's biometric_configs.branch.
+     */
+    public static function branchOf($emp): string
+    {
+        static $names = null;
+        $a = (array) $emp;
+        $b = trim((string) ($a['branch'] ?? ''));
+        if ($b === '' && ! empty($a['branch_id'])) {
+            if ($names === null) {
+                try {
+                    $names = Schema::hasTable('branches') ? DB::table('branches')->pluck('name', 'id')->all() : [];
+                } catch (\Throwable $e) {
+                    $names = [];
+                }
+            }
+            $b = trim((string) ($names[$a['branch_id']] ?? ''));
+        }
+
+        return $b;
+    }
+
+    /** Branch of the device with this serial (biometric_configs.branch), '' if unknown. */
+    public static function branchForSn(?int $tid, ?string $sn): string
+    {
+        static $cache = [];
+        $sn = trim((string) $sn);
+        if ($sn === '') {
+            return '';
+        }
+        $k = ($tid ?? 0).'|'.$sn;
+        if (! array_key_exists($k, $cache)) {
+            try {
+                $q = DB::table('biometric_configs')->where('serial_number', $sn);
+                $tid ? $q->where('tenant_id', $tid) : $q->whereNull('tenant_id');
+                $cache[$k] = trim((string) ($q->orderByDesc('id')->value('branch') ?? ''));
+            } catch (\Throwable $e) {
+                $cache[$k] = '';
+            }
+        }
+
+        return $cache[$k];
     }
 
     /**
@@ -485,7 +561,18 @@ class ETimeOfficeService
                 $q->whereRaw('LOWER(device_sn) = ?', [strtolower(trim($deviceSn))]);
             }
 
+            // 2026-09-28 — branch-aware: a punch held from a device that sits in a
+            // DIFFERENT branch belongs to that branch's holder of this ID, not to
+            // this employee. Unknown device / no branch on either side → released
+            // as before.
+            $empBranch = mb_strtolower(self::branchOf($emp));
             foreach ($q->orderBy('id')->get() as $row) {
+                if ($empBranch !== '') {
+                    $devBranch = mb_strtolower(self::branchForSn($tid, $row->device_sn ?? null));
+                    if ($devBranch !== '' && $devBranch !== $empBranch) {
+                        continue;
+                    }
+                }
                 $when = Carbon::parse($row->punch_at);
 
                 $match = [
@@ -704,7 +791,7 @@ class ETimeOfficeService
         foreach ($punches as $p) {
             $full = $prefix.$p['emp_code'];
             if (! array_key_exists($full, $cache)) {
-                $cache[$full] = self::matchEmployee($full, (string) $p['emp_code'], $cfg['tenant_id'] ?? null);
+                $cache[$full] = self::matchEmployee($full, (string) $p['emp_code'], $cfg['tenant_id'] ?? null, $cfg['branch'] ?? null);
             }
         }
         $seq = self::isSingleDevice($cfg)

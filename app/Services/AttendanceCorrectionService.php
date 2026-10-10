@@ -327,14 +327,14 @@ class AttendanceCorrectionService
     }
 
     /** List requests. Plain employees are scoped to their own rows. */
-    public static function listFor(?int $tid, ?int $ownEmployeeId, array $filters = []): array
+    public static function listFor(?int $tid, int|array|null $ownEmployeeId, array $filters = []): array
     {
         self::ensureSchema();
         try {
             $q = DB::table('attendance_corrections')
                 ->when($tid, fn ($x) => $x->where('tenant_id', $tid));
             if ($ownEmployeeId !== null) {
-                $q->where('employee_id', $ownEmployeeId);
+                $q->whereIn('employee_id', (array) $ownEmployeeId);   // one id, or own + downline
             }
             if (! empty($filters['status'])) {
                 $q->where('status', $filters['status']);
@@ -407,7 +407,7 @@ class AttendanceCorrectionService
             if (! $uid) {
                 return;   // no linked approver login — it still shows in the HR list
             }
-            $nice = Carbon::parse($date)->format('D, d M Y');
+            $nice = Carbon::parse($date)->format('D, d-m-Y');
             NotificationService::send([
                 'tenant_id' => $tid, 'user_id' => (int) $uid, 'employee_id' => (int) $emp['id'],
                 'kind' => 'attendance.correction.requested',
@@ -427,7 +427,7 @@ class AttendanceCorrectionService
             if (Schema::hasTable('users')) {
                 $uid = DB::table('users')->where('employee_id', $row->employee_id)->value('id');
             }
-            $nice = Carbon::parse(self::ymd($row->log_date))->format('D, d M Y');
+            $nice = Carbon::parse(self::ymd($row->log_date))->format('D, d-m-Y');
             $map = [
                 'applied' => ['Attendance correction approved — '.$nice, 'Your attendance for '.$nice.' has been corrected and updated.'],
                 'approved_locked' => ['Attendance correction approved — '.$nice, 'Your correction for '.$nice.' was approved. Payroll for that month is already finalised, so the change will be carried into the next adjustment.'],

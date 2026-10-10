@@ -65,17 +65,18 @@ class AttendanceBulkController extends Controller
     {
         if ($request->query('type') === 'punch') {
             $csv = "emp_code,employee_name,date,punch_time,direction\n"
-                ."EMP100,Asha Rao,2026-06-05,09:15,in\n"
-                ."EMP100,Asha Rao,2026-06-05,13:05,out\n"
-                ."EMP100,Asha Rao,2026-06-05,13:35,in\n"
-                ."EMP100,Asha Rao,2026-06-05,18:35,out\n"
-                .",Vikram Reddy,2026-06-05,09:30,in\n";
+                ."EMP100,Asha Rao,05-06-2026,09:15,in\n"
+                ."EMP100,Asha Rao,05-06-2026,13:05,out\n"
+                ."EMP100,Asha Rao,05-06-2026,13:35,in\n"
+                ."EMP100,Asha Rao,05-06-2026,18:35,out\n"
+                .",Vikram Reddy,05-06-2026,09:30,in\n";
             $name = 'smartprs-attendance-punch-log-template.csv';
         } else {
             $csv = "emp_code,employee_name,date,in_time,out_time\n"
-                ."EMP100,Asha Rao,2026-06-05,09:15,18:35\n"
-                .",Vikram Reddy,2026-06-05,09:30,18:10\n";
+                ."EMP100,Asha Rao,05-06-2026,09:15,18:35\n"
+                .",Vikram Reddy,05-06-2026,09:30,18:10\n";
             $name = 'smartprs-attendance-import-template.csv';
+            // 7 Oct 2026 (Ejaz) — samples use the app standard DD-MM-YYYY.
         }
 
         return response($csv, 200, [
@@ -125,7 +126,7 @@ class AttendanceBulkController extends Controller
         return sprintf('%02d:%02d', $h, $m);
     }
 
-    /** Normalise a date cell (Y-m-d, d-m-Y, d/m/Y, Excel serial) → Y-m-d or null. */
+    /** Normalise a date cell (DD-MM-YYYY, d/m/Y, d.m.Y, Y-m-d, Excel serial) → Y-m-d or null. */
     private function normDate($v): ?string
     {
         $s = trim((string) $v);
@@ -136,20 +137,10 @@ class AttendanceBulkController extends Controller
         if (is_numeric($s) && (float) $s > 25000 && (float) $s < 60000) {
             return Carbon::create(1899, 12, 30)->addDays((int) $s)->toDateString();
         }
-        foreach (['Y-m-d', 'd-m-Y', 'd/m/Y', 'm/d/Y', 'd.m.Y'] as $fmt) {
-            try {
-                $d = Carbon::createFromFormat($fmt, $s);
-                if ($d && (int) $d->year > 2000) {
-                    return $d->toDateString();
-                }
-            } catch (\Throwable $e) {
-            }
-        }
-        try {
-            return Carbon::parse($s)->toDateString();
-        } catch (\Throwable $e) {
-            return null;
-        }
+        // 7 Oct 2026 (Ejaz) — the app-wide parser: DD-MM-YYYY first, strict
+        // (createFromFormat silently rolled 31-02 into March and read "05/06"
+        // as d/m OR m/d depending on order). US m/d only when d/m is impossible.
+        return \App\Services\EmployeeImportService::date(str_replace('.', '-', $s));
     }
 
     /** Receive parsed rows (browser-parsed xlsx/csv) into a pending batch. */
@@ -288,7 +279,7 @@ class AttendanceBulkController extends Controller
                 $out[] = [
                     'batch' => $b->batch,
                     'uploadedBy' => $b->uploaded_by,
-                    'at' => Carbon::parse($b->up_at)->format('d M Y H:i'),
+                    'at' => Carbon::parse($b->up_at)->format('d-m-Y H:i'),
                     'pending' => (int) $b->pending, 'errors' => (int) $b->errors,
                     'approved' => (int) $b->approved, 'rejected' => (int) $b->rejected, 'total' => (int) $b->total,
                     'rows' => $rows->map(fn ($r) => [

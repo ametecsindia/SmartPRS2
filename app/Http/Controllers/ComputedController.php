@@ -99,7 +99,7 @@ class ComputedController extends Controller
                     ->orderByDesc('updated_at')->limit(500)
                     ->get(['emp_code', 'name', 'status', 'doj'])
                     ->map(fn ($r) => ['Code' => $r->emp_code, 'Name' => $r->name, 'Status' => ucfirst($r->status),
-                        'Joined' => $r->doj ? Carbon::parse($r->doj)->format('d M Y') : '—'])->all();
+                        'Joined' => $r->doj ? Carbon::parse($r->doj)->format('d-m-Y') : '—'])->all();
                 $active = (int) DB::table('employees')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->where('status', 'active')->whereNull('deleted_at')->count();
 
                 return response()->json(['ok' => true, 'label' => 'Attrition — employees on notice / exited',
@@ -135,7 +135,7 @@ class ComputedController extends Controller
                         $uid = $a['user_id'] ?? null;
 
                         return [
-                            'When' => ! empty($a['created_at']) ? Carbon::parse($a['created_at'])->format('d M Y H:i') : '',
+                            'When' => ! empty($a['created_at']) ? Carbon::parse($a['created_at'])->format('d-m-Y H:i') : '',
                             'Action' => ucfirst(str_replace('_', ' ', (string) ($a['action'] ?? ''))),
                             'Subject' => trim(str_replace('_', ' ', (string) ($a['entity'] ?? '')).(! empty($a['entity_id']) ? ' #'.$a['entity_id'] : '')),
                             'Detail' => $detail,

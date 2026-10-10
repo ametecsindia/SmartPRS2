@@ -40,7 +40,7 @@
 
     <div class="title">{{ $title }}</div>
 
-    <div class="body{{ $bodyIsHtml ? ' html' : '' }}">@if($bodyIsHtml){!! $body !!}@else{{ $body }}@endif</div>
+    <div class="body{{ $bodyIsHtml ? ' html' : '' }}">@if($bodyIsHtml){!! \App\Support\DateFmt::text($body) !!}@else{{ \App\Support\DateFmt::text($body) }}@endif</div>
 
     <div class="sign">
         <div class="for">For {{ $brandName }},</div>

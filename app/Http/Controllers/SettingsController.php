@@ -50,8 +50,10 @@ class SettingsController extends Controller
             'payslip_dl_emps' => [],      // emp codes blocked when mode = emp
             'weekly_off_day' => 'sunday', // rev172 — weekly off day; payroll working-days exclude it (plus the Saturday policy below and the Holidays calendar)
             'sat_off_mode' => 'none',     // rev172 — Saturday policy: none (all working) | all | 2_4 (2nd & 4th off) | 1_3 (1st & 3rd off)
-            'lop_basis' => 'working',     // rev177 — LOP per-day basis: working (denominator = month − offs − holidays; 1 absent day costs gross/working-days) | calendar (denominator = days in month; weekly offs & holidays are PAID days — matches the common Indian payslip "Total days 31, LOP 2") | fixed30 (every month is a flat 30 days; per-day = gross/30)
+            'lop_basis' => 'calendar',    // 8 Oct 2026 — 'working' retired (reads as calendar; see PayrollGenController::lopBasisOf). calendar (denominator = days in month; weekly offs & holidays are PAID days — matches the common Indian payslip "Total days 31, LOP 2") | fixed30 (every month is a flat 30 days; per-day = gross/30)
             'sandwich_rule' => 0,         // rev180 — OPTIONAL sandwich rule: a weekly off/holiday BETWEEN two absent working days counts as LOP too. Off by default.
+            'stat_defer_months' => 0,     // 8 Oct 2026 (Ejaz) — statutory deferral: no PF/ESI/PT/Bonus for the first N months from joining (0 = off). Applies from the payroll month in which N months complete (DOJ 15-Jan + 3 → April).
+            'stat_defer_items' => ['pf', 'esi', 'pt', 'bonus'], // which items the deferral switches off
             'bonus_pct' => 8.33,          // rev180 — statutory bonus % for the Bonus Register (Payment of Bonus Act: min 8.33%, max 20%)
             'incentive_min_compliance' => 60, // F1 — min compliance score (0–100) to pay an incentive without an override note
             'dra_gate' => 'warn',         // rev181 — DRA-expiry gate at money points (incentive commit / commission approval / off-roll earning approval): off | warn (default — pays but warns + audits) | block (refuses until the DRA cert is valid)
@@ -148,16 +150,38 @@ class SettingsController extends Controller
             'payslip_show_ytd' => $num, // rev179 — 1/0 toggle
             'sandwich_rule' => $num,    // rev180 — 1/0 toggle
             'bonus_pct' => $num,        // rev180 — statutory bonus %
+            'stat_defer_months' => ['nullable', 'integer', 'min:0', 'max:60'], // 8 Oct 2026 — statutory deferral months
+            'stat_defer_items' => ['nullable', 'array'], 'stat_defer_items.*' => ['in:pf,esi,pt,bonus'],
             'points_gate_min' => $num,  // rev181 — monthly points threshold (0 = off)
             'late_email_enabled' => $num, // F4 — late-arrival email toggle
             'incentive_payout_lag' => $num, // rev181c — payout lag months (0 = off)
             'dra_gate' => ['nullable', 'in:off,warn,block'], // rev181 — DRA money-point gate
             'weekly_off_day' => ['nullable', 'in:sunday,monday,tuesday,wednesday,thursday,friday,saturday'],
-            'sat_off_mode' => ['nullable', 'in:none,all,2_4,1_3'],
+            'sat_off_mode' => ['nullable', 'in:none,all,2_4,1_3,custom'],   // 7 Oct 2026 — custom = pick Saturdays
+            'sat_off_weeks' => ['nullable', 'array'], 'sat_off_weeks.*' => ['integer', 'min:1', 'max:5'],
+            // 7 Oct 2026 — weekly offs for ONE company (overrides the tenant rule); 'clear' removes it.
+            'off_company_id' => ['nullable', 'integer'], 'off_company_clear' => ['nullable', 'boolean'],
             'lop_basis' => ['nullable', 'in:working,calendar,fixed30'], // rev177
             'payslip_dl_mode' => ['nullable', 'in:all,none,dept,emp'],
             'payslip_dl_depts' => ['nullable', 'array'], 'payslip_dl_depts.*' => ['string', 'max:120'],
             'payslip_dl_emps' => ['nullable', 'array'], 'payslip_dl_emps.*' => ['string', 'max:60'],
+            // 8 Oct 2026 (Ejaz) — custom PT slabs per company (Salary Structure tab).
+            'pt_custom_company' => ['nullable', 'integer', 'min:0'],   // 0 / blank = all companies
+            'pt_custom_slabs' => ['nullable', 'array'],
+            'pt_custom_slabs.*.from' => ['nullable', 'numeric', 'min:0'],
+            'pt_custom_slabs.*.to' => ['nullable', 'numeric', 'min:0'],
+            'pt_custom_slabs.*.amt' => ['required', 'numeric', 'min:0'],
+            // 10 Oct 2026 (Ejaz) — PT RULES: any number of rules, each with optional
+            // company / branches / designations / genders + its own slabs.
+            'pt_custom_rules' => ['nullable', 'array', 'max:100'],
+            'pt_custom_rules.*.company' => ['nullable', 'integer', 'min:0'],
+            'pt_custom_rules.*.branches' => ['nullable', 'array'], 'pt_custom_rules.*.branches.*' => ['string', 'max:120'],
+            'pt_custom_rules.*.designations' => ['nullable', 'array'], 'pt_custom_rules.*.designations.*' => ['string', 'max:120'],
+            'pt_custom_rules.*.genders' => ['nullable', 'array'], 'pt_custom_rules.*.genders.*' => ['in:Male,Female,Other'],
+            'pt_custom_rules.*.slabs' => ['required', 'array', 'min:1'],
+            'pt_custom_rules.*.slabs.*.from' => ['nullable', 'numeric', 'min:0'],
+            'pt_custom_rules.*.slabs.*.to' => ['nullable', 'numeric', 'min:0'],
+            'pt_custom_rules.*.slabs.*.amt' => ['required', 'numeric', 'min:0'],
             'tds_slabs' => ['nullable', 'array'],
             'tds_slabs.*.upto' => ['nullable', 'numeric', 'min:0'],
             'tds_slabs.*.rate' => ['nullable', 'numeric', 'min:0'],
@@ -168,7 +192,7 @@ class SettingsController extends Controller
         // never silently resets other saved settings back to defaults.
         $merged = self::rates($request->user()->tenant_id ?? 0);
         $strKeys = ['weekly_off_day', 'sat_off_mode', 'lop_basis', 'payslip_dl_mode', 'dra_gate']; // rev172/rev177/rev181 — string settings, no numeric cast
-        $arrKeys = ['payslip_dl_depts', 'payslip_dl_emps'];               // rev172 — list settings
+        $arrKeys = ['payslip_dl_depts', 'payslip_dl_emps', 'stat_defer_items'];               // rev172 — list settings
         foreach (self::defaults() as $k => $default) {
             if ($k === 'tds_slabs' || in_array($k, $strKeys, true) || in_array($k, $arrKeys, true)) {
                 continue;
@@ -186,6 +210,77 @@ class SettingsController extends Controller
             if (array_key_exists($k, $v)) {
                 $merged[$k] = array_values(array_filter(array_map(fn ($s) => trim((string) $s), (array) ($v[$k] ?? [])), fn ($s) => $s !== ''));
             }
+        }
+        // 7 Oct 2026 (Ejaz) — custom Saturdays + per-company weekly offs.
+        $offKeys = ['weekly_off_day', 'sat_off_mode'];
+        if (! empty($v['off_company_id'])) {
+            $cid = (string) (int) $v['off_company_id'];
+            $over = (array) ($merged['weekly_offs_company'] ?? []);
+            // the tenant-level values above must not change when one company is saved
+            $base = self::rates($request->user()->tenant_id ?? 0);
+            foreach ($offKeys as $k) {
+                $merged[$k] = $base[$k];
+            }
+            $merged['sat_off_weeks'] = $base['sat_off_weeks'] ?? [];
+            if (! empty($v['off_company_clear'])) {
+                unset($over[$cid]);
+            } else {
+                $over[$cid] = [
+                    'weekly_off_day' => (string) ($v['weekly_off_day'] ?? 'sunday'),
+                    'sat_off_mode' => (string) ($v['sat_off_mode'] ?? 'none'),
+                    'sat_off_weeks' => array_values(array_unique(array_map('intval', (array) ($v['sat_off_weeks'] ?? [])))),
+                ];
+            }
+            $merged['weekly_offs_company'] = $over;
+        } elseif (array_key_exists('sat_off_weeks', $v)) {
+            $merged['sat_off_weeks'] = array_values(array_unique(array_map('intval', (array) ($v['sat_off_weeks'] ?? []))));
+        }
+        if ($request->has('pt_custom_slabs')) {
+            $key = ((int) ($v['pt_custom_company'] ?? 0)) ?: 'all';
+            $rows = [];
+            foreach ((array) ($v['pt_custom_slabs'] ?? []) as $b) {
+                $from = (float) ($b['from'] ?? 0);
+                $to = (float) ($b['to'] ?? 0);   // 0 / blank = and above
+                if ($to > 0 && $to < $from) {
+                    return response()->json(['ok' => false, 'error' => 'PT slab: "To" ('.$to.') is less than "From" ('.$from.').'], 422);
+                }
+                $rows[] = [$from, $to, (float) $b['amt']];
+            }
+            usort($rows, fn ($a, $b) => $a[0] <=> $b[0]);
+            $map = (array) ($merged['pt_custom_slabs'] ?? []);
+            if ($rows) {
+                $map[(string) $key] = $rows;
+            } else {
+                unset($map[(string) $key]);   // no rows = back to the state / default PT tables
+            }
+            $merged['pt_custom_slabs'] = $map;
+        }
+        if ($request->has('pt_custom_rules')) {
+            // The card always sends the WHOLE list (it has already folded the
+            // 8 Oct per-company slabs into rules), so this replaces both keys.
+            $rules = [];
+            $clean = fn ($a) => array_values(array_unique(array_filter(array_map(fn ($x) => trim((string) $x), (array) $a), 'strlen')));
+            foreach ((array) ($v['pt_custom_rules'] ?? []) as $n => $rule) {
+                $rows = [];
+                foreach ((array) $rule['slabs'] as $b) {
+                    $from = (float) ($b['from'] ?? 0);
+                    $to = (float) ($b['to'] ?? 0);   // 0 / blank = and above
+                    if ($to > 0 && $to < $from) {
+                        return response()->json(['ok' => false, 'error' => 'PT rule '.($n + 1).': "To" ('.$to.') is less than "From" ('.$from.').'], 422);
+                    }
+                    $rows[] = [$from, $to, (float) $b['amt']];
+                }
+                usort($rows, fn ($a, $b) => $a[0] <=> $b[0]);
+                $rules[] = [
+                    'company' => (int) ($rule['company'] ?? 0),
+                    'branches' => $clean($rule['branches'] ?? []),
+                    'designations' => $clean($rule['designations'] ?? []),
+                    'genders' => $clean($rule['genders'] ?? []),
+                    'slabs' => $rows,
+                ];
+            }
+            $merged['pt_custom_rules'] = $rules;
+            $merged['pt_custom_slabs'] = [];
         }
         if (! empty($v['tds_slabs'])) {
             $merged['tds_slabs'] = array_values(array_map(fn ($s) => [

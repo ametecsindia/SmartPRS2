@@ -229,7 +229,7 @@ class LateArrivalService
             $h = intdiv($lateMin, 60);
             $m = $lateMin % 60;
             $lateStr = ($h > 0 ? $h.' hr ' : '').$m.' min';
-            $dateNice = Carbon::parse($date)->format('d M Y');
+            $dateNice = Carbon::parse($date)->format('d-m-Y');
 
             // 2026-08-05 — the wording now comes from the editable "Late login"
             // template (Greetings screen). The saved/default template renders with

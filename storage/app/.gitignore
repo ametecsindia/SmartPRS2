@@ -2,4 +2,6 @@
 !public/
 !keys/
 !keys/**
+# 2026-09-28: the licence PRIVATE key must never be in git (it signs every .lic).
+keys/license_private.pem
 !.gitignore

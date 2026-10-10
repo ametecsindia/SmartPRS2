@@ -18,7 +18,19 @@ class AppController extends Controller
         'hr_manager' => 'HR Manager',
         'field_agent' => 'Field Agent',
         'employee' => 'Employee',
+        'accountant' => 'Accountant',
     ];
+
+    /**
+     * 29 Sep 2026 — the Roles & Permissions row label for a Spatie role name.
+     * An unknown role used to fall back to 'Admin' (full access); now it keeps
+     * its own name so the matrix row of that name governs it.
+     */
+    public static function roleLabel(?string $name): string
+    {
+        $name = $name ?: 'admin';
+        return self::ROLE_MAP[$name] ?? ucwords(str_replace('_', ' ', $name));
+    }
 
     /**
      * The module groups the current user's tenant plan includes.
@@ -72,6 +84,66 @@ class AppController extends Controller
         }
     }
 
+    /**
+     * 2026-09-28 (Ejaz) — "I can't check each and every minute detail manually."
+     * Things an installation still needs, checked on every page load for admins
+     * and shown as a dismissible card (wireSetupChecks in the boot JS).
+     * Each item: [level warn|error|info, message, screen to open, button label].
+     */
+    private static function setupChecks($user): array
+    {
+        $out = [];
+        $DB = \Illuminate\Support\Facades\DB::class;
+        $Schema = \Illuminate\Support\Facades\Schema::class;
+        $tid = $user->tenant_id ? (int) $user->tenant_id : null;
+        // Email (SMTP) — without it every alert email is skipped.
+        try {
+            $hasSmtp = false;
+            if ($Schema::hasTable('app_settings')) {
+                foreach ([$tid ?? 0, 0] as $t) {
+                    $map = json_decode((string) $DB::table('app_settings')->where('tenant_id', $t)->where('ckey', 'mail')->value('value'), true) ?: [];
+                    foreach ($map as $m) {
+                        if (is_array($m) && ! empty($m['host'])) {
+                            $hasSmtp = true;
+                        }
+                    }
+                }
+            }
+            if (! $hasSmtp) {
+                $out[] = ['warn', 'Email is not set up, so probation, absence and late-arrival alerts are not being emailed (they still appear under Notifications).', 'company-emails', 'Set up email'];
+            } elseif ($Schema::hasTable('mail_log')) {
+                $last = $DB::table('mail_log')->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                    ->whereIn('status', ['sent', 'failed'])->orderByDesc('id')->first(['status', 'error']);
+                if ($last && $last->status === 'failed') {
+                    $out[] = ['error', 'Emails are failing: '.e(mb_substr((string) $last->error, 0, 160)), 'company-emails', 'Fix email settings'];
+                }
+            }
+        } catch (\Throwable $e) {
+        }
+        // Biometric devices with no branch — shared Biometric IDs can't be resolved.
+        try {
+            if ($Schema::hasTable('biometric_configs') && $Schema::hasColumn('biometric_configs', 'branch')) {
+                $q = $DB::table('biometric_configs')->where('enabled', true)
+                    ->where(fn ($w) => $w->whereNull('branch')->orWhere('branch', ''));
+                $tid ? $q->where('tenant_id', $tid) : $q->whereNull('tenant_id');
+                $n = $q->count();
+                if ($n > 0) {
+                    $out[] = ['warn', $n.' biometric device(s) have no Branch. Set it (Edit on the device) so punches go to the right branch&#39;s employees.', 'biometric-setup', 'Open Biometric Setup'];
+                }
+            }
+        } catch (\Throwable $e) {
+        }
+        // Background jobs — informational until the OS task is ticking.
+        try {
+            if (\App\Services\AutoScheduler::enabled() && ! \App\Services\AutoScheduler::osTicking()) {
+                $out[] = ['info', 'Background jobs (alerts, biometric auto-sync, backups) are running only while SmartPRS is in use. They take over permanently once the installer has been run as Administrator; SmartPRS also retries this daily by itself.', '', ''];
+            }
+        } catch (\Throwable $e) {
+        }
+
+        return $out;
+    }
+
     public function show(Request $request, ?string $screen = null)
     {
         // rev185: a passkey-gated demo session whose window ended (or was revoked)
@@ -90,7 +162,7 @@ class AppController extends Controller
 
         $html = file_get_contents($path);
         $user = $request->user();
-        $role = self::ROLE_MAP[$user->getRoleNames()->first() ?? 'admin'] ?? 'Admin';
+        $role = self::roleLabel($user->getRoleNames()->first());
 
         // Subscription lifecycle (rev 75) — banner + lock-out state for this login.
         // rev 103: on-prem editions are perpetual — no renew banners, ever.
@@ -100,6 +172,8 @@ class AppController extends Controller
 
         $cfg = json_encode([
             'role' => $role,
+            // 7 Oct 2026 — logins per role label, for the Roles & Permissions list.
+            'roleCounts' => in_array($role, ['Admin', 'Super Admin', 'HR Manager'], true) ? \App\Services\AccessRoles::userCounts($user->tenant_id ? (int) $user->tenant_id : null) : [],
             'planModules' => self::resolvePlanModules($user),   // null = unrestricted; else allowed module-group keys
             'csrf' => csrf_token(),
             'logoutUrl' => route('logout'),
@@ -224,8 +298,9 @@ class AppController extends Controller
             'portalCompany' => session('portal_company_id'),   // from /c/{slug} branded login
             // Subscription lifecycle (rev 75): drives the renew banner + lock-out UI.
             'subState' => $subInfo['state'],                 // active|grace|locked|none
-            'subEnd' => $subInfo['end'] ? $subInfo['end']->format('d M Y') : '',
+            'subEnd' => $subInfo['end'] ? $subInfo['end']->format('d-m-Y') : '',
             'subDays' => $subInfo['daysLeft'],
+            'setupChecks' => in_array($role, ['Admin', 'Super Admin', 'HR Manager'], true) ? self::setupChecks($user) : [],
         ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 
         // Hide the prototype's mock login to avoid a flash before auto-enter.
@@ -534,6 +609,9 @@ CSS;
         safe(function () { wireEmpFormExtras(); });
         safe(function () { wireGenericEdit(); });
         safe(function () { wireCustomScreens(); });
+        // 30 Sep 2026 (Ejaz) — Tests / Test Results / Test Reports hidden from Learning & Knowledge
+        // for now (screens and data untouched; delete this line to bring them back).
+        safe(function () { ['tests', 'test-results', 'test-reports'].forEach(function (id) { document.querySelectorAll('.nav-item[data-id="' + id + '"]').forEach(function (el) { el.parentNode.removeChild(el); }); try { delete SCREENS[id]; } catch (e) {} }); });
         safe(function () { wireImport(cfg); });
         safe(function () { gotoApp(); });
         // Remember the current screen across refreshes (per browser) so a reload
@@ -570,6 +648,7 @@ CSS;
         safe(function () { decorateSubmenuIcons(); setTimeout(decorateSubmenuIcons, 900); setTimeout(decorateSubmenuIcons, 2600); });
         safe(function () { wireUserCard(cfg); });
         safe(function () { wireSubBanner(cfg); });
+        safe(function () { wireSetupChecks(cfg); });
         // rev 97: public live demo — guided tour + floating restart button.
         safe(function () { if (cfg.isDemo) { spTourFab(); } });
         safe(function () { wireDemoLockdown(); });
@@ -653,31 +732,34 @@ CSS;
     // defined (or Super Admin) is unrestricted, so nobody gets locked out.
     // Map each matrix module → the nav ids it controls.
     var PERM_NAV = {
-        dashboard: ['dashboard', 'platform-dashboard', 'how-it-works', 'notifications'],
-        employees: ['emp-list', 'emp-archived', 'emp-add', 'idcard', 'teams', 'onboarding-board', 'recruitment', 'bgv', 'documents', 'roster', 'offroll-agents', 'transfers'],
-        attendance: ['att-daily', 'att-report', 'att-manual', 'att-zkteco', 'biometric-devices', 'biometric-setup', 'geofence', 'geofence-list', 'shifts', 'late-policy', 'overtime'],
-        leave: ['leave-apply', 'leave-types', 'holidays'],
+        dashboard: ['dashboard', 'platform-dashboard', 'how-it-works', 'notifications', 'ai-assistant'],
+        employees: ['emp-list', 'emp-archived', 'emp-add', 'idcard', 'teams', 'onboarding-board', 'recruitment', 'bgv', 'documents', 'roster', 'offroll-agents', 'transfers', 'probation', 'emp-import'],
+        attendance: ['att-daily', 'att-report', 'att-manual', 'att-zkteco', 'biometric-devices', 'biometric-setup', 'geofence', 'geofence-list', 'shifts', 'late-policy', 'overtime', 'att-correction', 'absence-config', 'api-keys', 'pending-punches'],
+        leave: ['leave-apply', 'leave-types', 'holidays', 'leave-report'],
         payroll: ['pay-cycle', 'salary-schedules', 'salary-setup', 'salary-gen', 'salary-approval', 'payslip', 'deductions', 'payout-recon', 'live-salary', 'pay-ledger', 'calc-logic'],
         commissions: ['commissions', 'incentive-schemes', 'clawbacks', 'bonus-enc', 'bank-pack'],
         expenses: ['expenses', 'advance'],
         loans: ['loans'],
-        statutory: ['pf-esic', 'tds', 'pt', 'gratuity', 'bonus', 'tds-returns', 'min-wages', 'audit-reports'],
+        statutory: ['pf-esic', 'tds', 'pt', 'gratuity', 'bonus', 'tds-returns', 'min-wages', 'audit-reports', 'statutory-config'],
         performance: ['performance', 'increments', 'exits', 'awards', 'points-scores', 'points-ledger', 'points-rules', 'tests', 'test-results', 'test-reports', 'attrition'],
         field: ['escalations', 'agent-auth', 'dra-certs', 'complaints', 'compliance-alerts'],
         kb: ['kb', 'faqs', 'training-programs', 'training-records', 'training-content', 'code-of-conduct', 'policies', 'helpdesk', 'posh', 'letters-offer', 'letters-increment', 'letters-warning', 'letters-relieving', 'letters-nda', 'letters-templates', 'notice', 'messages', 'send-message'],
         reports: ['reports', 'activity-logs'],
-        assets: ['assets'],
-        settings: ['companies', 'departments', 'designations', 'branches', 'banks', 'users', 'roles', 'settings', 'fin-year', 'my-subscription', 'branding', 'company-emails', 'wa-settings', 'wa-templates', 'sms-settings', 'sms-templates', 'approvals-inbox', 'mobile-devices'],
+        assets: ['assets', 'asset-stock', 'asset-issue'],
+        settings: ['companies', 'departments', 'designations', 'branches', 'banks', 'users', 'roles', 'settings', 'fin-year', 'my-subscription', 'branding', 'company-emails', 'wa-settings', 'wa-templates', 'sms-settings', 'sms-templates', 'approvals-inbox', 'mobile-devices', 'probation-config', 'greetings', 'greetings-log', 'sys-updates'],
         saas: ['tenants', 'plans', 'subscriptions', 'invoices', 'payments', 'gateways', 'feature-flags', 'demo-requests']
     };
     // Resolve the current login's saved perms object from DB.roles (match by the
     // role label the server injected). Returns null when none defined.
     function currentPerms() {
         try {
-            var label = cfg.role || window._role || '';
+            // 29 Sep 2026 (Ejaz) — a role that HAS a row in Roles & Permissions is
+            // governed by its ticks only: an unticked box is NO access. (It used to
+            // treat an all-blank row as unrestricted.) Match is case-insensitive.
+            var label = String(cfg.role || window._role || '').trim().toLowerCase();
             var roles = (typeof DB !== 'undefined' && DB.roles) || [];
-            var r = roles.find(function (x) { return (x.role || '') === label; });
-            if (r && r.perms && Object.keys(r.perms).length) { return r.perms; }
+            var r = roles.find(function (x) { return String(x.role || '').trim().toLowerCase() === label; });
+            if (r) { return r.perms || {}; }
         } catch (e) {}
         return null;
     }
@@ -768,18 +850,93 @@ CSS;
         // blank the whole sidebar. The matrix only restricts the lower roles.
         if (cfg.role === 'Super Admin' || cfg.role === 'Admin') { return; }
         window.spPerms = currentPerms();
-        if (!window.spPerms) { return; }               // no matrix defined → unchanged
-        // Hide menu items whose module the role cannot VIEW.
-        document.querySelectorAll('.nav-item[data-id]').forEach(function (el) {
-            var id = el.getAttribute('data-id');
-            var mk = navModule(id);
-            if (mk && !spCan(mk, 'view')) { el.style.display = 'none'; }
-        });
-        // Hide a section header when all nav items that follow it are hidden.
-        hideEmptyNavSections();
+        // 8 Oct 2026 (Ejaz) - self-service items show for every login, row or no row.
+        showSelfNav(); setTimeout(showSelfNav, 950); setTimeout(showSelfNav, 2650); setTimeout(showSelfNav, 5050);
+        if (!window.spPerms) { return; }               // role has no row at all → prototype role menu
+        gateNav();
+        // Injected menu items arrive late — gate them too.
+        setTimeout(gateNav, 950); setTimeout(gateNav, 2650); setTimeout(gateNav, 5050);
+        wireGoGuard();
         // Gate list action buttons (Add/Edit/Delete) for the current screen after
         // each render, based on the screen's module.
         wireActionGating();
+    }
+    // 8 Oct 2026 (Ejaz) - an employee could not see My Profile / Apply Leave /
+    // Complaints even with View ticked. Two causes: (1) on a demo-flagged tenant
+    // gateNav never UN-hid what the prototype role menu had hidden, so a ticked
+    // module stayed invisible; (2) the employee's own screens were tied to big
+    // admin modules. SELF_NAV = a person's own screens: always shown to every
+    // login (data is still own + reporting team on the server).
+    var SELF_NAV = ['dashboard', 'notifications', 'account-settings', 'leave-apply', 'att-correction', 'payslip', 'complaints', 'helpdesk', 'posh', 'expenses', 'approvals-inbox'];
+    var DEMO_HIDE = ['users', 'roles', 'branding', 'company-emails', 'mail-log', 'wa-settings', 'wa-templates', 'sms-settings', 'sms-templates', 'my-subscription', 'exits', 'settings'];
+    function navLocked() {
+        var l = (cfg.editionHide || []).slice();
+        if (cfg.isDemo && !cfg.demoTeam) { l = l.concat(DEMO_HIDE); }
+        return l;
+    }
+    function showSelfNav() {
+        try {
+            var dash = document.querySelector('.nav-item[data-id="dashboard"]');
+            if (dash && dash.parentNode && !document.querySelector('.nav-item[data-id="account-settings"]')) {
+                var d = document.createElement('div');
+                d.className = 'nav-item';
+                d.setAttribute('data-id', 'account-settings');
+                d.setAttribute('onclick', "go('account-settings',this)");
+                d.textContent = 'My Profile';
+                dash.parentNode.insertBefore(d, dash.nextSibling);
+            }
+            var locked = navLocked();
+            SELF_NAV.forEach(function (id) {
+                if (locked.indexOf(id) >= 0) { return; }
+                document.querySelectorAll('.nav-item[data-id="' + id + '"]').forEach(function (el) {
+                    el.style.display = '';
+                    var sub = el.closest('.nav-sub');
+                    if (sub) { sub.style.display = ''; var tog = sub.previousElementSibling; if (tog && tog.classList.contains('nav-item')) { tog.style.display = ''; } }
+                });
+            });
+            hideEmptyNavSections();
+        } catch (e) {}
+    }
+    // 29 Sep 2026 (Ejaz) — the matrix decides the menu: a screen shows ONLY when
+    // its module's View box is ticked (an unmapped screen never shows). Ticking a
+    // module also brings back screens the old built-in role menu hid. Screens the
+    // licence edition or the public demo hide stay hidden; SaaS stays Super Admin.
+    function gateNav() {
+        var locked = navLocked();
+        document.querySelectorAll('.nav-item[data-id]').forEach(function (el) {
+            var id = el.getAttribute('data-id');
+            var mk = navModule(id);
+            if (SELF_NAV.indexOf(id) >= 0) { if (locked.indexOf(id) < 0) { el.style.display = ''; } return; }
+            if (!mk || mk === 'saas' || !spCan(mk, 'view')) { el.style.display = 'none'; }
+            else if (locked.indexOf(id) < 0) { el.style.display = ''; }
+        });
+        document.querySelectorAll('.nav-sub').forEach(function (sub) {
+            var vis = [].slice.call(sub.querySelectorAll('.nav-item[data-id]')).some(function (x) { return x.style.display !== 'none'; });
+            sub.style.display = vis ? '' : 'none';
+            var tog = sub.previousElementSibling;
+            if (tog && tog.classList.contains('nav-item') && !tog.getAttribute('data-id')) { tog.style.display = vis ? '' : 'none'; }
+        });
+        hideEmptyNavSections();
+    }
+    // Block opening a menu screen the role can't view (saved screen, ?screen=,
+    // search, links) — land on the first screen it CAN view instead.
+    function wireGoGuard() {
+        if (typeof go !== 'function' || go.__permGuard) { return; }
+        var _go = go;
+        window.go = function (id) {
+            var el = id ? document.querySelector('.nav-item[data-id="' + id + '"]') : null;
+            var denied = el ? el.style.display === 'none' : (navModule(id) ? true : false);
+            if (denied) {
+                var first = [].slice.call(document.querySelectorAll('.nav-item[data-id]')).find(function (x) { return x.style.display !== 'none'; });
+                if (first) { return _go.call(this, first.getAttribute('data-id'), first); }
+                var host = document.getElementById('host');
+                if (host) { host.innerHTML = '<div class="card" style="padding:40px;text-align:center;color:var(--text3)">Your role has no screens enabled yet. Ask your admin to tick them in Settings → Roles &amp; Permissions.</div>'; }
+                return;
+            }
+            return _go.apply(this, arguments);
+        };
+        window.go.__permGuard = true;
+        window.go.__memWrapped = true;
     }
     // Wrap render() so action buttons are hidden per the role's create/edit/del.
     function wireActionGating() {
@@ -1358,13 +1515,13 @@ CSS;
     var SUB_ICONS = {
         'dashboard': 'fa-gauge-high', 'live-salary': 'fa-bolt', 'platform-dashboard': 'fa-gauge-high',
         'ai-assistant': 'fa-robot', 'how-it-works': 'fa-circle-question', 'notifications': 'fa-bell', 'approvals-inbox': 'fa-inbox',
-        'emp-list': 'fa-address-book', 'emp-archived': 'fa-box-archive', 'emp-add': 'fa-user-plus', 'teams': 'fa-people-group', 'idcard': 'fa-id-card',
+        'account-settings': 'fa-id-badge', 'emp-list': 'fa-address-book', 'emp-archived': 'fa-box-archive', 'emp-add': 'fa-user-plus', 'teams': 'fa-people-group', 'idcard': 'fa-id-card',
         'documents': 'fa-folder-open', 'onboarding-board': 'fa-clipboard-check', 'exits': 'fa-door-open', 'transfers': 'fa-right-left',
         'recruitment': 'fa-user-tie', 'bgv': 'fa-user-shield',
         'att-daily': 'fa-calendar-check', 'att-report': 'fa-table-list', 'att-manual': 'fa-pen-to-square',
         'att-zkteco': 'fa-fingerprint', 'biometric-devices': 'fa-fingerprint', 'biometric-setup': 'fa-sliders', 'geofence': 'fa-map-location-dot',
         'geofence-list': 'fa-draw-polygon', 'shifts': 'fa-clock', 'late-policy': 'fa-business-time',
-        'leave-apply': 'fa-calendar-day', 'leave-types': 'fa-list-ul', 'holidays': 'fa-umbrella-beach',
+        'leave-apply': 'fa-calendar-day', 'leave-types': 'fa-list-ul', 'leave-report': 'fa-table-list', 'holidays': 'fa-umbrella-beach',
         'salary-setup': 'fa-sitemap', 'salary-schedules': 'fa-calendar-days', 'salary-gen': 'fa-gears',
         'salary-approval': 'fa-check-double', 'payslip': 'fa-file-invoice-dollar', 'pay-ledger': 'fa-book',
         'deductions': 'fa-money-bill-transfer', 'payout-recon': 'fa-scale-balanced', 'pay-cycle': 'fa-arrows-spin',
@@ -1392,7 +1549,7 @@ CSS;
     function decorateSubmenuIcons() {
         // 26-Sep-2026 (Ejaz): swap the two attendance sidebar labels. Screen ids are unchanged
         // (att-daily / att-report keep their routes, permissions and icons) - only the text moves.
-        var spAttLabels = { 'att-daily': 'Attendance Report', 'att-report': 'Daily Attendance' };
+        var spAttLabels = { 'att-daily': 'Attendance Report', 'att-report': 'Daily Attendance', 'posh': 'Raise a Complaint' };   // 30 Sep 2026 — POSH tab renamed
         Object.keys(spAttLabels).forEach(function (id) {
             document.querySelectorAll('.sidebar .nav-item[data-id="' + id + '"]').forEach(function (el) {
                 for (var k = 0; k < el.childNodes.length; k++) {
@@ -1528,6 +1685,24 @@ CSS;
     //   locked → every navigation is forced to My Subscription (middleware
     //            already blocks data endpoints; employees never get here)
     //   active with <=15 days left → soft reminder bar (admin only)
+    // 2026-09-28 — "Setup needed" card for admins (built by AppController::setupChecks).
+    // Dismiss hides it for this browser session; it returns while the issue remains.
+    function wireSetupChecks(cfg) {
+        var list = cfg.setupChecks || [];
+        if (!list.length) { return; }
+        try { if (sessionStorage.getItem('sprsSetupHide') === '1') { return; } } catch (e) {}
+        var col = { error: '#dc2626', warn: '#d97706', info: '#2563eb' };
+        var box = document.createElement('div');
+        box.id = 'sprs-setup';
+        box.style.cssText = 'position:fixed;right:16px;bottom:52px;z-index:8400;width:380px;max-width:calc(100vw - 32px);background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 10px 30px rgba(15,23,42,.18);padding:14px 16px;font-size:12.5px';
+        box.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b style="font-size:14px"><i class="fas fa-screwdriver-wrench" style="color:#f97316;margin-right:6px"></i>Setup needed</b>'
+            + '<i class="fas fa-xmark" title="Hide for now" style="cursor:pointer;color:#64748b" onclick="try{sessionStorage.setItem(&#39;sprsSetupHide&#39;,&#39;1&#39;)}catch(e){};document.getElementById(&#39;sprs-setup&#39;).remove()"></i></div>'
+            + list.map(function (c) {
+                return '<div style="border-left:3px solid ' + (col[c[0]] || '#64748b') + ';padding:6px 0 6px 10px;margin-bottom:8px;color:#334155">' + c[1]
+                    + (c[2] ? '<div style="margin-top:6px"><a style="color:#ea580c;font-weight:700;cursor:pointer" onclick="go(&#39;' + c[2] + '&#39;)">' + c[3] + ' &rarr;</a></div>' : '') + '</div>';
+            }).join('');
+        document.body.appendChild(box);
+    }
     function wireSubBanner(cfg) {
         if (cfg.subState === 'locked') {
             var bar = document.createElement('div');
@@ -1788,6 +1963,15 @@ CSS;
                 });
             }
             if (src === '@ptStates') { return (cfg.empFields && cfg.empFields.ptStates) || []; }
+            // 7 Oct 2026 (Ejaz) - Access Role: built-in login roles + every Roles & Permissions row.
+            if (src === '@roles') {
+                var rl = ['Admin', 'HR Manager', 'Accountant', 'Field Agent', 'Employee'];
+                (DB.roles || []).forEach(function (r) {
+                    var n = String((r && r.role) || '').trim();
+                    if (n && n.toLowerCase() !== 'super admin' && !rl.some(function (x) { return x.toLowerCase() === n.toLowerCase(); })) { rl.push(n); }
+                });
+                return rl;
+            }
         } catch (eO) {}
         return [];
     }
@@ -1922,6 +2106,18 @@ CSS;
                 } catch (eT) {}
                 try { alert('Cannot save — ' + _badMsg + '  Please correct the highlighted field, then save again.'); } catch (eA) {}
                 setTimeout(function () { try { be.focus(); be.select && be.select(); } catch (eF) {} }, 0);
+                return;
+            }
+            // 2026-09-28 (Ejaz) — Employment Stage starts blank on a new employee
+            // and must be CHOSEN (Permanent / Probation / Internship); a blank
+            // used to save silently as Permanent.
+            var _stEl = document.getElementById('f_employment_stage');
+            if (_stEl && !_stEl.value) {
+                if (typeof toast === 'function') { toast('Select the Employment Stage (Permanent / Probation / Internship) in the Job tab.'); }
+                var _tj = document.querySelector('.tab[onclick*="tab-ej"]');
+                if (_tj && typeof showTab === 'function') { showTab('tab-ej', _tj); }
+                empMarkField(_stEl, true);
+                setTimeout(function () { try { _stEl.focus(); } catch (eS) {} }, 0);
                 return;
             }
             var refs = collectRefs();
@@ -2246,19 +2442,27 @@ CSS;
             var d = window.__RM_NOTIF;
             if (!d) { getJson('/app/notifications/feed', '__RM_NOTIF'); return loading('Notifications'); }
             if (!d.ok) { return errCard('Notifications', d.error); }
+            // 2026-09-28 (Ejaz) — select individual notifications (checkboxes) and
+            // mark the selection read or UNREAD; each row also toggles on its own.
             var head = pghead('Notifications', (d.unread || 0) + ' unread',
-                '<button class="btn btn-secondary" onclick="rmNotifReadAll()"><i class="fas fa-check-double"></i> Mark all read</button>');
+                '<button class="btn btn-secondary" onclick="rmNotifSel(false)"><i class="fas fa-envelope-open"></i> Mark selected read</button> '
+                + '<button class="btn btn-secondary" onclick="rmNotifSel(true)"><i class="fas fa-envelope"></i> Mark selected unread</button> '
+                + '<button class="btn btn-secondary" onclick="rmNotifReadAll()"><i class="fas fa-check-double"></i> Mark all read</button>');
             if (!d.items || !d.items.length) { return head + '<div class="card">' + empty('Nothing yet. Alerts about approvals, probation, greetings and attendance will appear here.') + '</div>'; }
-            var rows = '';
+            var rows = '<div style="padding:9px 16px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:center;font-size:12.5px;color:var(--text3)">'
+                + '<input type="checkbox" onclick="rmNotifAll(this.checked)" title="Select all"> Select all</div>';
             for (var i = 0; i < d.items.length; i++) {
                 var n = d.items[i];
                 rows += '<div style="padding:13px 16px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:flex-start;'
                     + (n.read ? '' : 'background:var(--bg2,#f8fafc)') + '">'
+                    + '<input type="checkbox" class="rm-notif-cb" value="' + n.id + '" style="margin-top:3px">'
                     + '<div style="flex:1;cursor:pointer" onclick="rmNotifOpen(' + n.id + (n.url ? ",'" + esc(n.url) + "'" : '') + ')">'
                     + '<div style="font-weight:' + (n.read ? '500' : '700') + ';font-size:13.5px">' + esc(n.title) + '</div>'
                     + (n.body ? '<div style="font-size:12.5px;color:var(--text3);margin-top:3px">' + esc(n.body) + '</div>' : '')
                     + '<div style="font-size:11px;color:var(--text3);margin-top:5px">' + esc(n.at) + '</div></div>'
                     + (n.read ? '' : '<div style="width:8px;height:8px;border-radius:50%;background:var(--accent,#2563eb);margin-top:6px"></div>')
+                    + '<button class="btn btn-secondary" style="padding:3px 9px;font-size:11.5px;white-space:nowrap" onclick="rmNotifMark([' + n.id + '],' + (n.read ? 'true' : 'false') + ')">'
+                    + (n.read ? '<i class="fas fa-envelope"></i> Mark unread' : '<i class="fas fa-envelope-open"></i> Mark read') + '</button>'
                     + '</div>';
             }
             return head + '<div class="card" style="padding:0">' + rows + '</div>';
@@ -2267,9 +2471,28 @@ CSS;
             post('/app/notifications/' + id + '/read', {}).then(function () {
                 window.__RM_NOTIF = null;
                 rmBell();
-                if (url) { try { go(url); return; } catch (e) {} }
+                if (url) {
+                    // 8 Oct 2026 - a manager whose role does not show that screen lands on the Approvals Inbox (team items).
+                    var nv = document.querySelector('.nav-item[data-id="' + url + '"]');
+                    if (nv && nv.style.display === 'none') { url = 'approvals-inbox'; }
+                    try { go(url); return; } catch (e) {}
+                }
                 repaint();
             });
+        };
+        window.rmNotifAll = function (on) {
+            document.querySelectorAll('.rm-notif-cb').forEach(function (c) { c.checked = on; });
+        };
+        // ids -> read (unread=false) or unread (unread=true); one call per id on the existing route.
+        window.rmNotifMark = function (ids, unread) {
+            if (!ids.length) { say('Select one or more notifications first'); return; }
+            Promise.all(ids.map(function (id) { return post('/app/notifications/' + id + '/read', unread ? { unread: 1 } : {}); }))
+                .then(function () { window.__RM_NOTIF = null; rmBell(); repaint(); });
+        };
+        window.rmNotifSel = function (unread) {
+            var ids = [];
+            document.querySelectorAll('.rm-notif-cb:checked').forEach(function (c) { ids.push(parseInt(c.value, 10)); });
+            window.rmNotifMark(ids, unread);
         };
         window.rmNotifReadAll = function () {
             post('/app/notifications/read-all', {}).then(function () {
@@ -2304,6 +2527,9 @@ CSS;
                 .catch(function () {});
         }
         window.rmBell = rmBell;
+        // 30 Sep 2026 (Ejaz) — keep the bell live: request notifications (leave,
+        // correction, advance, loan …) show up within a minute without a reload.
+        if (!window.__rmBellTimer) { window.__rmBellTimer = setInterval(function () { rmBell(); if (window.__RM_NOTIF && typeof CURRENT !== 'undefined' && CURRENT === 'notifications') { window.__RM_NOTIF = null; repaint(); } }, 60000); }
 
         // =================================================================
         // F3 — "my attendance today" card, prepended to the dashboard
@@ -2380,10 +2606,10 @@ CSS;
                     return esc((a || '—') + ' / ' + (b || '—'));
                 };
                 var act = '';
-                if (r.status === 'pending' && d.can_review) {
+                if (r.status === 'pending' && (r.can_decide !== undefined ? r.can_decide : d.can_review)) {   // 7 Oct 2026 - hierarchy approvals
                     act = '<button class="btn btn-primary" style="padding:4px 10px;font-size:12px" onclick="rmcDecide(' + r.id + ",'approve'" + ')">Approve</button> '
                         + '<button class="btn btn-secondary" style="padding:4px 10px;font-size:12px" onclick="rmcDecide(' + r.id + ",'reject'" + ')">Reject</button>';
-                } else if (r.status === 'pending') {
+                } else if (r.status === 'pending' && r.own !== false) {
                     act = '<button class="btn btn-secondary" style="padding:4px 10px;font-size:12px" onclick="rmcCancel(' + r.id + ')">Cancel</button>';
                 }
                 rows += '<tr>'
@@ -2481,8 +2707,9 @@ CSS;
                 else if (p.days_left <= 7) { due = pill(p.days_left + ' days', '#fef3c7', '#92400e'); }
                 else { due = pill(p.days_left + ' days', '#dbeafe', '#1e40af'); }
                 rows += '<tr>'
-                    + td('<b>' + esc(p.name) + '</b>')
+                    + td('<b>' + esc(p.name) + '</b>' + (p.emp_code ? ' <span style="color:var(--text3)">(' + esc(p.emp_code) + ')</span>' : ''))
                     + td(esc(p.doj || '—'))
+                    + td(esc(p.months ? p.months + ' mo' : '—'))
                     + td(esc(p.probation_end))
                     + td(due)
                     + td('<button class="btn btn-primary" style="padding:4px 10px;font-size:12px" onclick="rmpConfirm(' + p.employee_id + ')">Confirm</button> '
@@ -2491,23 +2718,57 @@ CSS;
                     + '</tr>';
             }
             return head + '<div class="card" style="padding:0">'
-                + tblOpen(['Employee', 'Joined', 'Probation ends', 'Due in', '']) + rows + tblClose + '</div>';
+                + tblOpen(['Employee', 'Joined', 'Period', 'Probation ends', 'Due in', '']) + rows + tblClose + '</div>';
         }
         window.rmpConfirm = function (empId) {
             if (!confirm('Confirm this employee as permanent? Statutory deductions (PF/PT/TDS) will resume from the next payroll run.')) { return; }
             post('/app/probation/' + empId + '/confirm', { remarks: prompt('Remarks (optional):', '') || '' }).then(function (j) {
                 if (!j.ok) { say(j.error || 'Could not confirm'); return; }
-                say('Employee confirmed as permanent'); window.__RM_PROB = null; repaint();
+                // Reflect it in the Directory straight away (server already wrote Permanent).
+                try {
+                    var it = ((window.__RM_PROB || {}).items || []).find(function (x) { return x.employee_id === empId; });
+                    var de = it && (DB.employees || []).find(function (x) { return String(x.id) === String(it.emp_code); });
+                    if (de) { de.employment_stage = 'Permanent'; }
+                } catch (eD) {}
+                say('Employee confirmed — Employment Stage is now Permanent in the Directory'); window.__RM_PROB = null; repaint();
             });
         };
+        // 2026-09-28 (Ejaz) — Extend opens a small form with a CALENDAR date
+        // picker (native <input type=date>) instead of a free-text prompt.
         window.rmpExtend = function (empId) {
-            var nd = prompt('New probation end date (YYYY-MM-DD):', '');
-            if (!nd) { return; }
-            var rr = prompt('Reason for the extension (required):', '');
-            if (!rr) { say('Remarks are mandatory when extending'); return; }
+            var it = ((window.__RM_PROB || {}).items || []).find(function (x) { return x.employee_id === empId; }) || {};
+            var today = new Date().toISOString().slice(0, 10);
+            var base = (it.probation_end && it.probation_end > today) ? it.probation_end : today;
+            var d0 = new Date(base + 'T00:00:00'); d0.setMonth(d0.getMonth() + 1);
+            var sugg = d0.getFullYear() + '-' + String(d0.getMonth() + 1).padStart(2, '0') + '-' + String(d0.getDate()).padStart(2, '0');
+            var old = document.getElementById('rmp-ext'); if (old) { old.remove(); }
+            var m = document.createElement('div');
+            m.id = 'rmp-ext';
+            m.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+            var inp = 'width:100%;padding:9px 11px;border:1.5px solid var(--border);border-radius:9px;font-size:14px';
+            m.innerHTML = '<div class="card" style="max-width:420px;width:100%;padding:20px 22px">'
+                + '<div style="font-weight:700;font-size:16px;margin-bottom:4px">Extend probation</div>'
+                + '<div style="font-size:12.5px;color:var(--text3);margin-bottom:14px">' + esc(it.name || '') + (it.probation_end ? ' &middot; currently ends ' + esc(it.probation_end) : '') + '</div>'
+                + '<label style="display:block;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">New end date</label>'
+                + '<input id="rmp-ext-date" type="date" min="' + today + '" value="' + sugg + '" style="' + inp + ';margin-bottom:12px">'
+                + '<label style="display:block;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Reason (required)</label>'
+                + '<textarea id="rmp-ext-why" rows="3" style="' + inp + ';resize:vertical"></textarea>'
+                + '<div id="rmp-ext-err" style="color:var(--red);font-size:12.5px;min-height:16px;margin:6px 0"></div>'
+                + '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-secondary" onclick="document.getElementById(&#39;rmp-ext&#39;).remove()">Cancel</button>'
+                + '<button class="btn btn-primary" onclick="rmpExtendSave(' + empId + ')"><i class="fas fa-check"></i> Extend</button></div></div>';
+            m.onclick = function (e) { if (e.target === m) { m.remove(); } };
+            document.body.appendChild(m);
+        };
+        window.rmpExtendSave = function (empId) {
+            var nd = (document.getElementById('rmp-ext-date') || {}).value || '';
+            var rr = ((document.getElementById('rmp-ext-why') || {}).value || '').trim();
+            var err = document.getElementById('rmp-ext-err');
+            if (!nd) { err.textContent = 'Pick the new end date.'; return; }
+            if (!rr) { err.textContent = 'A reason is required to extend probation.'; return; }
             post('/app/probation/' + empId + '/extend', { new_end: nd, remarks: rr }).then(function (j) {
-                if (!j.ok) { say(j.error || 'Could not extend'); return; }
-                say('Probation extended'); window.__RM_PROB = null; repaint();
+                if (!j.ok) { err.textContent = j.error || 'Could not extend'; return; }
+                var m = document.getElementById('rmp-ext'); if (m) { m.remove(); }
+                say('Probation extended to ' + nd); window.__RM_PROB = null; repaint();
             });
         };
 
@@ -2682,14 +2943,13 @@ CSS;
             if (!d) { getJson('/app/absence/config', '__RM_ABS'); return loading('Absence Alerts'); }
             if (!d.ok) { return errCard('Absence Alerts', d.error); }
             var c = d.config || {};
-            var days = (c.working_days || []).join(', ');
             return pghead('Absence Alerts', 'Tell people when yesterday has no attendance', '')
                 + '<div class="card"><div style="padding:18px 20px;max-width:620px">'
                 + '<label style="font-size:14px;font-weight:600"><input id="rma-on" type="checkbox" ' + (c.enabled ? 'checked' : '') + '> Send previous-day absence alerts</label>'
                 + '<div style="font-size:12.5px;color:var(--text3);margin:6px 0 14px">Runs each morning for the previous day. People on approved leave, holidays and weekly offs are never flagged.</div>'
                 + fieldRow('Send at (hour, 0-23)', '<input id="rma-hour" type="number" min="0" max="23" class="form-input" value="' + esc(c.send_hour) + '" style="width:110px">')
                 + '<div style="font-size:12px;color:var(--text3);margin:-6px 0 12px">Later is safer — it gives biometric imports time to arrive.</div>'
-                + fieldRow('Working days (1=Mon … 7=Sun)', '<input id="rma-days" class="form-input" value="' + esc(days) + '" style="width:100%">')
+                + '<div style="font-size:12.5px;color:var(--text3);margin:-4px 0 12px">Weekly offs come from <b>Attendance &rarr; Working Shifts &rarr; Weekly offs</b> (or a Week-off roster entry) &mdash; the same rule payroll uses.</div>'
                 + '<label style="display:block;margin-bottom:8px;font-size:13.5px"><input id="rma-emp" type="checkbox" ' + (c.notify_employee ? 'checked' : '') + '> Notify the employee</label>'
                 + '<label style="display:block;margin-bottom:14px;font-size:13.5px"><input id="rma-mgr" type="checkbox" ' + (c.notify_manager ? 'checked' : '') + '> Notify the reporting manager</label>'
                 + '<button class="btn btn-primary" onclick="rmaSave()"><i class="fas fa-floppy-disk"></i> Save</button> '
@@ -2698,17 +2958,10 @@ CSS;
                 + '</div></div>';
         }
         window.rmaSave = function () {
-            var days = [];
-            var parts = val('rma-days').split(',');
-            for (var i = 0; i < parts.length; i++) {
-                var n = parseInt(parts[i], 10);
-                if (!isNaN(n) && n >= 1 && n <= 7) { days.push(n); }
-            }
             post('/app/absence/config', {
                 config: {
                     enabled: checked('rma-on'),
                     send_hour: parseInt(val('rma-hour'), 10) || 11,
-                    working_days: days,
                     notify_employee: checked('rma-emp'),
                     notify_manager: checked('rma-mgr')
                 }
@@ -3185,6 +3438,7 @@ CSS;
             addNav(['probation-config', 'settings'], 'greetings', 'Greetings');
             addNav(['greetings'], 'greetings-log', 'Greetings Log');
             addNav(['bonus', 'pt', 'pf-esic', 'tds', 'audit-reports'], 'statutory-config', 'Statutory Configuration');
+            addNav(['leave-types', 'leave-apply'], 'leave-report', 'Leave Balance Report');   // 10 Oct 2026 (Ejaz)
         }
         try { if (typeof hideEmptyNavSections === 'function') { hideEmptyNavSections(); } } catch (e) {}
 
@@ -3210,6 +3464,7 @@ CSS;
         try { if (typeof SCREENS !== 'undefined' && SCREENS['roles']) { SCREENS['roles'] = { title: 'Roles & Permissions', type: 'custom' }; } } catch (e) {}
         // Leave → real DB-backed with hierarchy approval (apply/approve/reject).
         try { if (typeof SCREENS !== 'undefined' && SCREENS['leave-apply']) { SCREENS['leave-apply'] = { title: 'Leave Management', type: 'custom' }; } } catch (e) {}
+        try { if (typeof SCREENS !== 'undefined') { SCREENS['leave-report'] = { title: 'Leave Balance Report', type: 'custom' }; } } catch (e) {}
         // Approvals Inbox → real pending items awaiting the logged-in user.
         try { if (typeof SCREENS !== 'undefined' && SCREENS['approvals-inbox']) { SCREENS['approvals-inbox'] = { title: 'Approvals Inbox', type: 'custom' }; } } catch (e) {}
         // Salary Approval → real payroll_runs, two-step (HR→Finance), bulk select.
@@ -3261,7 +3516,7 @@ CSS;
             var MM = { 'departments': 'Departments', 'branches': 'Branches', 'banks': 'Banks', 'designations': 'Designations', 'holidays': 'Holidays', 'leave-types': 'Leave Types', 'biometric-devices': 'Biometric Devices', 'assets': 'Assets', 'complaints': 'Complaints', 'helpdesk': 'HR Helpdesk', 'deductions': 'Deductions Ledger', 'payout-recon': 'Payout Reconciliation', 'salary-schedules': 'Salary Schedules', 'tds-returns': 'TDS Returns',
                 'teams': 'Teams', 'bgv': 'Background Verification', 'documents': 'Documents', 'offroll-agents': 'Off-roll Agents', 'geofence': 'Geofence Rules', 'geofence-list': 'Geofence Rules', 'late-policy': 'Late Policy', 'salary-setup': 'Salary Setup', 'incentive-schemes': 'Incentive Schemes', 'points-ledger': 'Points Ledger', 'points-rules': 'Points Rules', 'tests': 'Tests', 'training-programs': 'Training Programs', 'training-records': 'Training Records', 'code-of-conduct': 'Code of Conduct', 'faqs': 'FAQs', 'escalations': 'Escalations', 'agent-auth': 'Agent Authorization', 'dra-certs': 'DRA Certifications', 'min-wages': 'Minimum Wages', 'overtime': 'Overtime Register', 'policies': 'Policy Repository', 'messages': 'Messages', 'companies': 'Companies', 'letters-offer': 'Offer Letters', 'letters-increment': 'Increment Letters', 'letters-warning': 'Warning Letters', 'letters-relieving': 'Relieving Letters', 'letters-nda': 'NDA / Confidentiality', 'letters-templates': 'Letter Templates',
                 'roster': 'Roster', 'onboarding-board': 'Onboarding', 'awards': 'Awards & Rewards', 'performance': 'Performance', 'notice-board': 'Notice Board', 'notice': 'Notice Board', 'feature-flags': 'Feature Flags', 'training-content': 'Training Content', 'test-results': 'Test Results', 'pay-cycle': 'Pay Cycle', 'wa-settings': 'WhatsApp Settings', 'sms-settings': 'SMS Settings', 'sms-templates': 'SMS Templates', 'att-manual': 'Manual Attendance', 'att-zkteco': 'ZKTeco Devices' };
-            if (typeof SCREENS !== 'undefined') { for (var mk in MM) { if (SCREENS[mk]) { SCREENS[mk] = { title: MM[mk], type: 'custom' }; } } SCREENS['biometric-setup'] = { title: 'Biometric Device Setup', type: 'custom' }; SCREENS['shifts'] = { title: 'Working Shifts', type: 'custom' }; SCREENS['audit-reports'] = { title: 'Audit Reports', type: 'custom' }; SCREENS['posh'] = { title: 'POSH Complaints', type: 'custom' }; }
+            if (typeof SCREENS !== 'undefined') { for (var mk in MM) { if (SCREENS[mk]) { SCREENS[mk] = { title: MM[mk], type: 'custom' }; } } SCREENS['biometric-setup'] = { title: 'Biometric Device Setup', type: 'custom' }; SCREENS['shifts'] = { title: 'Working Shifts', type: 'custom' }; SCREENS['audit-reports'] = { title: 'Audit Reports', type: 'custom' }; SCREENS['posh'] = { title: 'Raise a Complaint', type: 'custom' }; }
         } catch (e) {}
         if (typeof renderCustom !== 'function' || renderCustom.__wrapped) { return; }
         var _rc = renderCustom;
@@ -3288,6 +3543,8 @@ CSS;
             if (id === 'wa-templates') { return waTplScreen(); }
             if (id === 'sys-updates') { return sysUpdatesScreen(); }
             if (id === 'documents') { return documentsScreen(); }
+            if (id === 'shifts') { return masterScreen(id) + weeklyOffCard(); }
+            if (id === 'salary-setup' && typeof window.ptSlabCard === 'function') { return masterScreen(id) + window.ptSlabCard(); }   // 8 Oct 2026 - custom PT slabs (public/js/smartprs-pt-slabs.js)
             if (MASTER_MAP[id]) { return masterScreen(id); }
             if (id === 'payslip') { return payslipHistoryScreen(); }
             if (id === 'kb') { return kbScreen(); }
@@ -3298,6 +3555,7 @@ CSS;
             if (id === 'company-emails') { return mailScreen(); }
             if (id === 'roles') { return rolesScreen(); }
             if (id === 'leave-apply') { return leaveScreen(); }
+            if (id === 'leave-report' && typeof window.leaveReportScreen === 'function') { return window.leaveReportScreen(); }   // 10 Oct 2026 - public/js/smartprs-leave-report.js
             if (id === 'approvals-inbox') { return approvalsInboxScreen(); }
             if (id === 'salary-approval') { return salaryApprovalScreen(); }
             if (id === 'salary-gen') { return salaryGenScreen(); }
@@ -3350,7 +3608,7 @@ CSS;
             var on = r.id === sel.id;
             return '<div onclick="roleSelect(\'' + r.id + '\')" style="cursor:pointer;padding:10px 12px;border-radius:8px;margin-bottom:3px;' + (on ? 'background:var(--accent-soft);color:var(--accent);font-weight:700' : 'color:var(--text2)') + '">'
                 + '<div style="font-size:14px">' + (r.role || r.id) + '</div>'
-                + '<div style="font-size:11px;color:var(--text3)">' + (r.scope || 'Company') + ' · ' + (r.users || 0) + ' user(s)</div></div>';
+                + '<div style="font-size:11px;color:var(--text3)">' + spScopeLabel(r.scope) + ' · ' + spRoleCount(r) + ' user(s)</div></div>';
         }).join('');
         var perms = sel.perms || {};
         var thead = '<th style="text-align:left;padding:10px 12px;font-size:11px;text-transform:uppercase;color:var(--text3)">Module</th>'
@@ -3367,7 +3625,7 @@ CSS;
             + SP_ACTIONS.map(function (a) { return '<td style="text-align:center;padding:6px 8px"><input type="checkbox" onclick="roleToggleCol(\'' + a[0] + '\',this.checked)" style="width:15px;height:15px;cursor:pointer"></td>'; }).join('');
         var saveBtn = canManage ? '<button class="btn btn-primary" onclick="roleSavePerms()"><i class="fas fa-check"></i> Save Permissions</button>' : '';
         var scopeSel = '<select id="role_scope" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:8px;background:#f8fafc">'
-            + ['Group', 'Company', 'Self'].map(function (o) { return '<option' + (o === (sel.scope || 'Company') ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select>';
+            + ['Group', 'Company', 'Self'].map(function (o) { return '<option value="' + o + '"' + (o === (sel.scope || 'Company') ? ' selected' : '') + '>' + spScopeLabel(o) + '</option>'; }).join('') + '</select>';
         return pghead('Roles & Permissions', 'Tick what each role can do per module — View · Create · Edit · Approve · Delete', addBtn)
             + '<div class="dash-grid" style="grid-template-columns:240px 1fr;align-items:start">'
             + '<div class="card" style="padding:12px">' + left + '</div>'
@@ -3378,8 +3636,18 @@ CSS;
             + '</div>'
             + '<div style="overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr>' + thead + '</tr></thead>'
             + '<tbody><tr style="background:#f8fafc">' + allRow + '</tr>' + bodyRows + '</tbody></table></div>'
-            + '<div style="padding:12px 18px;font-size:11px;color:var(--text3)">This defines each role\'s permissions. Enforcement on real logins is the next phase.</div>'
+            + '<div style="padding:12px 18px;font-size:12px;color:var(--text2);line-height:1.6">'
+            + '<b>How a role reaches a person:</b> set the employee\'s <b>Access Role</b> (Directory &rarr; Job &amp; Company, the sample file, or User Access) &mdash; their login gets this role.<br>'
+            + '<b>Ticks</b> decide the menu and the server: an unticked View hides the screen and blocks its data; Approve is needed to approve; Delete to delete. With scope Company / Group a ticked box also opens the HR-level actions of that module.<br>'
+            + '<b>Self + reporting team</b> = the person\'s own records plus everyone reporting to them at any level (Reporting Manager chain); they can approve their team\'s requests when Approve is ticked. Company / Group = everyone. Admin and Super Admin always have full access.</div>'
             + '</div></div>';
+    }
+    // 7 Oct 2026 - scope wording + live login counts per role.
+    function spScopeLabel(sc) { sc = sc || 'Company'; return sc === 'Self' ? 'Self + reporting team' : sc; }
+    function spRoleCount(r) {
+        var c = cfg.roleCounts || {}; var n = String(r.role || '').toLowerCase();
+        for (var k in c) { if (k.toLowerCase() === n) { return c[k]; } }
+        return 0;
     }
     window.roleToggleCol = function (act, on) {
         document.querySelectorAll('input[type=checkbox][data-act="' + act + '"]').forEach(function (c) { c.checked = on; });
@@ -3700,19 +3968,24 @@ CSS;
         if (!d) { return pghead('Leave Management', 'Loading…', applyBtn) + '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">Loading…</div></div>'; }
         if (d.error) { return pghead('Leave Management', 'Error', applyBtn) + '<div class="card"><div style="padding:30px;color:var(--red)"><b>Could not load leaves.</b><br><span style="font-size:12px;color:var(--text2)">' + String(d.error) + '</span></div></div>'; }
         var rows = d.rows || [];
-        var th = ['Employee', 'Type', 'From', 'To', 'Days', 'Approver', 'Status', 'Decided By', 'Action'].map(function (h) { return '<th style="padding:10px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3);white-space:nowrap">' + h + '</th>'; }).join('');
+        var th = ['Employee', 'Type', 'From', 'To', 'Days', 'Reason', 'Approver', 'Status', 'Decided By', 'Action'].map(function (h) { return '<th style="padding:10px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3);white-space:nowrap">' + h + '</th>'; }).join('');
         var dash = '<span style="color:var(--text3)">—</span>';
         var body = rows.map(function (r) {
             var c = 'padding:9px 12px;font-size:13px;border-top:1px solid var(--border);white-space:nowrap';
             var act = r.canDecide
                 ? '<button class="btn btn-sm btn-primary" onclick="leaveDecide(' + r.id + ',\'approve\')">Approve</button> <button class="btn btn-sm btn-outline" style="color:var(--red)" onclick="leaveDecide(' + r.id + ',\'reject\')">Reject</button>'
                 : (r.decidedBy ? '<span style="font-size:11px;color:var(--text3)">' + r.decidedBy + (r.decidedAt ? ' · ' + r.decidedAt : '') + '</span>' : dash);
+            // 30 Sep 2026 (Ejaz) — full details + date edit (Admin/HR, pending only).
+            act = '<a onclick="leaveView(' + r.id + ')" title="All details" style="cursor:pointer;color:#4f46e5;font-size:12px;margin-right:8px;white-space:nowrap"><i class="fas fa-eye"></i> View</a>'
+                + (r.canEdit ? '<a onclick="leaveEdit(' + r.id + ')" title="Change the dates before deciding" style="cursor:pointer;color:#0891b2;font-size:12px;margin-right:8px;white-space:nowrap"><i class="fas fa-pen"></i> Edit</a>' : '')
+                + act;
             return '<tr>'
                 + '<td style="' + c + ';font-weight:600">' + empNameLink(r.employee, r.empCode || r.employee) + (r.empCode ? ' <span style="color:var(--text3);font-weight:400">(' + r.empCode + ')</span>' : '') + '</td>'
                 + '<td style="' + c + '">' + (r.type || dash) + '</td>'
                 + '<td style="' + c + '">' + r.from + '</td>'
                 + '<td style="' + c + '">' + r.to + '</td>'
-                + '<td style="' + c + '">' + r.days + '</td>'
+                + '<td style="' + c + '">' + r.days + (r.editedBy ? '<div style="font-size:10.5px;color:#0891b2" title="edited ' + (r.editedAt || '') + '">edited by ' + r.editedBy + '</div>' : '') + '</td>'
+                + '<td style="' + c + ';white-space:normal;min-width:180px;max-width:320px;line-height:1.45">' + (r.reason ? String(r.reason).replace(/</g, '&lt;') : dash) + '</td>'
                 + '<td style="' + c + '">' + (r.approver ? empNameLink(r.approver) : dash) + '</td>'
                 + '<td style="' + c + '">' + leaveBadge(r.status) + '</td>'
                 + '<td style="' + c + '">' + (r.decidedBy ? empNameLink(r.decidedBy) : dash) + '</td>'
@@ -3722,9 +3995,27 @@ CSS;
         var pend = rows.filter(function (r) { return r.status === 'Pending'; }).length;
         var sub = rows.length + ' leave request(s) · ' + pend + ' pending · approver set automatically from each employee\'s reporting manager';
         return pghead('Leave Management', sub, applyBtn)
+            + leaveMyBalCard(d)
             + '<div class="card" style="padding:0;overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr>' + th + '</tr></thead><tbody>'
-            + (rows.length ? body : '<tr><td colspan="9" style="padding:36px;text-align:center;color:var(--text3)">No leave requests yet. Click Apply Leave.</td></tr>')
+            + (rows.length ? body : '<tr><td colspan="10" style="padding:36px;text-align:center;color:var(--text3)">No leave requests yet. Click Apply Leave.</td></tr>')
             + '</tbody></table></div>';
+    }
+    // 8 Oct 2026 (Ejaz) - the login's own leave balance on the Leave screen.
+    function leaveMyBalCard(d) {
+        var rows = (d && d.myBalances) || [];
+        if (!rows.length) { return ''; }
+        var chips = rows.map(function (b) {
+            var left = b.balance === null ? null : Math.max(0, b.balance - b.pending);
+            var col = left === null ? 'var(--text2)' : (left <= 0 ? 'var(--red)' : 'var(--green)');
+            return '<div style="border:1.5px solid var(--border);border-radius:10px;padding:10px 14px;min-width:150px;background:#f8fafc">'
+                + '<div style="font-size:11.5px;color:var(--text3);font-weight:600">' + String(b.type).replace(/</g, '&lt;') + '</div>'
+                + '<div style="font-size:20px;font-weight:800;color:' + col + '">' + (left === null ? 'Unpaid' : left + ' <span style="font-size:12px;font-weight:600">day(s) left</span>') + '</div>'
+                + (left === null ? '<div style="font-size:11px;color:var(--text3)">used ' + b.used + (b.pending ? ' · pending ' + b.pending : '') + '</div>'
+                    : '<div style="font-size:11px;color:var(--text3)">of ' + (b.opening != null ? b.opening : b.entitlement) + (b.carried ? ' (incl. ' + b.carried + ' carried)' : '') + ' · used ' + b.used + (b.pending ? ' · pending ' + b.pending : '') + '</div>')
+                + '</div>';
+        }).join('');
+        return '<div class="card" style="padding:14px 16px;margin-bottom:14px"><div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text2);margin-bottom:10px">My leave balance (' + (d.period || new Date().getFullYear()) + ')' + (d.me ? ' &middot; ' + String(d.me).replace(/</g, '&lt;') + (d.meCode ? ' (' + d.meCode + ')' : '') : '') + '</div>'
+            + '<div style="display:flex;gap:10px;flex-wrap:wrap">' + chips + '</div></div>';
     }
     window.leaveApplyOpen = function () {
         var emps = ((typeof DB !== 'undefined' && DB.employees) || []).map(function (e) { return e.name; });
@@ -3739,11 +4030,17 @@ CSS;
         // rev184b (Ejaz) — an Employee login applies for THEMSELVES: the field is
         // locked to their own name. (The blank "Select employee…" default made the
         // submit fail — employee posted empty.)
-        var lvSelf = cfg && cfg.role === 'Employee' && ((typeof DB !== 'undefined' && DB.employees) || []).length >= 1;
+        // 8 Oct 2026 (Ejaz) - every login except Admin / Super Admin / HR Manager applies for
+        // ITSELF only (the server already forces this). The own record comes from the
+        // leave feed (meCode) - DB.employees[0] could be a reportee for a manager.
+        var lvSelf = !(cfg.role === 'Admin' || cfg.role === 'Super Admin' || cfg.role === 'HR Manager');
         var empOpts;
         if (lvSelf) {
-            var lvMe = DB.employees[0];
+            var lvL = window.__LEAVE || {};
+            var lvList = (typeof DB !== 'undefined' && DB.employees) || [];
+            var lvMe = (lvL.meCode && lvList.find(function (e) { return String(e.id) === String(lvL.meCode); })) || (lvList.length === 1 ? lvList[0] : null) || { id: lvL.meCode || '', name: lvL.me || '' };
             var lvMeCode = String(lvMe.id || '').replace(/"/g, '&quot;');
+            if (!lvMeCode && typeof toast === 'function') { toast('Your login is not linked to an employee record - ask your admin to link it.'); }
             empOpts = '<option value="' + lvMeCode + '" selected>' + String(lvMe.name || '').replace(/</g, '&lt;') + (lvMeCode ? ' (' + lvMeCode + ')' : '') + '</option>';
         } else {
             empOpts = '<option value="">Select employee…</option>' + (((typeof DB !== 'undefined' && DB.employees) || []).map(function (e) {
@@ -3765,10 +4062,11 @@ CSS;
         m.innerHTML = '<div class="card" style="max-width:640px;width:100%;padding:0">'
             + '<div style="display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--border)"><h3 style="margin:0;font-size:18px">Apply Leave</h3><button class="btn btn-outline btn-sm" onclick="leaveApplyClose()"><i class="fas fa-xmark"></i></button></div>'
             + '<div style="padding:22px;display:grid;grid-template-columns:1fr 1fr;gap:14px">'
-            + '<div><label style="' + lbl + '">Employee</label><select id="lv_emp" onchange="leaveBalLoad()"' + (lvSelf ? ' disabled' : '') + ' style="' + inp + (lvSelf ? ';opacity:.75;cursor:not-allowed' : '') + '">' + empOpts + '</select></div>'
+            + '<div><label style="' + lbl + '">Employee</label><select id="lv_emp" onchange="leaveBalLoad();leaveDaysCalc()"' + (lvSelf ? ' disabled' : '') + ' style="' + inp + (lvSelf ? ';opacity:.75;cursor:not-allowed' : '') + '">' + empOpts + '</select></div>'
             + '<div><label style="' + lbl + '">Leave Type</label><select id="lv_type" onchange="leaveBalHighlight()" style="' + inp + '">' + typeOpts + '</select></div>'
-            + '<div><label style="' + lbl + '">From</label><input id="lv_from" type="date" style="' + inp + '"></div>'
-            + '<div><label style="' + lbl + '">To</label><input id="lv_to" type="date" style="' + inp + '"></div>'
+            + '<div><label style="' + lbl + '">From</label><input id="lv_from" type="date" onchange="leaveDaysCalc();leaveBalLoad()" oninput="leaveDaysCalc()" style="' + inp + '"></div>'
+            + '<div><label style="' + lbl + '">To</label><input id="lv_to" type="date" onchange="leaveDaysCalc()" oninput="leaveDaysCalc()" style="' + inp + '"></div>'
+            + '<div style="grid-column:1/3"><label style="' + lbl + '">No. of leave days</label><div id="lv_days" style="' + inp + ';background:#eef2ff;color:var(--text2);font-weight:700">Pick From and To dates</div><div style="font-size:11px;color:var(--text3);margin-top:3px">Counted automatically - weekly offs and holidays inside the range are not leave days.</div></div>'
             + '<div style="grid-column:1/3"><label style="' + lbl + '">Reason</label><textarea id="lv_reason" rows="2" style="' + inp + '"></textarea></div>'
             + '<div style="grid-column:1/3" id="lv_balwrap"></div>'
             + '<div style="grid-column:1/3;font-size:12px;color:var(--text3)">The approver is set automatically from the employee\'s reporting manager.</div>'
@@ -3780,6 +4078,23 @@ CSS;
         if (lvSelf) { try { leaveBalLoad(); } catch (e) {} }
     };
     window.leaveApplyClose = function () { var m = document.getElementById('leave-modal'); if (m) { m.style.display = 'none'; } };
+    // 8 Oct 2026 (Ejaz) - leave-day count from the server (same rule as Submit).
+    window.leaveDaysCalc = function () {
+        var g = function (id) { var e = document.getElementById(id); return e ? e.value : ''; };
+        var box = document.getElementById('lv_days'); if (!box) { return; }
+        var emp = g('lv_emp'), f = g('lv_from'), t = g('lv_to');
+        if (!f || !t) { box.textContent = 'Pick From and To dates'; return; }
+        if (!emp) { box.textContent = 'Pick the employee'; return; }
+        var key = emp + '|' + f + '|' + t; window.__lvDaysKey = key;
+        box.textContent = 'Counting...';
+        fetch(cfg.leaveBalancesBase + '/' + encodeURIComponent(emp) + '?from=' + encodeURIComponent(f) + '&to=' + encodeURIComponent(t), { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin' })
+            .then(function (r) { return r.json(); }).then(function (j) {
+                if (window.__lvDaysKey !== key) { return; }
+                if (j.days === null || j.days === undefined) { box.textContent = 'Could not count - check the dates'; return; }
+                box.textContent = j.days > 0 ? (j.days + ' day' + (j.days == 1 ? '' : 's')) : '0 - those dates are weekly offs / holidays';
+                box.style.color = j.days > 0 ? 'var(--text)' : 'var(--red)';
+            }).catch(function () { box.textContent = 'Could not count'; });
+    };
     // Load + show this employee's leave balances inside the apply modal.
     window.__leaveBal = [];
     window.leaveBalLoad = function () {
@@ -3787,9 +4102,10 @@ CSS;
         var wrap = document.getElementById('lv_balwrap'); if (!wrap) { return; }
         if (!emp) { wrap.innerHTML = ''; window.__leaveBal = []; return; }
         wrap.innerHTML = '<div style="font-size:12px;color:var(--text3)">Loading balances…</div>';
-        fetch(cfg.leaveBalancesBase + '/' + encodeURIComponent(emp), { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin' })
+        var lvF = (document.getElementById('lv_from') || {}).value || '';   // 10 Oct 2026 - balance of the From date's leave year
+        fetch(cfg.leaveBalancesBase + '/' + encodeURIComponent(emp) + (lvF ? '?from=' + encodeURIComponent(lvF) + '&to=' + encodeURIComponent(lvF) : ''), { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin' })
             .then(function (r) { return r.json(); }).then(function (j) {
-                window.__leaveBal = j.rows || [];
+                window.__leaveBal = j.rows || []; window.__leaveBalPeriod = j.period || '';
                 leaveBalRender();
             }).catch(function () { wrap.innerHTML = '<div style="font-size:12px;color:var(--red)">Could not load balances</div>'; });
     };
@@ -3805,19 +4121,25 @@ CSS;
             return '<div style="border:1.5px solid ' + (on ? 'var(--accent)' : 'var(--border)') + ';border-radius:9px;padding:8px 10px;min-width:120px;background:' + (on ? 'var(--accent-soft)' : '#f8fafc') + '">'
                 + '<div style="font-size:11px;color:var(--text3)">' + b.type + '</div>'
                 + '<div style="font-weight:700;color:' + col + '">' + val + '</div>'
-                + (b.balance === null ? '' : '<div style="font-size:10px;color:var(--text3)">of ' + b.entitlement + ' · used ' + b.used + (b.pending ? ' · pending ' + b.pending : '') + '</div>')
+                + (b.balance === null ? '' : '<div style="font-size:10px;color:var(--text3)">of ' + (b.opening != null ? b.opening : b.entitlement) + ' · used ' + b.used + (b.pending ? ' · pending ' + b.pending : '') + '</div>')
                 + '</div>';
         }).join('');
-        wrap.innerHTML = '<div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Balance (this year)</div><div style="display:flex;gap:8px;flex-wrap:wrap">' + chips + '</div>';
+        wrap.innerHTML = '<div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Balance (' + (window.__leaveBalPeriod || 'this year') + ')</div><div style="display:flex;gap:8px;flex-wrap:wrap">' + chips + '</div>';
     }
     window.leaveBalHighlight = function () { leaveBalRender(); };
-    window.leaveApplySave = function () {
+    window.leaveApplySave = function (confirmLop) {
         var g = function (id) { var e = document.getElementById(id); return e ? e.value : ''; };
-        var payload = { employee: g('lv_emp'), type: g('lv_type'), from: g('lv_from'), to: g('lv_to'), reason: g('lv_reason') };
+        var payload = { employee: g('lv_emp'), type: g('lv_type'), from: g('lv_from'), to: g('lv_to'), reason: g('lv_reason'), confirm_lop: confirmLop === true ? 1 : 0 };
         if (!payload.employee || !payload.from || !payload.to) { if (typeof toast === 'function') { toast('Employee, From and To are required'); } return; }
         fetch(cfg.leaveApplyUrl, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(payload) })
             .then(function (r) { return r.json(); }).then(function (d) {
-                if (d && d.ok) { if (typeof toast === 'function') { toast('Leave applied · approver: ' + (d.approver || 'manager')); } leaveApplyClose(); leaveLoad(); }
+                // 10 Oct 2026 (Ejaz) - balance short: say how many days go unpaid; OK saves the split, Cancel goes back to the dates.
+                if (d && d.needConfirm) {
+                    var msg = ['Available leave balance (' + d.type + '): ' + d.available, 'Applied leaves: ' + d.applied, d.unpaid + ' day(s) will be unpaid leave (Loss of Pay).', '', 'Click OK to continue, or Cancel to change the date range.'].join('\\n');
+                    if (window.confirm(msg)) { leaveApplySave(true); } else { var fe = document.getElementById('lv_from'); if (fe) { fe.focus(); } }
+                    return;
+                }
+                if (d && d.ok) { if (typeof toast === 'function') { toast('Leave applied' + (d.split ? ' (' + d.split + ')' : '') + ' · approver: ' + (d.approver || 'manager')); } leaveApplyClose(); leaveLoad(); }
                 else if (typeof toast === 'function') { toast((d && d.error) || 'Could not apply'); }
             }).catch(function () { if (typeof toast === 'function') { toast('Could not apply'); } });
     };
@@ -3911,7 +4233,7 @@ CSS;
     // Maps a nav id → backend module key + apply-form fields. amount:true adds an
     // Amount input used for the approver threshold rule.
     var RQ_MAP = {
-        'expenses': { m: 'expenses', title: 'Expense Claims', amount: true, fields: [{ k: 'type', l: 'Type', opts: ['Travel', 'Fuel', 'Conveyance', 'Mobile/Data', 'Other'] }, { k: 'reason', l: 'Note' }] },
+        'expenses': { m: 'expenses', title: 'Expense Claims', amount: true, fields: [{ k: 'type', l: 'Type', opts: ['Travel', 'Fuel', 'Conveyance', 'Mobile/Data', 'Other'] }, { k: 'date', l: 'Expense Date', t: 'date' }, { k: 'reason', l: 'Note / Reason' }] },
         'advance': { m: 'advances', title: 'Salary Advance', amount: true, fields: [{ k: 'reason', l: 'Reason' }] },
         'loans': { m: 'loans', title: 'Loans & Advances', amount: true, fields: [{ k: 'emi', l: 'EMI (₹)', t: 'number' }, { k: 'tenure_months', l: 'Tenure (months)', t: 'number' }, { k: 'reason', l: 'Purpose' }] },
         'commissions': { m: 'commissions', title: 'Commission Entries', single: 'Commission Entry', amount: true, amountRO: 'Net Payable (₹) — auto: Gross − TDS', fields: [
@@ -4030,6 +4352,12 @@ CSS;
             var act = r.canDecide
                 ? '<button class="btn btn-sm btn-primary" onclick="reqDecide(\'' + rc.m + '\',' + r.id + ',\'approve\')">Approve</button> <button class="btn btn-sm btn-outline" style="color:var(--red)" onclick="reqDecide(\'' + rc.m + '\',' + r.id + ',\'reject\')">Reject</button>'
                 : (r.decidedBy ? '<span style="font-size:11px;color:var(--text3)">' + r.decidedBy + (r.decidedAt ? ' · ' + r.decidedAt : '') + '</span>' : dash);
+            // 30 Sep 2026 (Ejaz) — full details before deciding + approver-side edit (pending only).
+            if (navId === 'expenses' || navId === 'advance' || navId === 'loans') {
+                act = '<a onclick="reqView(\'' + navId + '\',' + r.id + ')" title="All details submitted by the employee" style="cursor:pointer;color:#4f46e5;font-size:12px;margin-right:8px;white-space:nowrap"><i class="fas fa-eye"></i> View</a>'
+                    + (r.canEdit ? '<a onclick="reqEdit(\'' + navId + '\',' + r.id + ')" title="Change the sanctioned amount / EMI / tenure / date before deciding" style="cursor:pointer;color:#0891b2;font-size:12px;margin-right:8px;white-space:nowrap"><i class="fas fa-pen"></i> Edit</a>' : '')
+                    + act;
+            }
             if (navId === 'transfers' && (r.status === 'Approved' || r.status === 'Applied')) {
                 act += ' <a href="' + cfg.transfersBase + '/' + r.id + '/letter" target="_blank" title="Transfer Order (PDF)"><i class="fas fa-file-pdf" style="color:var(--red);margin-left:6px"></i></a>';
             }
@@ -4102,11 +4430,12 @@ CSS;
                 if (r.appliedAt) { act += ' <span style="font-size:11px;color:#16a34a;font-weight:700;margin-left:8px" title="by ' + (r.appliedBy || 'HR') + '"><i class="fas fa-check"></i> Applied ' + r.appliedAt + '</span>'; }
                 else if (d.isManager) { act += ' <button class="btn btn-sm btn-outline" style="margin-left:8px" onclick="incApply(' + r.id + ')" title="Update the employee record to the new CTC (and designation)">Apply to record</button>'; }
             }
-            var amtCell = rc.amount ? ('<td style="' + c + '">' + (r.amount != null ? inr(r.amount) : dash) + '</td>') : '';
+            var amtCell = rc.amount ? ('<td style="' + c + '">' + (r.amount != null ? inr(r.amount) : dash)
+                + (r.requestedAmount != null && r.amount != null && Math.abs(r.requestedAmount - r.amount) > 0.004 ? '<div style="font-size:11px;color:var(--text3)">requested ' + inr(r.requestedAmount) + '</div>' : '') + '</td>') : '';
             var rowHtml = '<tr>'
                 + '<td style="' + c + ';font-weight:600">' + empNameLink(r.employee, r.empCode || r.employee) + (r.empCode ? ' <span style="color:var(--text3);font-weight:400">(' + r.empCode + ')</span>' : '') + '</td>'
                 + amtCell
-                + '<td style="' + c + ';white-space:normal;min-width:240px;max-width:430px;line-height:1.5">' + (r.extra || r.reason || dash) + '</td>'
+                + '<td style="' + c + ';white-space:normal;min-width:240px;max-width:430px;line-height:1.5">' + ((r.extra || r.reason) ? (r.extra || '') + (r.reason ? (r.extra ? '<br>' : '') + '<span style="color:var(--text2)"><b>Reason:</b> ' + String(r.reason).replace(/</g, '&lt;') + '</span>' : '') : dash) + '</td>'
                 + '<td style="' + c + '">' + (r.approver ? empNameLink(r.approver) : dash) + '</td>'
                 + '<td style="' + c + '">' + leaveBadge(r.status) + '</td>'
                 + '<td style="' + c + '">' + (r.decidedBy ? empNameLink(r.decidedBy) : dash) + '</td>'
@@ -4209,8 +4538,15 @@ CSS;
             if (x.status === 'approved') {
                 act += '<button class="btn btn-outline btn-sm" onclick="mobDevDecide(' + x.id + ',&#39;revoke&#39;)" style="color:var(--red)"><i class="fas fa-ban"></i> Revoke</button>';
             }
+            if (!x.empCode && x.status !== 'rejected') { act += ' <button class="btn btn-outline btn-sm" onclick="mobDevLink(' + x.id + ')"><i class="fas fa-user-tag"></i> Link employee</button>'; }
             return '<tr>'
                 + '<td><b>' + (x.deviceName || 'Mobile device') + '</b><div style="font-size:11px;color:var(--text3)">' + (x.platform || '') + (x.host ? ' · ' + x.host : '') + (x.hasPush ? ' · <i class="fas fa-bell" title="push enabled"></i>' : '') + '</div></td>'
+                // 7 Oct 2026 (Ejaz) - whose phone it is, visible before approving.
+                + '<td style="font-family:monospace;font-size:12.5px">' + (x.empCode ? x.empCode : '<span style="color:#b45309;font-family:inherit;font-size:11px">links on first sign-in</span>') + '</td>'
+                + '<td style="font-weight:600">' + (x.empName || '—') + (x.empStatus && x.empStatus !== 'active' ? '<div style="font-size:11px;color:var(--red)">' + x.empStatus + '</div>' : '') + '</td>'
+                + '<td style="font-size:12.5px">' + (x.department || '—') + '</td>'
+                + '<td style="font-size:12.5px">' + (x.branch || '—') + '</td>'
+                + '<td style="font-size:12.5px">' + (x.manager || '—') + '</td>'
                 + '<td><span style="font-family:monospace;font-size:13px;background:#f1f5f9;padding:2px 8px;border-radius:6px">' + (x.code || '—') + '</span></td>'
                 + '<td style="font-size:12.5px;color:var(--text2)">' + (x.registered || '') + (x.lastSeen ? '<div style="font-size:11px;color:var(--text3)">seen ' + x.lastSeen + '</div>' : '') + '</td>'
                 + '<td>' + mobDevChip(x.status) + (x.status === 'approved' && x.approvedBy ? '<div style="font-size:11px;color:#166534">by ' + x.approvedBy + '</div>' : '') + (x.status === 'rejected' && x.rejectReason ? '<div style="font-size:11px;color:#991b1b">' + x.rejectReason + '</div>' : '') + '</td>'
@@ -4219,8 +4555,8 @@ CSS;
         }).join('');
         return errBanner
             + pghead('Mobile Devices', 'Approve the phones that may use the SmartPRS app. Only an approved device can sign in and punch — revoke a lost phone to lock it out instantly.', '<button class="btn btn-outline" onclick="window.__MOBDEV=null;mobDevLoad()"><i class="fas fa-rotate"></i> Refresh</button>')
-            + '<div class="card" style="padding:0;overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr><th>Device</th><th>Code</th><th>Registered</th><th>Status</th><th></th></tr></thead><tbody>'
-            + (body || '<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:30px 18px"><div style="font-size:14px;color:var(--text2);font-weight:600;margin-bottom:6px"><i class="fas fa-mobile-screen-button" style="margin-right:6px"></i>No devices yet &mdash; phones enrol themselves</div><div style="font-size:12.5px;max-width:540px;margin:0 auto;line-height:1.6">There is no manual &ldquo;add device&rdquo; step, by design. Ask each employee to open the <b>SmartPRS mobile app</b>, enter your workspace web address and sign in &mdash; their phone then appears here as <b>Pending</b> for you to <b>Approve</b> or <b>Reject</b>. Only devices you approve can sign in and punch, so you stay in control.</div></td></tr>')
+            + '<div class="card" style="padding:0;overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr><th>Device</th><th>Employee ID</th><th>Name</th><th>Department</th><th>Branch</th><th>Reporting Manager</th><th>Code</th><th>Registered</th><th>Status</th><th></th></tr></thead><tbody>'
+            + (body || '<tr><td colspan="10" style="text-align:center;color:var(--text3);padding:30px 18px"><div style="font-size:14px;color:var(--text2);font-weight:600;margin-bottom:6px"><i class="fas fa-mobile-screen-button" style="margin-right:6px"></i>No devices yet &mdash; phones enrol themselves</div><div style="font-size:12.5px;max-width:540px;margin:0 auto;line-height:1.6">There is no manual &ldquo;add device&rdquo; step, by design. Ask each employee to open the <b>SmartPRS mobile app</b>, enter your workspace web address and sign in &mdash; their phone then appears here as <b>Pending</b> for you to <b>Approve</b> or <b>Reject</b>. Only devices you approve can sign in and punch, so you stay in control.</div></td></tr>')
             + '</tbody></table></div>';
     }
     window.mobDevDecide = function (id, action) {
@@ -4232,7 +4568,13 @@ CSS;
         } else if (action === 'revoke') {
             if (!window.confirm('Revoke this device? It loses access on its next check (use for a lost/stolen phone).')) { return; }
             action = 'revoke'; body.reason = 'Access revoked by your administrator.';
-        } else if (!window.confirm('Approve this device? It unlocks on the phone within a few seconds.')) { return; }
+        } else {
+            // 7 Oct 2026 (Ejaz) - approve FOR an employee: confirm who, or pick one first.
+            var dv = ((window.__MOBDEV || {}).rows || []).find(function (r) { return r.id === id; }) || {};
+            if (!dv.empCode) {
+                if (!window.confirm('Approve this phone? It will be linked automatically to the employee who signs in on it first. (Use Link employee to set it now instead.)')) { return; }
+            } else if (!window.confirm('Approve this phone for ' + (dv.empName || dv.empCode) + ' (' + dv.empCode + ')' + (dv.department ? ', ' + dv.department : '') + (dv.branch ? ', ' + dv.branch : '') + '? It unlocks within a few seconds.')) { return; }
+        }
         fetch(cfg.mobileDevBase + '/' + id + '/' + action, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(body) })
             .then(function (r) { return r.json(); })
             .then(function (j) {
@@ -4830,9 +5172,9 @@ CSS;
         var nl = String.fromCharCode(10);
         var lines = [
             'Emp Code or Name,Month,Claim Kind (collection/simple),Purpose,Customer,Account No / ID,Collection Type,Collected On,Location,Mode (office/deposited/direct/online),Collected Amount,Portfolio / Bank,Gross Commission,TDS %,Payout Date,Payout Method (salary/separate),Description',
-            'EMP101,May 2026,collection,EMI Collection,Ramesh Kumar,LN-448812,EMI,2026-05-28 16:30,Nellore,deposited,42000,HDFC Two-Wheeler,840,5,2026-07-10,salary,22nd EMI collected',
-            'EMP102,May 2026,collection,Settlement / OTS,Sunita Devi,CC-90211,Settlement,2026-05-30 11:00,Guntur,direct,125000,ICICI Personal Loan,12500,,2026-07-10,separate,OTS closure incentive',
-            'EMP103,May 2026,simple,Target Bonus,,,,,,,,,5000,,2026-07-10,salary,Q1 bucket target achieved'
+            'EMP101,May 2026,collection,EMI Collection,Ramesh Kumar,LN-448812,EMI,28-05-2026 16:30,Nellore,deposited,42000,HDFC Two-Wheeler,840,5,10-07-2026,salary,22nd EMI collected',
+            'EMP102,May 2026,collection,Settlement / OTS,Sunita Devi,CC-90211,Settlement,30-05-2026 11:00,Guntur,direct,125000,ICICI Personal Loan,12500,,10-07-2026,separate,OTS closure incentive',
+            'EMP103,May 2026,simple,Target Bonus,,,,,,,,,5000,,10-07-2026,salary,Q1 bucket target achieved'
         ];
         var blob = new Blob([lines.join(nl)], { type: 'text/csv' });
         var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'smartprs-commissions-template.csv'; a.click();
@@ -4864,7 +5206,7 @@ CSS;
             var rd = new FileReader();
             rd.onload = function (ev) {
                 try {
-                    var wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
+                    var wb = (window.spXlsxDates || function (x) { return x; })(XLSX.read(new Uint8Array(ev.target.result), { type: 'array', raw: true, cellNF: true }));
                     var ws = wb.Sheets[wb.SheetNames[0]];
                     var raw = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
                     var out = [];
@@ -4919,6 +5261,28 @@ CSS;
     };
     // ---- rev 84 (Ejaz, USP): commission lifecycle — history / edit / reopen /
     // lock + self-claim. Entries are NEVER deleted; everything is logged.
+    // 7 Oct 2026 (Ejaz) - pick the employee a phone belongs to (older app builds send no Employee ID).
+    window.mobDevLink = function (id) {
+        var dv = ((window.__MOBDEV || {}).rows || []).find(function (r) { return r.id === id; }) || {};
+        var emps = ((typeof DB !== 'undefined' && DB.employees) || []).slice().sort(function (a, b) { return String(a.name) < String(b.name) ? -1 : 1; });
+        var opts = emps.map(function (e) { return '<option value="' + String(e.id).replace(/"/g, '') + '">' + e.name + ' (' + e.id + ')' + (e.dept ? ' - ' + e.dept : '') + (e.branch ? ' - ' + e.branch : '') + '</option>'; }).join('');
+        commModal('<div class="card" style="max-width:480px;width:100%;padding:20px 22px">'
+            + '<div style="font-weight:800;font-size:16px;margin-bottom:4px">Whose phone is this?</div>'
+            + '<div style="font-size:12.5px;color:var(--text3);margin-bottom:12px">' + (dv.deviceName || 'Mobile device') + ' &middot; code <b>' + (dv.code || '') + '</b>. Ask the employee to read the code shown on their phone.</div>'
+            + '<input list="mob_emp_dl" id="mob_emp" placeholder="Type a name or Employee ID" style="width:100%;padding:9px 11px;border:1.5px solid var(--border);border-radius:9px;font-size:14px"><datalist id="mob_emp_dl">' + opts + '</datalist>'
+            + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px"><button class="btn btn-outline" onclick="commModalClose()">Cancel</button>'
+            + '<button class="btn btn-primary" onclick="mobDevLinkSave(' + id + ')"><i class="fas fa-check"></i> ' + (dv.status === 'approved' ? 'Link' : 'Link &amp; approve') + '</button></div></div>');
+    };
+    window.mobDevLinkSave = function (id) {
+        var v = String((document.getElementById('mob_emp') || {}).value || '').trim();
+        if (!v) { if (typeof toast === 'function') { toast('Pick the employee'); } return; }
+        fetch(cfg.mobileDevBase + '/' + id + '/approve', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ emp_code: v }) })
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+                if (j && j.ok) { commModalClose(); if (typeof toast === 'function') { toast(j.message || 'Done'); } window.__MOBDEV = null; mobDevLoad(); }
+                else if (typeof toast === 'function') { toast((j && j.error) || 'Could not link'); }
+            }).catch(function () {});
+    };
     function commModal(html) {
         var m = document.getElementById('comm-modal') || (function () { var x = document.createElement('div'); x.id = 'comm-modal'; document.body.appendChild(x); return x; })();
         m.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:9000;display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto';
@@ -5776,7 +6140,7 @@ CSS;
                         : '<button class="btn btn-sm btn-outline" style="color:var(--red)" onclick="userStatus(' + u.id + ',\'disabled\')">Disable</button>';
                 }
             }
-            return '<tr>'
+            return '<tr data-uf="login">'
                 + '<td style="' + cs + ';font-weight:600">' + u.name + (u.isSelf ? ' <span style="font-size:10px;color:var(--text3)">(you)</span>' : '') + '</td>'
                 + '<td style="' + cs + '">' + u.email + '</td>'
                 + '<td style="' + cs + '">' + (u.roleLabel || dash) + '</td>'
@@ -5785,11 +6149,28 @@ CSS;
                 + '<td style="' + cs + ';text-align:right">' + (acts || dash) + '</td>'
                 + '</tr>';
         }).join('');
+        // 30 Sep 2026 (Ejaz) — Directory employees with NO login yet, so every employee is here.
+        var noLogin = d.noLogin || [];
+        var uf = window.__USERS_F || 'all';
+        if (uf === 'none') { body = ''; }
+        if (uf !== 'login') {
+            body += noLogin.map(function (e) {
+                var cs = 'padding:9px 12px;font-size:13px;border-top:1px solid var(--border);background:#fafafa';
+                return '<tr data-uf="none"><td style="' + cs + ';font-weight:600">' + String(e.name || '').replace(/</g, '&lt;') + (e.code ? ' <span style="color:var(--text3);font-weight:400">(' + e.code + ')</span>' : '') + '</td>'
+                    + '<td style="' + cs + '">' + (e.email ? e.email : '<span style="color:#b45309;font-size:11px">no email in Directory</span>') + '</td>'
+                    + '<td style="' + cs + '">' + dash + '</td>'
+                    + '<td style="' + cs + '">' + String(e.name || '').replace(/</g, '&lt;') + '</td>'
+                    + '<td style="' + cs + '"><span style="background:#f1f5f9;color:#475569;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600">No login</span></td>'
+                    + '<td style="' + cs + ';text-align:right">' + (d.canManage !== false ? '<button class="btn btn-sm btn-primary" onclick="userCreateFor(' + e.employeeId + ')"><i class="fas fa-user-plus"></i> Create login</button>' : dash) + '</td></tr>';
+            }).join('');
+        }
+        addBtn = '<select onchange="window.__USERS_F=this.value;render()" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:9px;font-size:13px;background:#fff;margin-right:10px">'
+            + [['all', 'All employees & logins'], ['login', 'With login (' + rows.length + ')'], ['none', 'No login yet (' + noLogin.length + ')']].map(function (o) { return '<option value="' + o[0] + '"' + (o[0] === uf ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>' + addBtn;
         var th = ['Name', 'Email (login)', 'Role', 'Employee', 'Status', '']
             .map(function (h) { return '<th style="padding:10px 12px;text-align:' + (h === '' ? 'right' : 'left') + ';font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3)">' + h + '</th>'; }).join('');
-        return pghead('User Access', rows.length + ' user login(s) — new users get an email to set their own password', addBtn)
+        return pghead('User Access', rows.length + ' user login(s) · ' + noLogin.length + ' Directory employee(s) without a login — new users get an email to set their own password', addBtn)
             + '<div class="card" style="padding:0;overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr>' + th + '</tr></thead><tbody>'
-            + (rows.length ? body : '<tr><td colspan="6" style="padding:36px;text-align:center;color:var(--text3)">No users yet.</td></tr>')
+            + (body ? body : '<tr><td colspan="6" style="padding:36px;text-align:center;color:var(--text3)">Nothing to show.</td></tr>')
             + '</tbody></table></div>';
     }
     window.userEdit = function (id) {
@@ -5814,6 +6195,17 @@ CSS;
             + '<button class="btn btn-outline" onclick="document.getElementById(\'user-edit-ov\').remove()">Cancel</button>'
             + '<button class="btn btn-primary" onclick="userSave(' + (id || 'null') + ')">' + (id ? 'Save' : 'Create &amp; invite') + '</button>'
             + '</div></div>';
+    };
+    // 30 Sep 2026 — "Create login" on a Directory employee: the Add User form, pre-filled and linked.
+    window.userCreateFor = function (empId) {
+        var e = ((window.__USERS || {}).noLogin || []).find(function (x) { return x.employeeId === empId; }); if (!e) { return; }
+        window.userEdit(null);
+        var set = function (k, v) { var el = document.getElementById(k); if (el) { el.value = v; } };
+        set('u_name', e.name || ''); set('u_email', e.email || ''); set('u_emp', String(empId));
+        // 7 Oct 2026 - pre-select the employee's Access Role from the Directory (else Employee).
+        var r = document.getElementById('u_role');
+        if (r) { var want = e.roleKey || 'employee'; [].slice.call(r.options).forEach(function (o) { if (o.value === want) { r.value = want; } }); }
+        if (!e.email) { var em = document.getElementById('u_email'); if (em) { em.focus(); } if (typeof toast === 'function') { toast('This employee has no email in the Directory — type the login email'); } }
     };
     window.userSave = function (id) {
         var name = (document.getElementById('u_name') || {}).value || '';
@@ -6185,8 +6577,38 @@ CSS;
         return pghead('Plans', rows.length + ' plan(s) — each plan defines price, seat cap and which module groups its tenants get', addBtn)
             + '<div class="card" style="padding:0;overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr>' + th + '</tr></thead><tbody>'
             + (rows.length ? body : '<tr><td colspan="5" style="padding:36px;text-align:center;color:var(--text3)">No plans yet.</td></tr>')
-            + '</tbody></table></div>';
+            + '</tbody></table></div>'
+            + setupChargesCard(rows);
     }
+    // 8 Oct 2026 (Ejaz): Setup Charges - one-time charge per plan, edited in place, one Save.
+    function setupChargesCard(rows) {
+        if (!rows.length) { return ''; }
+        var cs = 'padding:8px 12px;font-size:13px;border-top:1px solid var(--border)';
+        var tr = rows.map(function (p) {
+            return '<tr><td style="' + cs + ';font-weight:600">' + p.name + '</td>'
+                + '<td style="' + cs + '"><input type="number" min="0" step="1" class="filter-select sc_amt" data-id="' + p.id + '" value="' + (p.setupCharge || 0) + '" style="width:160px;text-align:right"></td></tr>';
+        }).join('');
+        return '<div class="card" style="padding:18px 20px;margin-top:16px">'
+            + '<h3 style="margin:0 0 4px;font-size:15px"><i class="fas fa-screwdriver-wrench" style="color:#f97316;margin-right:6px"></i>Setup Charges</h3>'
+            + '<p style="font-size:12px;color:var(--text3);margin:0 0 12px">One-time setup charge for each plan. Edit the amounts and press Save.</p>'
+            + '<table style="border-collapse:collapse;min-width:360px"><thead><tr>'
+            + '<th style="padding:6px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3)">Plan</th>'
+            + '<th style="padding:6px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3)">Setup charge ₹ (one-time)</th>'
+            + '</tr></thead><tbody>' + tr + '</tbody></table>'
+            + '<div style="margin-top:14px"><button class="btn btn-primary" onclick="setupChargesSave()"><i class="fas fa-check"></i> Save Setup Charges</button></div>'
+            + '</div>';
+    }
+    window.setupChargesSave = function () {
+        var map = {}; var bad = false;
+        document.querySelectorAll('.sc_amt').forEach(function (i) { var v = i.value === '' ? 0 : Number(i.value); if (!(v >= 0)) { bad = true; } map[i.getAttribute('data-id')] = v; });
+        if (bad) { if (typeof toast === 'function') { toast('Setup charge must be 0 or more'); } return; }
+        fetch(cfg.saasPlansUrl, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ setup_charges: map }) })
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+            .then(function (res) {
+                if (res.ok && res.j && res.j.ok) { if (typeof toast === 'function') { toast('Setup charges saved'); } plansLoad(); }
+                else if (typeof toast === 'function') { toast((res.j && res.j.error) || 'Could not save setup charges'); }
+            }).catch(function () { if (typeof toast === 'function') { toast('Could not save setup charges'); } });
+    };
     window.planEdit = function (id) {
         var d = window.__PLANS || {}; var mg = d.moduleGroups || {};
         var p = id ? (d.rows || []).find(function (x) { return x.id === id; }) : null;
@@ -6304,7 +6726,8 @@ CSS;
             }).catch(function () { if (typeof toast === 'function') { toast('Could not send'); } });
     };
     // ---- Generate Payroll (real draft run + payslips for a chosen month) -------
-    function pgDefaultMonth() { var d = new Date(); var m = d.getMonth() + 1; return d.getFullYear() + '-' + (m < 10 ? '0' + m : m); }
+    // 7 Oct 2026 (Ejaz) - default to LAST month: the cycle that has closed and is due on this month's pay day.
+    function pgDefaultMonth() { var d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1); var m = d.getMonth() + 1; return d.getFullYear() + '-' + (m < 10 ? '0' + m : m); }
     window.pgSet = function (k, v) { if (window.__PG) { window.__PG[k] = v; } };
     window.pgPreview = function () {
         var pg = window.__PG; if (!pg) { return; }
@@ -6375,13 +6798,14 @@ CSS;
             + statBox(inr(p.totals.net), 'Total Net Pay', '#6366f1', 'fa-wallet')
             + '</div>';
         var notes = [];
+        if (p.periodStart) { notes.push('<b>Attendance period: ' + p.periodStart + ' to ' + p.periodEnd + '</b> (Pay Cycle). Only these dates are credited; later dates go to the next payroll.' + (p.payDate ? ' Pay date: ' + p.payDate + '.' : '')); }
         if (p.exists) { notes.push('<b style="color:#b45309">A ' + (p.existingStatus || 'draft') + ' run already exists for ' + p.monthLabel + '</b> — generating will replace the draft.'); }
         if (p.skipped) { notes.push(p.skipped + ' employee(s) skipped (no CTC set).'); }
         if (p.periodOpen) { notes.push('<b style="color:#b45309">' + p.monthLabel + ' has not ended yet</b> — attendance is counted to ' + p.attendanceEnd + ' only (' + p.workingSoFar + ' of ' + p.workingDays + ' working days elapsed). These figures are salary EARNED TO DATE, not a full month. Generating now records the run as paid up to ' + p.attendanceEnd + '; the remaining days stay unpaid until you run them.'); }
         if (p.hasAttendance === false) { notes.push('<b style="color:#b91c1c">No attendance found for any employee in this window</b> — check the biometric sync before generating, or every salary will compute as zero.'); }
-        if (p.lop) { notes.push('Attendance proration: ' + p.workingDays + ' working days of ' + p.daysInMonth + ' (excl. weekly offs' + (p.holidays ? ' + ' + p.holidays + ' holiday(s)' : '') + '). Approved paid leave counts as present; an employee with no punches and no approved leave is treated as absent. Non-working days: holidays are added/deleted in Leave &rarr; Holidays; weekly offs (Sunday / 2nd-4th Saturday&hellip;) in Statutory &amp; Compliance &rarr; PF &amp; ESIC &rarr; Edit Rates.'); }
+        if (p.lop) { notes.push('Paid days = Present + Paid leave + Weekly offs + Holidays, out of ' + (p.lopBasis === 'fixed30' ? '30' : p.daysInMonth) + ' days' + (p.holidays ? ' (' + p.holidays + ' holiday(s) this period)' : '') + '. Only Absent days and Leave without pay are Loss of Pay (LOP); each LOP day costs gross &divide; ' + (p.lopBasis === 'fixed30' ? '30' : p.daysInMonth) + '. An employee with no punches and no approved paid leave is not paid. Non-working days: holidays are added/deleted in Leave &rarr; Holidays; weekly offs (Sunday / 2nd-4th Saturday&hellip;) in Statutory &amp; Compliance &rarr; PF &amp; ESIC &rarr; Edit Rates.'); }
         if (notes.length) { out += '<div class="card" style="padding:12px 16px;margin-bottom:14px;font-size:13px;color:var(--text2);background:#fffbeb;border:1px solid #fde68a">' + notes.join(' · ') + '</div>'; }
-        var th = ['Code', 'Employee']; if (p.lop) { th.push('Present'); th.push('Leave'); }
+        var th = ['Code', 'Employee']; if (p.lop) { th.push('Present'); th.push('Leave'); th.push('W.Off/Hol'); th.push('Paid Days'); th.push('LOP'); }
         th = th.concat(['Basic', 'HRA', 'Gross', 'PF', 'ESI', 'PT', 'Deductions', 'Net']);
         var thHtml = th.map(function (h) { var left = (h === 'Code' || h === 'Employee'); return '<th style="padding:10px 12px;text-align:' + (left ? 'left' : 'right') + ';font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3);white-space:nowrap">' + h + '</th>'; }).join('');
         var rows = p.rows.map(function (r, i) {
@@ -6389,7 +6813,7 @@ CSS;
             var cr = c + ';text-align:right';
             var info = r.note ? '<a onclick="pgNote(' + i + ')" style="cursor:pointer;color:#0891b2;margin-right:6px" title="How this pay was calculated"><i class="fas fa-circle-info"></i></a>' : '';
             var cells = '<td style="' + c + ';font-weight:600">' + info + r.code + '</td><td style="' + c + '">' + r.name + '</td>';
-            if (p.lop) { cells += '<td style="' + cr + '">' + (r.presentDays != null ? r.presentDays : '—') + (r.lateCut ? ' <span style="color:#dc2626" title="late cut (days)">-' + r.lateCut + '</span>' : '') + (r.breakCut ? ' <span style="color:#b45309" title="break cut (days)">-' + r.breakCut + '</span>' : '') + '</td>'; cells += '<td style="' + cr + '">' + (r.leaveDays ? r.leaveDays : '—') + '</td>'; }
+            if (p.lop) { cells += '<td style="' + cr + '">' + (r.presentDays != null ? r.presentDays : '—') + (r.lateCut ? ' <span style="color:#dc2626" title="late cut (days)">-' + r.lateCut + '</span>' : '') + (r.breakCut ? ' <span style="color:#b45309" title="break cut (days)">-' + r.breakCut + '</span>' : '') + '</td>'; cells += '<td style="' + cr + '">' + (r.leaveDays ? r.leaveDays : '—') + '</td>'; cells += '<td style="' + cr + '">' + (r.offDays ? r.offDays : '—') + '</td>'; cells += '<td style="' + cr + ';font-weight:600">' + (r.paidDays != null ? r.paidDays : '—') + '</td>'; cells += '<td style="' + cr + (r.lopDays ? ';color:#dc2626' : '') + '" title="' + (r.unpaidLeave ? r.unpaidLeave + ' unpaid leave day(s) included' : 'Loss of pay days') + '">' + (r.lopDays ? r.lopDays : '—') + '</td>'; }
             cells += '<td style="' + cr + '">' + inr(r.basic) + '</td><td style="' + cr + '">' + inr(r.hra) + '</td><td style="' + cr + ';font-weight:600">' + inr(r.gross) + '</td><td style="' + cr + '">' + inr(r.pf) + '</td><td style="' + cr + '">' + inr(r.esi) + '</td><td style="' + cr + '">' + inr(r.pt) + '</td><td style="' + cr + '">' + inr(r.ded) + '</td><td style="' + cr + ';font-weight:700;color:#4f46e5">' + inr(r.net) + '</td>';
             var noteRow = r.note ? '<tr id="pgn_' + i + '" style="display:none"><td colspan="' + th.length + '" style="padding:10px 14px;background:#f8fafc;font-size:12px;line-height:1.6;color:var(--text2);white-space:normal"><b>How this was calculated:</b> ' + String(r.note).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</td></tr>' : '';
             return '<tr>' + cells + '</tr>' + noteRow;
@@ -6486,9 +6910,7 @@ CSS;
         var fmtDate = function (s) {
             var p = String(s || '').slice(0, 10).split('-');
             if (p.length !== 3) { return String(s || ''); }
-            var mn = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-            var mi = parseInt(p[1], 10) - 1;
-            return parseInt(p[2], 10) + ' ' + (mn[mi] || p[1]) + ' ' + p[0];
+            return p[2] + '-' + p[1] + '-' + p[0];   // 7 Oct 2026 - DD-MM-YYYY everywhere
         };
         var notices = (d.notices && d.notices.length) ? '<div class="card" style="margin-bottom:16px;padding:18px 24px"><div style="font-weight:700;font-size:14px;margin-bottom:4px"><i class="fas fa-bullhorn" style="color:#f97316;margin-right:7px"></i>Notice Board</div>'
             + d.notices.map(function (n) {
@@ -7109,7 +7531,7 @@ CSS;
     }
     window.cgPrint = function () {
         var d = window.__CALCG; if (!d || d.error) { if (typeof toast === 'function') { toast('Open the guide first'); } return; }
-        var html = '<h1>SmartPRS — Salary Calculation Guide</h1><div class="muted">How every rupee on a payslip is computed · content updated ' + bpEsc(d.updated || '') + ' · printed ' + new Date().toLocaleDateString() + '</div>';
+        var html = '<h1>SmartPRS — Salary Calculation Guide</h1><div class="muted">How every rupee on a payslip is computed · content updated ' + bpEsc(d.updated || '') + ' · printed ' + new Date().toLocaleDateString('en-GB').split('/').join('-') + '</div>';
         (d.sections || []).forEach(function (sx) {
             html += '<h2>' + sx.title + '</h2>';
             if (sx.tag) { html += '<div class="muted">' + sx.tag + '</div>'; }
@@ -7285,7 +7707,7 @@ CSS;
     function bpWin(title, html) {
         var w = window.open('', '_blank');
         if (!w) { if (typeof toast === 'function') { toast('Popup blocked — allow popups to print'); } return; }
-        w.document.write('<html><head><title>' + bpEsc(title) + '</title><style>body{font-family:Arial,Helvetica,sans-serif;color:#0f172a;padding:26px}h1{font-size:19px;margin:0 0 2px}h2{font-size:14px;margin:18px 0 6px}table{width:100%;border-collapse:collapse;margin-top:8px}th,td{border:1px solid #cbd5e1;padding:6px 8px;font-size:12px;text-align:left}th{background:#f1f5f9;font-size:10px;text-transform:uppercase}.r{text-align:right}.muted{color:#64748b;font-size:11px}.tot td{font-weight:700;background:#f8fafc}</style></head><body>' + html + '</body></html>');
+        w.document.write('<html><head><title>' + bpEsc(title) + '</title><style>body{font-family:Arial,Helvetica,sans-serif;color:#0f172a;padding:26px}h1{font-size:19px;margin:0 0 2px}h2{font-size:14px;margin:18px 0 6px}table{width:100%;border-collapse:collapse;margin-top:8px}th,td{border:1px solid #cbd5e1;padding:6px 8px;font-size:12px;text-align:left}th{background:#f1f5f9;font-size:10px;text-transform:uppercase}.r{text-align:right}.muted{color:#64748b;font-size:11px}.tot td{font-weight:700;background:#f8fafc}</style></head><body>' + (window.spDateHtml ? window.spDateHtml(html) : html) + '</body></html>');
         w.document.close();
         setTimeout(function () { try { w.focus(); w.print(); } catch (e) {} }, 350);
     }
@@ -7300,13 +7722,13 @@ CSS;
                 + '<table><thead><tr><th>Agent</th><th>Purpose</th><th>Customer / Ref</th><th class="r">Collected</th><th class="r">Gross</th><th class="r">TDS 194H</th><th class="r">Net</th><th>Status</th></tr></thead><tbody>'
                 + (d.rows || []).map(function (r) { return '<tr><td>' + bpEsc(r.employee) + (r.code ? ' (' + bpEsc(r.code) + ')' : '') + '</td><td>' + bpEsc(r.purpose || '') + '</td><td>' + bpEsc(r.customer || '') + '</td><td class="r">' + (r.collected ? inr(r.collected) : '') + '</td><td class="r">' + inr(r.gross) + '</td><td class="r">' + inr(r.tds) + '</td><td class="r">' + inr(r.net) + '</td><td>' + bpEsc(r.status) + (r.bounced ? ' / BOUNCED' : '') + '</td></tr>'; }).join('')
                 + '<tr class="tot"><td colspan="3">Totals (rejected excluded)</td><td class="r">' + inr(t.collected || 0) + '</td><td class="r">' + inr(t.gross || 0) + '</td><td class="r">' + inr(t.tds || 0) + '</td><td class="r">' + inr(t.net || 0) + '</td><td></td></tr>'
-                + '</tbody></table><div class="muted" style="margin-top:8px">Net payable on APPROVED entries: ' + inr(t.netApproved || 0) + '. Generated by SmartPRS on ' + new Date().toLocaleDateString() + '.</div>';
+                + '</tbody></table><div class="muted" style="margin-top:8px">Net payable on APPROVED entries: ' + inr(t.netApproved || 0) + '. Generated by SmartPRS on ' + new Date().toLocaleDateString('en-GB').split('/').join('-') + '.</div>';
         } else {
             html = head + '<h2>TDS 194H Annexure (deductee-wise) — ' + bpEsc(d.bank) + ' — ' + bpEsc(d.month) + '</h2>'
                 + '<table><thead><tr><th>Deductee</th><th>PAN</th><th class="r">Entries</th><th class="r">Commission Gross</th><th class="r">TDS Deducted</th><th class="r">Net Paid</th></tr></thead><tbody>'
                 + (d.annexure || []).map(function (a) { return '<tr><td>' + bpEsc(a.employee) + (a.code ? ' (' + bpEsc(a.code) + ')' : '') + '</td><td>' + bpEsc(a.pan || 'No PAN') + '</td><td class="r">' + a.entries + '</td><td class="r">' + inr(a.gross) + '</td><td class="r">' + inr(a.tds) + '</td><td class="r">' + inr(a.net) + '</td></tr>'; }).join('')
                 + '<tr class="tot"><td colspan="3">Totals</td><td class="r">' + inr(t.gross || 0) + '</td><td class="r">' + inr(t.tds || 0) + '</td><td class="r">' + inr(t.net || 0) + '</td></tr>'
-                + '</tbody></table><div class="muted" style="margin-top:8px">Section 194H commission TDS. Cross-check with the TDS screen&#39;s deductee register before filing 26Q. Generated by SmartPRS on ' + new Date().toLocaleDateString() + '.</div>';
+                + '</tbody></table><div class="muted" style="margin-top:8px">Section 194H commission TDS. Cross-check with the TDS screen&#39;s deductee register before filing 26Q. Generated by SmartPRS on ' + new Date().toLocaleDateString('en-GB').split('/').join('-') + '.</div>';
         }
         bpWin(kind === 'register' ? 'Payout Register' : 'TDS Annexure', html);
     };
@@ -7778,7 +8200,7 @@ CSS;
             var rd = new FileReader();
             rd.onload = function (e) {
                 try {
-                    var wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
+                    var wb = (window.spXlsxDates || function (x) { return x; })(XLSX.read(new Uint8Array(e.target.result), { type: 'array', raw: true, cellNF: true }));
                     var ws = wb.Sheets[wb.SheetNames[0]];
                     cb(XLSX.utils.sheet_to_json(ws, { defval: '', raw: false }), null);
                 } catch (ex) { cb(null, String(ex)); }
@@ -8192,7 +8614,7 @@ CSS;
         var vars = [];
         var inputs = document.querySelectorAll('#rmsg_vars [data-vi]');
         for (var k = 0; k < inputs.length; k++) { vars.push(inputs[k].value || ''); }
-        var payload = { template: t.name, purpose: t.purpose, title: waTplPurpMapSafe(t.purpose) + ' — ' + new Date().toLocaleDateString(), vars: vars };
+        var payload = { template: t.name, purpose: t.purpose, title: waTplPurpMapSafe(t.purpose) + ' — ' + new Date().toLocaleDateString('en-GB').split('/').join('-'), vars: vars };
         if (st.driveId) { payload.drive_id = st.driveId; }
         if (st.source === 'pipeline') { payload.job_id = st.jobId; }
         else if (st.source === 'csv') { payload.rows = st.rows; }
@@ -8828,7 +9250,7 @@ CSS;
         if (!cfg.isDemo) { return; }
         // rev 105: TEAM demos show EVERYTHING — no hidden screens, no demo bar.
         if (cfg.demoTeam) { return; }
-        var hide = ['users', 'roles', 'branding', 'company-emails', 'mail-log', 'wa-settings', 'wa-templates', 'sms-settings', 'sms-templates', 'my-subscription', 'exits', 'settings'];
+        var hide = DEMO_HIDE;
         var apply = function () {
             hide.forEach(function (id) {
                 document.querySelectorAll('.nav-item[data-id="' + id + '"]').forEach(function (nv) { nv.style.display = 'none'; });
@@ -9575,7 +9997,9 @@ CSS;
             .then(function (j) {
                 if (j && j.ok) {
                     if (typeof toast === 'function') { toast('Biometric ID mapped'); }
+                    say2('<span style="color:var(--green)">' + (j.message || 'Mapped.') + '</span>');
                     window.__BIOMAP = null; bioMapLoad();
+                    bioResync(function (t) { if (t) { say2('<span style="color:var(--green)">' + (j.message || 'Mapped.') + t + '</span>'); } });
                 } else if (j && j.needForce) {
                     if (window.confirm(j.error + ' Move it to this employee?')) { window.bioMapSave(true); }
                     else { say2('<span style="color:var(--text3)">Not changed.</span>'); }
@@ -9589,6 +10013,111 @@ CSS;
             else if (typeof toast === 'function') { toast((j && j.error) || 'Could not remove'); }
         }).catch(function () { if (typeof toast === 'function') { toast('Could not remove'); } });
     };
+    // ---- Bulk Biometric ID -> Employee mapping (2026-09-28). CSV with two
+    // columns (Biometric ID, Employee ID). Rows whose Biometric ID is already
+    // mapped are NOT changed; they are listed in a popup instead. Reuses the
+    // single /map endpoint row by row (no new route; it re-checks ownership
+    // server-side and answers 409 if the ID got taken meanwhile).
+    // ponytail: sequential POSTs, fine for a few hundred rows; add a bulk endpoint if files get into thousands. ----
+    // 2026-09-28 — after a mapping, re-pull the last 93 days from every pull
+    // device (eTimeOffice / eTimeTrackLite / generic API; push devices can't be
+    // pulled) so punches that arrived before the ID was mapped are imported for
+    // the person now. Idempotent: the import upserts on (employee, time, source).
+    function bioResync(done) {
+        var devs = ((window.__BIO || {}).devices || []).filter(function (d) { return d && d.id && d.provider !== 'push'; });
+        if (!devs.length) { if (done) { done(''); } return; }
+        var tot = 0, i = 0;
+        var step = function () {
+            if (i >= devs.length) {
+                window.__BIO = null; bioLoad();
+                if (done) { done(' Re-pulled the last 3 months from ' + devs.length + ' device(s): ' + tot + ' punch(es) imported.'); }
+                return;
+            }
+            var d = devs[i++];
+            fetch(cfg.bioUrl + '/sync', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ id: d.id, days: 93 }) })
+                .then(function (r) { return r.json(); })
+                .then(function (j) { if (j && j.ok) { tot += (j.imported || 0); } })
+                .catch(function () {})
+                .then(step);
+        };
+        step();
+    }
+    window.bioMapSample = function () {
+        var unm = ((window.__BIOMAP || {}).unmapped || []).map(function (u) { return u.deviceId + ','; });
+        var lines = ['Biometric ID,Employee ID'].concat(unm.length ? unm : ['1043,AO0001']);
+        var blob = new Blob([String.fromCharCode(65279) + lines.join(String.fromCharCode(10))], { type: 'text/csv;charset=utf-8' });
+        var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'biometric-mapping-sample.csv'; a.click();
+    };
+    function bioBulkPopup(title, lines) {
+        var esc = function (s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+        var old = document.getElementById('bio-bulk-pop'); if (old) { old.remove(); }
+        var d = document.createElement('div');
+        d.id = 'bio-bulk-pop';
+        d.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+        d.innerHTML = '<div class="card" style="max-width:620px;width:100%;max-height:80vh;display:flex;flex-direction:column;padding:18px 20px">'
+            + '<div style="font-weight:700;font-size:15px;margin-bottom:8px">' + esc(title) + '</div>'
+            + '<div style="overflow:auto;font-size:13px;line-height:1.7;flex:1">' + lines.map(function (l) { return '<div style="color:' + (l[0] === 'ok' ? 'var(--green)' : (l[0] === 'dup' ? '#b45309' : 'var(--red)')) + '">' + esc(l[1]) + '</div>'; }).join('') + '</div>'
+            + '<div style="text-align:right;margin-top:12px"><button class="btn btn-primary" onclick="document.getElementById(&#39;bio-bulk-pop&#39;).remove()">OK</button></div></div>';
+        document.body.appendChild(d);
+    }
+    window.bioMapBulk = function (input) {
+        var file = input && input.files && input.files[0];
+        if (!file) { return; }
+        var m = window.__BIOMAP || {};
+        // A Biometric ID is unique PER BRANCH (each branch has its own device), so
+        // byDev keys on branch + ID.
+        var bk = function (b, id) { return String(b || '').toLowerCase() + '|' + String(id).toLowerCase(); };
+        var byDev = {}, byEmp = {}, emps = {};
+        (m.mappings || []).forEach(function (r) { byDev[bk(r.branch, r.deviceId)] = r; byEmp[String(r.code).toLowerCase()] = r; });
+        (m.employees || []).forEach(function (e) { emps[String(e.code).toLowerCase()] = e; });
+        var rd = new FileReader();
+        rd.onload = function () {
+            input.value = '';
+            var txt = String(rd.result || '').replace(String.fromCharCode(65279), '');
+            var rows = txt.split(String.fromCharCode(10)).map(function (ln) {
+                return ln.split(String.fromCharCode(13)).join('').split(',').map(function (c) { return c.split('"').join('').trim(); });
+            }).filter(function (c) { return c.length >= 2 && (c[0] || c[1]); });
+            if (rows.length && /biometric/i.test(rows[0][0])) { rows.shift(); }
+            if (!rows.length) { bioBulkPopup('Bulk mapping', [['err', 'No rows found. Use the sample file: column A Biometric ID, column B Employee ID.']]); return; }
+            var out = [], todo = [], seen = {};
+            rows.forEach(function (c, i) {
+                var dev = c[0], emp = c[1], ek = emp.toLowerCase(), n = 'Row ' + (i + 2) + ': ';
+                if (!dev || !emp) { out.push(['err', n + 'Biometric ID and Employee ID are both required.']); return; }
+                var dk = bk(emps[ek] ? emps[ek].branch : '', dev);
+                if (byDev[dk]) { out.push(['dup', n + 'Biometric ID ' + dev + ' is already mapped with ' + byDev[dk].code + ' (' + byDev[dk].name + ')' + (byDev[dk].branch ? ' in ' + byDev[dk].branch : '') + '.']); return; }
+                if (!emps[ek]) { out.push(['err', n + 'Employee ID ' + emp + ' does not exist in SmartPRS. Column B must be the Employee ID shown in People → Directory, not the device ID.']); return; }
+                if (byEmp[ek]) { out.push(['dup', n + 'Employee ID ' + emps[ek].code + ' is already mapped with Biometric ID ' + byEmp[ek].deviceId + '.']); return; }
+                if (seen[dk]) { out.push(['dup', n + 'Biometric ID ' + dev + ' repeats in the file for the same branch (already used for ' + seen[dk] + ').']); return; }
+                if (seen['e:' + ek]) { out.push(['dup', n + 'Employee ID ' + emp + ' repeats in the file.']); return; }
+                seen[dk] = emps[ek].code; seen['e:' + ek] = 1;
+                todo.push([n, dev, emps[ek].code]);
+            });
+            var done = 0;
+            if (typeof toast === 'function') { toast('Mapping ' + todo.length + ' row(s)...'); }
+            var next = function (k) {
+                if (k >= todo.length) {
+                    out.sort(function (x, y) { return parseInt(x[1].slice(4), 10) - parseInt(y[1].slice(4), 10); });
+                    var title = 'Bulk mapping: ' + done + ' mapped, ' + (rows.length - done) + ' not changed';
+                    window.__BIOMAP = null; bioMapLoad();
+                    if (!done) { bioBulkPopup(title, out); return; }
+                    bioBulkPopup(title, out.concat([['ok', 'Re-pulling the last 3 months of punches from your devices...']]));
+                    bioResync(function (t) { bioBulkPopup(title, out.concat([['ok', t ? t.trim() : 'No pull devices configured; punches held for these IDs were released.']])); });
+                    return;
+                }
+                var t = todo[k];
+                fetch(cfg.bioUrl + '/map', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ device_id: t[1], emp_code: t[2], force: 0 }) })
+                    .then(function (r) { return r.json(); })
+                    .then(function (j) {
+                        if (j && j.ok) { done++; out.push(['ok', t[0] + 'Mapped ' + t[1] + ' to ' + t[2] + '.']); }
+                        else { out.push([j && j.needForce ? 'dup' : 'err', t[0] + ((j && j.error) || 'Could not map') ]); }
+                    })
+                    .catch(function () { out.push(['err', t[0] + 'Could not map ' + t[1] + ' (network error).']); })
+                    .then(function () { next(k + 1); });
+            };
+            next(0);
+        };
+        rd.readAsText(file);
+    };
     function bioMappingCard() {
         var esc = function (s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); };
         var m = window.__BIOMAP;
@@ -9600,20 +10129,20 @@ CSS;
             return '<option value="' + esc(u.deviceId) + '">' + esc(u.deviceId) + ' &middot; ' + u.punches + ' punch(es)' + (u.lastSeen ? ' &middot; last ' + esc(u.lastSeen) : '') + '</option>';
         }).join('');
         var empOpts = '<option value="">&mdash; choose employee &mdash;</option>' + emps.map(function (e) {
-            return '<option value="' + esc(e.code) + '">' + esc(e.name) + ' (' + esc(e.code) + ')</option>';
+            return '<option value="' + esc(e.code) + '">' + esc(e.name) + ' (' + esc(e.code) + ')' + (e.branch ? ' &middot; ' + esc(e.branch) : '') + '</option>';
         }).join('');
         var inSt = 'width:100%;padding:9px 11px;border:1.5px solid var(--border);border-radius:9px;font-size:13.5px';
         var lbSt = 'display:block;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:10px 0 4px';
         var rows = maps.map(function (r) {
             var c = 'padding:8px 12px;font-size:13px;border-top:1px solid var(--border)';
-            return '<tr><td style="' + c + ';font-weight:600">' + esc(r.deviceId) + '</td><td style="' + c + '">' + esc(r.name) + ' <span style="color:var(--text3)">(' + esc(r.code) + ')</span></td>'
+            return '<tr><td style="' + c + ';font-weight:600">' + esc(r.deviceId) + '</td><td style="' + c + '">' + esc(r.name) + ' <span style="color:var(--text3)">(' + esc(r.code) + ')</span></td><td style="' + c + '">' + (r.branch ? esc(r.branch) : '<span style="color:var(--text3)">&mdash;</span>') + '</td>'
                 + '<td style="' + c + ';text-align:right"><i class="fas fa-link-slash" title="Remove mapping" style="cursor:pointer;color:var(--red)" onclick="bioUnmap(&#39;' + esc(r.code) + '&#39;)"></i></td></tr>';
         }).join('');
-        if (!rows) { rows = '<tr><td colspan="3" style="padding:16px;text-align:center;color:var(--text3);font-size:13px">No mappings yet. Link an unmapped biometric ID to a person above &mdash; or set the &quot;Biometric ID&quot; field in the employee&#39;s Directory profile.</td></tr>'; }
-        var th = ['Biometric ID', 'Employee', ''].map(function (h) { return '<th style="padding:9px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3)">' + h + '</th>'; }).join('');
+        if (!rows) { rows = '<tr><td colspan="4" style="padding:16px;text-align:center;color:var(--text3);font-size:13px">No mappings yet. Link an unmapped biometric ID to a person above &mdash; or set the &quot;Biometric ID&quot; field in the employee&#39;s Directory profile.</td></tr>'; }
+        var th = ['Biometric ID', 'Employee', 'Branch', ''].map(function (h) { return '<th style="padding:9px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text3)">' + h + '</th>'; }).join('');
         return '<div class="card" style="padding:18px 20px;margin-top:14px">'
             + '<div style="font-weight:700;font-size:15px;margin-bottom:2px"><i class="fas fa-fingerprint" style="color:#f97316;margin-right:6px"></i> Employee Mapping (Biometric ID &rarr; Employee)</div>'
-            + '<div style="font-size:12.5px;color:var(--text3);margin-bottom:10px">A punch feeds nobody until its device ID is linked to a person. IDs that match the Employee ID map automatically; anything else appears below after a sync/upload. The link is saved on the employee (also editable as &quot;Biometric ID&quot; in the Directory profile and the employee CSV template&#39;s biometric_id column). Mapping an ID also re-links its earlier punches.</div>'
+            + '<div style="font-size:12.5px;color:var(--text3);margin-bottom:10px">A punch feeds nobody until its device ID is linked to a person. IDs that match the Employee ID map automatically; anything else appears below after a sync/upload. The link is saved on the employee (also editable as &quot;Biometric ID&quot; in the Directory profile and the employee CSV template&#39;s biometric_id column). <b>Each device belongs to a branch</b>: the same Biometric ID can be reused in different branches, and a punch goes to the holder in that device&#39;s branch. Mapping an ID releases its held punches and re-pulls the last 3 months from your devices.</div>'
             + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">'
             + '<div><label style="' + lbSt + '">Unmapped biometric IDs (seen in punches)</label><select id="bio-map-unmapped" onchange="bioMapPick(this.value)" style="' + inSt + '">' + unmOpts + '</select></div>'
             + '<div><label style="' + lbSt + '">Biometric ID (as on the device)</label><input id="bio-map-id" placeholder="e.g. 1043" style="' + inSt + '"></div>'
@@ -9621,6 +10150,13 @@ CSS;
             + '<div style="display:flex;align-items:flex-end;padding-bottom:2px"><button class="btn btn-primary" onclick="bioMapSave()"><i class="fas fa-link"></i> Map</button></div>'
             + '</div>'
             + '<div id="bio-map-msg" style="margin-top:8px;font-size:13px"></div>'
+            + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px;padding-top:12px;border-top:1px dashed var(--border)">'
+            + '<span style="font-size:12.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin-right:4px">Bulk upload</span>'
+            + '<button class="btn" onclick="bioMapSample()"><i class="fas fa-download"></i> Sample file</button>'
+            + '<button class="btn btn-primary" onclick="document.getElementById(&#39;bio-map-file&#39;).click()"><i class="fas fa-upload"></i> Upload CSV</button>'
+            + '<input id="bio-map-file" type="file" accept=".csv,text/csv" style="display:none" onchange="bioMapBulk(this)">'
+            + '<span style="font-size:12px;color:var(--text3)">Two columns: Biometric ID, Employee ID. IDs already mapped are skipped and listed.</span>'
+            + '</div>'
             + '<div style="font-weight:700;font-size:13.5px;margin:14px 0 6px">Current mappings (' + maps.length + ')</div>'
             + '<div style="overflow:auto;border:1px solid var(--border);border-radius:10px"><table style="width:100%;border-collapse:collapse"><thead><tr>' + th + '</tr></thead><tbody>' + rows + '</tbody></table></div>'
             + '</div>';
@@ -10471,7 +11007,7 @@ CSS;
         var eRows = (d.earnings || []).map(function (x) { return row('+', x.label, x.amount); }).join('') || '<div style="padding:12px;color:var(--text3);font-size:13px">No earnings yet this month</div>';
         var dRows = (d.deductions || []).map(function (x) { return row('&minus;', x.label, x.amount); }).join('') || '<div style="padding:12px;color:var(--text3);font-size:13px">No deductions yet</div>';
         var att = m.attendanceTracked
-            ? (m.presentDays + ' present + ' + (m.paidLeaveDays || 0) + ' paid leave of ' + m.workingSoFar + ' working days so far' + (m.lateDays ? ' &middot; ' + m.lateDays + ' late' : ''))
+            ? ((m.paidSoFar != null ? m.paidSoFar + ' paid day(s) so far (' : '') + m.presentDays + ' present + ' + (m.paidLeaveDays || 0) + ' paid leave' + (m.paidSoFar != null ? ' + weekly offs &amp; holidays)' : '') + (m.lateDays ? ' &middot; ' + m.lateDays + ' late' : ''))
             : ('no punches yet &mdash; estimated by ' + m.workingSoFar + ' of ' + m.workingDays + ' working days elapsed');
         var head = '<div class="card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px">'
             + '<div><div style="font-size:19px;font-weight:800">' + e.name + ' <span style="color:var(--text3);font-weight:500;font-size:13px">(' + e.code + ') &middot; ' + (e.company || '') + '</span></div>'
@@ -10622,7 +11158,7 @@ CSS;
             var reader = new FileReader();
             reader.onload = function (ev) {
                 try {
-                    var wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
+                    var wb = (window.spXlsxDates || function (x) { return x; })(XLSX.read(new Uint8Array(ev.target.result), { type: 'array', raw: true, cellNF: true }));
                     var ws = wb.Sheets[wb.SheetNames[0]];
                     var arr = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
                     if (!arr.length) { if (typeof toast === 'function') { toast('The file is empty'); } return; }
@@ -10737,6 +11273,14 @@ CSS;
         return pghead('Manual & Bulk Attendance', 'Single punches apply instantly; bulk uploads enter attendance only after Admin approval', '<button class="btn btn-outline btn-sm" onclick="window.__AB=null;abLoad()"><i class="fas fa-rotate"></i> Refresh</button>')
             + single + bulkHead + batches;
     }
+    // 7 Oct 2026 (Ejaz) - Pay Cycle attendance period: any From/To window. Stored as the
+    // TO day (cutoff_day): From = the day after it in the previous month. '' = calendar month.
+    function spPeriodOpts() {
+        var ord = function (n) { return n + ((n % 100 >= 11 && n % 100 <= 13) ? 'th' : (['th', 'st', 'nd', 'rd'][n % 10] || 'th')); };
+        var o = [''], l = ['Calendar month: From 1st To month end'];
+        for (var e = 2; e <= 28; e++) { o.push(String(e)); l.push('From ' + ord(e + 1) + ' (previous month) To ' + ord(e)); }
+        return [o, l];
+    }
     window.LETTER_SAMPLES = (function () {
         var NL = String.fromCharCode(10);
         return {
@@ -10792,7 +11336,7 @@ CSS;
         'banks': { type: 'banks', title: 'Banks', sub: 'Bank accounts with account no, IFSC and purpose', fields: [
             { k: 'name', l: 'Bank Name' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'acc_name', l: 'Account Holder' }, { k: 'acc_no', l: 'Account Number' }, { k: 'ifsc', l: 'IFSC' }, { k: 'bank_branch', l: 'Bank Branch' }, { k: 'purpose', l: 'Purpose (Salary / Vendor / Disbursement)' }] },
         'holidays': { type: 'holidays', title: 'Holidays', sub: 'Non-working days for payroll. ADD a holiday with the button above (name + date) — payroll automatically pays it and removes it from LOP working days. DELETE with the trash icon on its row. Weekly offs (Sunday / 2nd-4th Saturday etc.) are NOT added here — set them once in Statutory & Compliance → PF & ESIC → Edit Rates → Weekly offs', fields: [
-            { k: 'name', l: 'Holiday Name' }, { k: 'date', l: 'Date', type: 'date' }, { k: 'applies_to', l: 'Applies To (optional)' }] },
+            { k: 'name', l: 'Holiday Name' }, { k: 'date', l: 'Date', type: 'date' }, { k: 'applies_to', l: 'Applies To - blank = everyone, or company / branch names (comma-separated)' }] },
         'leave-types': { type: 'leave-types', title: 'Leave Types', sub: 'Leave categories with annual entitlement; paid leave counts as present in payroll', fields: [
             { k: 'name', l: 'Leave Type' }, { k: 'days_per_year', l: 'Days / Year', type: 'number' }, { k: 'paid', l: 'Paid?', type: 'select', opts: ['1', '0'], optLabels: ['Paid', 'Unpaid (LOP)'] }, { k: 'carry_forward', l: 'Carry Forward?', type: 'select', opts: ['1', '0'], optLabels: ['Yes', 'No'] }] },
         'biometric-devices': { type: 'biometric-devices', title: 'Biometric Devices', sub: 'Register attendance devices of any make. Offline devices: download punches by USB, then bulk-upload in Manual Entry.', fields: DEVICE_FIELDS },
@@ -10800,10 +11344,23 @@ CSS;
             { k: 'asset_id', l: 'Asset Tag / ID' }, { k: 'asset_type', l: 'Type (Laptop / Phone / SIM…)' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'employee', l: 'Issued To', src: 'emp' }, { k: 'issue_date', l: 'Issue Date', type: 'date' }, { k: 'status', l: 'Status', type: 'select', opts: ['issued', 'returned', 'damaged', 'lost'], optLabels: ['Issued', 'Returned', 'Damaged', 'Lost'] }] },
         'complaints': { type: 'complaints', title: 'Complaints', sub: 'Complaints register with severity + status', fields: [
             { k: 'employee', l: 'Employee (optional)', src: 'emp' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'severity', l: 'Severity', type: 'select', opts: ['low', 'medium', 'high'], optLabels: ['Low', 'Medium', 'High'] }, { k: 'channel', l: 'Channel (Email / Call / Walk-in)' }, { k: 'description', l: 'Description' }, { k: 'status', l: 'Status', type: 'select', opts: ['open', 'in_progress', 'resolved', 'closed'], optLabels: ['Open', 'In progress', 'Resolved', 'Closed'] }, { k: 'date', l: 'Date', type: 'date' }] },
-        'helpdesk': { type: 'helpdesk', title: 'HR Helpdesk', sub: 'Employee helpdesk tickets with priority + status — employees raise their own and see only their own', fields: [
+        'helpdesk': { type: 'helpdesk', title: 'HR Helpdesk', single: 'Ticket', addLabel: 'Raise a Ticket', respond: ['priority', 'status', 'hr_comment'], sub: 'Employee helpdesk tickets with priority + status — employees raise their own and see only their own', fields: [
             { k: 'subject', l: 'Subject' }, { k: 'employee', l: 'Employee', src: 'emp' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'category', l: 'Category (Payroll / Leave / IT…)' }, { k: 'priority', l: 'Priority', type: 'select', opts: ['low', 'medium', 'high', 'urgent'], optLabels: ['Low', 'Medium', 'High', 'Urgent'], mgrOnly: 1 }, { k: 'description', l: 'Description — explain the issue in your own words', type: 'textarea', noList: 1 }, { k: 'status', l: 'Status', type: 'select', opts: ['open', 'in_progress', 'resolved', 'closed'], optLabels: ['Open', 'In progress', 'Resolved', 'Closed'], mgrOnly: 1 }, { k: 'hr_comment', l: 'HR Comment — reply shown to the employee', type: 'textarea', mgrOnly: 1 }] },
-        'posh': { type: 'posh', title: 'POSH Complaints', sub: 'Confidential POSH complaints to the Internal Committee — the complainant and Admin/HR alone can see them', fields: [
-            { k: 'subject', l: 'Subject' }, { k: 'employee', l: 'Complainant', src: 'emp' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'respondent', l: 'Complaint against (name / role)' }, { k: 'incident_date', l: 'Incident date', type: 'date' }, { k: 'description', l: 'Description — what happened, where, any witnesses', type: 'textarea', noList: 1 }, { k: 'status', l: 'Status', type: 'select', opts: ['open', 'inquiry', 'resolved', 'closed'], optLabels: ['Open', 'Inquiry in progress', 'Resolved', 'Closed'], mgrOnly: 1 }, { k: 'hr_comment', l: 'IC Comment — reply shown to the complainant', type: 'textarea', mgrOnly: 1 }] },
+        // 30 Sep 2026 (Ejaz) — "Raise a Complaint": General Complaint OR POSH, with the particulars an inquiry needs.
+        'posh': { type: 'posh', title: 'Raise a Complaint', single: 'Complaint', addLabel: 'Raise a Complaint', sub: 'Raise a General complaint or a POSH (sexual harassment) complaint. Confidential — a General complaint is seen only by you and Admin / HR; a POSH complaint only by you and the Internal Committee.',
+            respond: ['status', 'hr_comment'], rowFn: 'cmpEvidence', rowFnIcon: 'fa-paperclip', rowFnLabel: function (r) { return 'Evidence' + (r.evidence_count ? ' (' + r.evidence_count + ')' : ''); }, afterSave: 'cmpAfterSave', headFn: 'cmpHeadBtns',
+            help: '<div style="background:#f8fafc;border:1px solid var(--border);border-radius:10px;padding:10px 14px;font-size:12.5px;color:var(--text2);line-height:1.55"><b>Tip:</b> describe what happened in order — who was involved, what was said or done, where and when. For <b>POSH</b>, a complaint should normally be made within 3 months of the incident; keep any messages, emails or photos ready to share with the Internal Committee.</div>',
+            fields: [
+            { k: 'category', l: 'Complaint type', type: 'select', opts: ['general', 'posh'], optLabels: ['General Complaint', 'POSH (sexual harassment at workplace)'] },
+            { k: 'subject', l: 'Subject — one line' }, { k: 'employee', l: 'Complainant', src: 'emp' }, { k: 'company_name', l: 'Company', src: 'company' },
+            { k: 'respondent', l: 'Complaint against — name, designation & department', noList: 1 }, { k: 'relation', l: 'Their relation to you', type: 'select', opts: ['', 'Colleague', 'Reporting manager / senior', 'Subordinate', 'Customer / client', 'Vendor / visitor', 'Other'], optLabels: ['Select…', 'Colleague', 'Reporting manager / senior', 'Subordinate', 'Customer / client', 'Vendor / visitor', 'Other'], noList: 1 },
+            { k: 'incident_date', l: 'Date of incident', type: 'date', maxToday: 1 }, { k: 'incident_time', l: 'Time of incident (approx.)', type: 'time', noList: 1 },
+            { k: 'location', l: 'Place of incident (office / branch / field / online…)', noList: 1 }, { k: 'prior_reported', l: 'Reported to anyone earlier?', type: 'select', opts: ['no', 'yes'], optLabels: ['No', 'Yes — mention to whom in the description'], noList: 1 },
+            { k: 'description', l: 'Detailed description — what happened, in order', type: 'textarea', noList: 1 },
+            { k: 'witnesses', l: 'Witnesses — names and contact (if any)', type: 'textarea', rows: 3, noList: 1 },
+            { k: 'resolution_sought', l: 'What resolution or action are you seeking?', type: 'textarea', rows: 3, noList: 1 },
+            { k: 'evidence', l: 'Evidence — photos, screenshots, chats, PDFs, audio or video (optional · up to 10 files, 10 MB each · more can be added later)', type: 'files', accept: 'image/*,.pdf,.doc,.docx,.txt,audio/*,video/*', noList: 1 },
+            { k: 'status', l: 'Status', type: 'select', opts: ['open', 'inquiry', 'resolved', 'closed'], optLabels: ['Open', 'Inquiry in progress', 'Resolved', 'Closed'], mgrOnly: 1 }, { k: 'hr_comment', l: 'HR / IC Comment — reply shown to the complainant', type: 'textarea', rows: 4, mgrOnly: 1 }] },
         'deductions': { type: 'deductions', title: 'Deductions Ledger', sub: 'Ad-hoc deductions applied in payroll', fields: [
             { k: 'employee', l: 'Employee', src: 'emp' }, { k: 'type', l: 'Type', type: 'select', opts: ['late', 'pcc', 'advance_emi', 'escalation', 'lop', 'other'], optLabels: ['Late', 'PCC', 'Advance EMI', 'Escalation', 'Loss of Pay', 'Other'] }, { k: 'amount', l: 'Amount (₹)', type: 'number' }, { k: 'month', l: 'Month (YYYY-MM)' }, { k: 'source_ref', l: 'Reference' }, { k: 'status', l: 'Status', type: 'select', opts: ['pending', 'applied', 'waived'], optLabels: ['Pending', 'Applied', 'Waived'] }] },
         'payout-recon': { type: 'payout-recon', title: 'Payout Reconciliation', sub: 'Bank payout vs expected, per portfolio/month', fields: [
@@ -10908,7 +11465,7 @@ CSS;
         'test-results': { type: 'test-results', title: 'Test Results', sub: 'Attempts & scores', fields: [
             { k: 'employee', l: 'Employee', src: 'emp' }, { k: 'test', l: 'Test (exact name)' }, { k: 'status', l: 'Status', type: 'select', opts: ['pending', 'passed', 'failed'], optLabels: ['Pending', 'Passed', 'Failed'] }, { k: 'score', l: 'Score', type: 'number' }, { k: 'attempted_on', l: 'Attempted On', type: 'date' }] },
         'pay-cycle': { type: 'pay-cycle', title: 'Pay Cycle', sub: 'Pay cycles & cut-offs', fields: [
-            { k: 'name', l: 'Cycle Name' }, { k: 'company_name', l: 'Company', casc: 1, cascSrc: 'company' }, { k: 'department', l: 'Department', casc: 1, noList: 1 }, { k: 'team', l: 'Team', casc: 1, noList: 1 }, { k: 'employee', l: 'Employee', casc: 1, noList: 1 }, { k: 'cycle', l: 'Cycle', type: 'select', opts: ['monthly', 'fortnightly', 'weekly', 'custom'], optLabels: ['Monthly', 'Fortnightly', 'Weekly', 'Custom Date'] }, { k: 'cycle_date', l: 'Cycle Date (for Custom)', type: 'date', noList: 1 }, { k: 'cutoff_day', l: 'Attendance Period', type: 'select', opts: ['', '20'], optLabels: ['Calendar month (1st to month end)', '21st to 20th (retention window)'] }, { k: 'pay_day', l: 'Pay Day', type: 'number' }, { k: 'status', l: 'Status', type: 'select', opts: ['active', 'inactive'], optLabels: ['Active', 'Inactive'] }] },
+            { k: 'name', l: 'Cycle Name' }, { k: 'company_name', l: 'Company', casc: 1, cascSrc: 'company' }, { k: 'department', l: 'Department', casc: 1, noList: 1 }, { k: 'team', l: 'Team', casc: 1, noList: 1 }, { k: 'employee', l: 'Employee', casc: 1, noList: 1 }, { k: 'cycle', l: 'Cycle', type: 'select', opts: ['monthly', 'fortnightly', 'weekly', 'custom'], optLabels: ['Monthly', 'Fortnightly', 'Weekly', 'Custom Date'] }, { k: 'cutoff_day', l: 'Attendance Period (From - To)', type: 'select', hint: 'From day of the previous month to the day before it in the payroll month', opts: spPeriodOpts()[0], optLabels: spPeriodOpts()[1] }, { k: 'pay_day', l: 'Pay Day', type: 'number', hint: 'Day of the month salary is paid (1-28). Always the first such day AFTER the attendance period ends - never counted as a working day of that period.' }, { k: 'status', l: 'Status', type: 'select', opts: ['active', 'inactive'], optLabels: ['Active', 'Inactive'] }] },
         'wa-settings': { type: 'wa-settings', title: 'WhatsApp Settings', sub: 'WhatsApp provider config — Interakt is LIVE (provider "interakt" + API key, status active). Leave API URL blank for the Interakt default.', fields: [
             { k: 'company_name', l: 'Company', src: 'company' }, { k: 'provider', l: 'Provider (type: interakt)' }, { k: 'api_url', l: 'API URL (leave blank for Interakt)' }, { k: 'api_key', l: 'API Key (Interakt Secret Key)' }, { k: 'sender_number', l: 'Sender Number' }, { k: 'waba_id', l: 'WABA ID (optional)' }, { k: 'status', l: 'Status', type: 'select', opts: ['active', 'inactive'], optLabels: ['Active', 'Inactive'] }] },
         'sms-settings': { type: 'sms-settings', title: 'SMS Settings', sub: 'SMS provider config (sending wired later)', fields: [
@@ -10964,7 +11521,8 @@ CSS;
         if (!d) { setTimeout(function () { if (!window.__MASTER[type]) { masterLoad(type); } }, 10); }
         var canManage = !d || d.canManage !== false;
         var canCreate = canManage || !!(d && d.canCreate);   // rev184 — employees may RAISE helpdesk/POSH entries of their own
-        var addBtn = canCreate ? '<button class="btn btn-primary" onclick="masterEdit(\'' + type + '\',null)"><i class="fas fa-plus"></i> Add ' + mc.title.replace(/s$/, '') + '</button>' : '';
+        var addBtn = canCreate ? '<button class="btn btn-primary" onclick="masterEdit(\'' + type + '\',null)"><i class="fas fa-plus"></i> ' + (mc.addLabel || ('Add ' + mc.title.replace(/s$/, ''))) + '</button>' : '';
+        if (mc.headFn && typeof window[mc.headFn] === 'function') { addBtn = window[mc.headFn](d) + addBtn; }   // 30 Sep 2026 — extra header buttons (e.g. Internal Committee)
         if (type === 'points-rules' && canManage) { addBtn = '<button class="btn btn-outline" onclick="pointsAutoApply()"><i class="fas fa-wand-magic-sparkles"></i> Auto-apply for a month</button> ' + addBtn; }
         if (!d) { return pghead(mc.title, mc.sub, addBtn) + '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">Loading…</div></div>'; }
         if (d.error) { return pghead(mc.title, mc.sub, addBtn) + '<div class="card"><div style="padding:30px;color:var(--red)"><b>Could not load.</b><br><span style="font-size:12px;color:var(--text2)">' + String(d.error) + '</span></div></div>'; }
@@ -11005,8 +11563,8 @@ CSS;
             if (mc.rowEmail) { ra += '<a onclick="letterEmail(' + r.id + ')" title="Email this letter to the recipient" style="cursor:pointer;color:#0891b2;font-size:12px;margin-right:16px;white-space:nowrap"><i class="fas fa-paper-plane"></i> Email</a>'; }
             if (mc.rowAcceptLink) { ra += '<a onclick="letterAcceptLink(' + r.id + ')" title="Email the candidate an offer-acceptance link" style="cursor:pointer;color:#16a34a;font-size:12px;margin-right:16px;white-space:nowrap"><i class="fas fa-link"></i> Acceptance link</a>'; }
             if (mc.rowPost) { ra += '<a onclick="masterRowPost(' + "'" + (cfg[mc.rowPost.cfg] || '') + '/' + r.id + mc.rowPost.suffix + "'" + ')" title="' + mc.rowPost.label + '" style="cursor:pointer;color:#0891b2;font-size:12px;margin-right:16px;white-space:nowrap"><i class="fas ' + (mc.rowPost.icon || 'fa-bolt') + '"></i> ' + mc.rowPost.label + '</a>'; }
-            if (mc.rowFn) { ra += '<a onclick="' + mc.rowFn + '(' + r.id + ')" title="' + (mc.rowFnLabel || '') + '" style="cursor:pointer;color:#7c3aed;font-size:12px;margin-right:16px;white-space:nowrap"><i class="fas ' + (mc.rowFnIcon || 'fa-id-card') + '"></i> ' + (mc.rowFnLabel || '') + '</a>'; }
-            var act = canManage ? '<td class="mc-actions" data-label="Actions" style="' + c + ';white-space:nowrap;text-align:right">' + ra + '<i class="fas fa-pen" title="Edit" style="cursor:pointer;color:var(--text2);margin-right:14px" onclick="masterEdit(\'' + type + '\',' + r.id + ')"></i><i class="fas fa-trash" title="Delete" style="cursor:pointer;color:var(--red)" onclick="masterDelete(\'' + type + '\',' + r.id + ')"></i></td>' : (ra ? '<td class="mc-actions" data-label="Actions" style="' + c + ';text-align:right">' + ra + '</td>' : '<td class="mc-actions"></td>');
+            if (mc.rowFn) { ra += '<a onclick="' + mc.rowFn + '(' + r.id + ')" title="' + (typeof mc.rowFnLabel === 'function' ? '' : (mc.rowFnLabel || '')) + '" style="cursor:pointer;color:#7c3aed;font-size:12px;margin-right:16px;white-space:nowrap"><i class="fas ' + (mc.rowFnIcon || 'fa-id-card') + '"></i> ' + (typeof mc.rowFnLabel === 'function' ? mc.rowFnLabel(r) : (mc.rowFnLabel || '')) + '</a>'; }
+            var act = canManage ? '<td class="mc-actions" data-label="Actions" style="' + c + ';white-space:nowrap;text-align:right">' + ra + (mc.respond ? '<a onclick="masterEdit(\'' + type + '\',' + r.id + ')" title="Update status and add remarks" style="cursor:pointer;color:#0891b2;font-size:12px;white-space:nowrap"><i class="fas fa-reply"></i> Respond</a></td>' : '<i class="fas fa-pen" title="Edit" style="cursor:pointer;color:var(--text2);margin-right:14px" onclick="masterEdit(\'' + type + '\',' + r.id + ')"></i><i class="fas fa-trash" title="Delete" style="cursor:pointer;color:var(--red)" onclick="masterDelete(\'' + type + '\',' + r.id + ')"></i></td>') : (ra ? '<td class="mc-actions" data-label="Actions" style="' + c + ';text-align:right">' + ra + '</td>' : '<td class="mc-actions"></td>');
             return '<tr>' + cells + act + '</tr>';
         }).join('');
         return pghead(mc.title, rows.length + ' record(s) · ' + mc.sub, addBtn)
@@ -11024,13 +11582,22 @@ CSS;
         // ticket is raised: hide them on a non-manager's form (the LIST still shows them,
         // so the employee sees HR's status and reply later).
         var mgrForm = !(d && d.canManage === false);
-        var f = mc.fields.filter(function (fl) { return mgrForm || !fl.mgrOnly; }).map(function (fl) {
+        // 30 Sep 2026 (Ejaz) — complaints / tickets (mc.respond): raising shows only the employee's own
+        // fields (no Status / remark); afterwards the submission is read-only and the handler edits
+        // only the mc.respond fields. The server enforces the same (MasterController::RESPOND_ONLY).
+        var respondMode = !!(mc.respond && id);
+        var f = mc.fields.filter(function (fl) {
+            if (mc.respond) { return id ? fl.type !== 'files' : !fl.mgrOnly && mc.respond.indexOf(fl.k) < 0; }
+            return mgrForm || !fl.mgrOnly;
+        }).map(function (fl) {
             var val = rec ? (rec[fl.k] != null ? rec[fl.k] : '') : '';
             // rev184 — an Employee login raising their own entry: employee = themselves.
             if (!rec && fl.src === 'emp' && cfg && cfg.role === 'Employee' && typeof DB !== 'undefined' && (DB.employees || []).length === 1) { val = DB.employees[0].name || ''; }
             var ctrl;
-            if (fl.type === 'textarea') {
-                ctrl = '<textarea id="ms_' + fl.k + '" rows="9" style="' + inp + ';resize:vertical;line-height:1.5">' + String(val).replace(/</g, '&lt;') + '</textarea>';
+            if (fl.type === 'files') {   // 30 Sep 2026 — attachments, uploaded by mc.afterSave once the record has an id
+                ctrl = '<input id="ms_' + fl.k + '" type="file" multiple' + (fl.accept ? ' accept="' + fl.accept + '"' : '') + ' style="' + inp + ';background:#fff">';
+            } else if (fl.type === 'textarea') {
+                ctrl = '<textarea id="ms_' + fl.k + '" rows="' + (fl.rows || 9) + '" style="' + inp + ';resize:vertical;line-height:1.5">' + String(val).replace(/</g, '&lt;') + '</textarea>';
             } else if (fl.type === 'select') {
                 var labels = fl.optLabels || fl.opts;
                 var oc = fl.fill ? ' onchange="masterFillSample(' + "'ms_" + (fl.fillTarget || '') + "','" + fl.fill + "',this.value)" + '"' : (fl.onch ? ' onchange="' + fl.onch + '()"' : '');
@@ -11055,7 +11622,7 @@ CSS;
                 var opts = masterOptsFor(fl.src) || [];
                 ctrl = '<select id="ms_' + fl.k + '" style="' + inp + '"><option value="">Select…</option>' + opts.map(function (o) { return '<option' + (o === val ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select>';
             } else {
-                var itype = fl.type === 'date' ? 'date' : (fl.type === 'datetime' ? 'datetime-local' : (fl.type === 'number' ? 'number' : 'text'));
+                var itype = fl.type === 'date' ? 'date' : (fl.type === 'datetime' ? 'datetime-local' : (fl.type === 'number' ? 'number' : (fl.type === 'time' ? 'time' : 'text')));
                 var v2 = val;
                 if (fl.type === 'date' && val) { v2 = String(val).slice(0, 10); }
                 else if (fl.type === 'datetime' && val) { v2 = String(val).replace(' ', 'T').slice(0, 16); }
@@ -11065,14 +11632,17 @@ CSS;
                 var maxAttr = (fl.maxToday && fl.type === 'date') ? ' max="' + new Date().toISOString().slice(0, 10) + '"' : '';
                 ctrl = '<input id="ms_' + fl.k + '" type="' + itype + '" value="' + String(v2).replace(/"/g, '&quot;') + '"' + maxAttr + ' style="' + inp + '">';
             }
-            var wrapStyle = (fl.type === 'textarea') ? ' style="grid-column:1 / -1"' : '';
+            if (respondMode && mc.respond.indexOf(fl.k) < 0) {   // the employee's submission: shown, never editable
+                ctrl = ctrl.replace(/^<(input|textarea|select)/, '<$1 disabled').replace('background:#f8fafc', 'background:#eef2f7;color:var(--text2);cursor:not-allowed');
+            }
+            var wrapStyle = (fl.type === 'textarea' || fl.type === 'files') ? ' style="grid-column:1 / -1"' : '';
             return '<div' + wrapStyle + '><label id="ms_' + fl.k + '_lbl" style="' + lbl + '">' + fl.l + '</label>' + ctrl + (fl.hint ? '<div id="ms_' + fl.k + '_hint" style="font-size:11px;color:var(--text3);margin-top:3px">' + fl.hint + '</div>' : '') + '</div>';
         }).join('');
         var m = document.getElementById('master-modal') || (function () { var x = document.createElement('div'); x.id = 'master-modal'; document.body.appendChild(x); return x; })();
         m.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:1000;display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto';
         m.innerHTML = '<div class="card" style="max-width:640px;width:100%;padding:0">'
-            + '<div style="display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--border)"><h3 style="margin:0;font-size:18px">' + (id ? 'Edit ' : 'Add ') + mc.title.replace(/s$/, '') + '</h3><button class="btn btn-outline btn-sm" onclick="masterClose()"><i class="fas fa-xmark"></i></button></div>'
-            + (mc.help ? '<div style="padding:16px 22px 0">' + mc.help + '</div>' : '')
+            + '<div style="display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--border)"><h3 style="margin:0;font-size:18px">' + (respondMode ? 'Respond — ' + (mc.single || mc.title) + ' #' + id : mc.single ? (id ? 'Edit ' : 'New ') + mc.single : (id ? 'Edit ' : 'Add ') + mc.title.replace(/s$/, '')) + '</h3><button class="btn btn-outline btn-sm" onclick="masterClose()"><i class="fas fa-xmark"></i></button></div>'
+            + (respondMode ? '<div style="padding:16px 22px 0"><div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:10px 14px;font-size:12.5px;color:#9a3412;line-height:1.55"><i class="fas fa-lock"></i> What the employee submitted is locked so the record stays free and fair. You can update the <b>status</b> and add your <b>remarks</b> below.</div></div>' : (mc.help ? '<div style="padding:16px 22px 0">' + mc.help + '</div>' : ''))
             + '<div style="padding:22px;display:grid;grid-template-columns:1fr 1fr;gap:14px">' + f + '</div>'
             + '<div style="display:flex;gap:10px;justify-content:flex-end;padding:0 22px 20px"><button class="btn btn-outline" onclick="masterClose()">Cancel</button><button class="btn btn-primary" onclick="masterSave(\'' + type + '\',' + (id || 'null') + ')"><i class="fas fa-check"></i> Save</button></div>'
             + '</div>';
@@ -11158,12 +11728,12 @@ CSS;
     window.masterSave = function (type, id) {
         var mc = MASTER_MAP[type];
         var item = {}; if (id) { item.id = id; }
-        mc.fields.forEach(function (fl) { var el = document.getElementById('ms_' + fl.k); if (el) { item[fl.k] = el.value; } });
+        mc.fields.forEach(function (fl) { if (fl.type === 'files') { return; } var el = document.getElementById('ms_' + fl.k); if (el) { item[fl.k] = el.value; } });
         // Required-field validation is enforced server-side per screen (def.required);
         // the backend returns a specific "<Field> is required" message we surface below.
         fetch(cfg.masterBase + '/' + masterType(type), { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ item: item }) })
             .then(function (r) { return r.json(); }).then(function (j) {
-                if (j && j.ok) { if (typeof toast === 'function') { toast(j.warning ? ('Saved — ' + j.warning) : 'Saved'); } masterClose(); masterLoad(type); }
+                if (j && j.ok) { if (typeof toast === 'function') { toast(j.warning ? ('Saved — ' + j.warning) : 'Saved'); } if (mc.afterSave && typeof window[mc.afterSave] === 'function') { try { window[mc.afterSave](type, j.id || id); } catch (e) {} } masterClose(); masterLoad(type); }
                 else if (typeof toast === 'function') { toast((j && j.error) || 'Save failed'); }
             }).catch(function () { if (typeof toast === 'function') { toast('Save failed'); } });
     };
@@ -11187,7 +11757,7 @@ CSS;
     function inr(n) { return '₹' + Number(Math.round(n)).toLocaleString('en-IN'); }
     // Effective statutory rates: server-provided (window.__RATES) overlaid on safe defaults.
     function spRates() {
-        var d = { pf_wage_cap: 15000, pf_rate: 12, esi_threshold: 21000, esi_employee_rate: 0.75, esi_employer_rate: 3.25, pt_amount: 200, std_deduction: 75000, rebate_87a_limit: 1200000, cess_rate: 4, comm_tds_rate: 5, no_pan_tds_rate: 20, conveyance_enabled: 0, conveyance_rate: 0, lop_basis: 'working', payslip_show_ytd: 1, sandwich_rule: 0, bonus_pct: 8.33, tds_slabs: [{ upto: 400000, rate: 0 }, { upto: 800000, rate: 5 }, { upto: 1200000, rate: 10 }, { upto: 1600000, rate: 15 }, { upto: 2000000, rate: 20 }, { upto: 2400000, rate: 25 }, { upto: 0, rate: 30 }] };
+        var d = { pf_wage_cap: 15000, pf_rate: 12, esi_threshold: 21000, esi_employee_rate: 0.75, esi_employer_rate: 3.25, pt_amount: 200, std_deduction: 75000, rebate_87a_limit: 1200000, cess_rate: 4, comm_tds_rate: 5, no_pan_tds_rate: 20, conveyance_enabled: 0, conveyance_rate: 0, lop_basis: 'calendar', payslip_show_ytd: 1, sandwich_rule: 0, bonus_pct: 8.33, tds_slabs: [{ upto: 400000, rate: 0 }, { upto: 800000, rate: 5 }, { upto: 1200000, rate: 10 }, { upto: 1600000, rate: 15 }, { upto: 2000000, rate: 20 }, { upto: 2400000, rate: 25 }, { upto: 0, rate: 30 }] };
         var r = window.__RATES || {};
         var out = {}; for (var k in d) { out[k] = (r[k] != null) ? r[k] : d[k]; }
         if (!out.tds_slabs || !out.tds_slabs.length) { out.tds_slabs = d.tds_slabs; }
@@ -11422,7 +11992,7 @@ CSS;
             + '<div class="wrap">' + banner + sheet + legend + '</div></body></html>';
         var w = window.open('', '_blank');
         if (! w) { if (typeof toast === 'function') { toast('Popup blocked — allow popups for this site, then click View Sample Payslip again.'); } return; }
-        w.document.write(doc);
+        w.document.write(window.spDateHtml ? window.spDateHtml(doc) : doc);
         w.document.close();
     };
     window.psSetCo = function (v) { window.__psCo = v; if (typeof render === 'function') { render(); } };
@@ -11631,7 +12201,8 @@ CSS;
         holiday: ['Holiday', '#0891b2'],
         on_leave: ['On leave', '#7c3aed'],
         half_day: ['Half day', '#f59e0b'],
-        absent: ['Absent', '#dc2626']
+        absent: ['Absent', '#dc2626'],
+        not_marked: ['Not punched yet', '#94a3b8']   // 7 Oct 2026 - today only
     };
     // r.weekoff also fires for a PUNCHED day that's a roster week-off
     // (someone came in anyway) — r.status is only set on the no-punch
@@ -11734,12 +12305,26 @@ CSS;
             .then(function (j) { if (tok !== window.__musTok) { return; } window.__MUSTER = j; if (typeof render === 'function') { render(); } })
             .catch(function () { if (tok !== window.__musTok) { return; } window.__MUSTER = { rows: [], error: 'Could not reach the server.' }; if (typeof render === 'function') { render(); } });
     };
+    // 28-Sep (Ejaz): export exactly what the grid shows (same filters, codes, totals).
+    window.musDownload = function () {
+        var L = window.__musLast;
+        if (!L || !L.emps.length) { if (typeof toast === 'function') { toast('Nothing to export - load the report first.'); } return; }
+        var DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        var q = function (x) { return '"' + String(x).replace(/"/g, '""') + '"'; };
+        var lines = [['Employee', 'Code'].concat(L.days.map(function (ds) { return ds.slice(8) + ' ' + DOW[new Date(ds + 'T00:00:00Z').getUTCDay()]; }), L.tot.map(function (t) { return t[0]; })).map(q).join(',')];
+        L.emps.forEach(function (e) {
+            lines.push([e.name, e.code].concat(L.days.map(function (ds) { return e.d[ds] ? musCode(e.d[ds])[0] : ''; }), L.tot.map(function (t) { return e.n[t[1]]; })).map(q).join(','));
+        });
+        var blob = new Blob([String.fromCharCode(65279) + lines.join(String.fromCharCode(10))], { type: 'text/csv;charset=utf-8' });
+        var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'attendance-report-' + L.from + '-to-' + L.to + '.csv'; a.click();
+    };
     window.musSet = function (k, v) { window.__musF[k] = v; if (typeof render === 'function') { render(); } };
     // [code, text colour, cell background]. A punched day has no r.status → P
     // (a punch on a week-off/holiday counts as Present — the person came in).
     var MUS_CODE = {
         absent: ['A', '#991b1b', '#fee2e2'], weekly_off: ['WO', '#475569', '#f1f5f9'], holiday: ['H', '#0e7490', '#cffafe'],
-        on_leave: ['L', '#6d28d9', '#ede9fe'], half_day: ['HD', '#b45309', '#fef3c7']
+        on_leave: ['L', '#6d28d9', '#ede9fe'], half_day: ['HD', '#b45309', '#fef3c7'],
+        not_marked: ['-', '#64748b', '#f8fafc']   // 7 Oct 2026 - today, not punched yet (not an absence)
     };
     var MUS_P = ['P', '#166534', '#dcfce7'];
     function musCode(r) { return r.status ? (MUS_CODE[r.status] || MUS_CODE.absent) : MUS_P; }
@@ -11765,6 +12350,7 @@ CSS;
             + attField('To', '<input type="date" id="mus_to" value="' + to + '" style="' + attInp + '">')
             + sel('Company', 'company') + sel('Branch', 'branch') + sel('Department', 'department') + sel('Team', 'team') + sel('Employee', 'emp_code')
             + '<button class="btn btn-primary" onclick="musLoad()"><i class="fas fa-magnifying-glass"></i> Submit</button>'
+            + '<button class="btn btn-outline" onclick="musDownload()"><i class="fas fa-download"></i> Download CSV</button>'
             + '</div>';
         var days = [];
         for (var d = new Date(from + 'T00:00:00Z'); d <= new Date(to + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1)) { days.push(d.toISOString().slice(0, 10)); }
@@ -11801,12 +12387,14 @@ CSS;
                 var tip = c === MUS_P ? ('In ' + r.first_in + ' · Out ' + r.last_out + ' · ' + r.total_time) : attStatusText(r);
                 return '<td title="' + ds + ' · ' + tip + '" style="padding:6px 4px;text-align:center;border-top:1px solid var(--border)"><span style="display:inline-block;min-width:24px;padding:2px 3px;border-radius:5px;font-size:11px;font-weight:700;color:' + c[1] + ';background:' + c[2] + '">' + c[0] + '</span></td>';
             }).join('');
+            e.n = n;
             Object.keys(grand).forEach(function (k) { grand[k] += n[k]; });
             return '<tr><td style="padding:8px 10px;font-size:13px;font-weight:600;white-space:nowrap;border-top:1px solid var(--border);' + stick + '">' + e.name + ' <span style="color:var(--text3);font-weight:400">(' + e.code + ')</span></td>'
                 + cells
                 + TOT.map(function (t) { return '<td style="padding:6px 10px;text-align:center;font-weight:700;font-size:13px;border-top:1px solid var(--border);background:#f8fafc;color:' + t[2] + '">' + n[t[1]] + '</td>'; }).join('')
                 + '</tr>';
         }).join('');
+        window.__musLast = { from: from, to: to, days: days, emps: emps, tot: TOT };   // what musDownload() exports
         var chips = '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:14px">'
             + TOT.slice(1).map(function (t) { return attChip(t[0], grand[t[1]], t[2]); }).join('') + '</div>';
         var legend = '<div style="font-size:12px;color:var(--text3);margin:10px 2px">P Present · A Absent · L Leave · HD Half day · WO Weekly off · H Holiday · — no data · hover a cell for punch times</div>';
@@ -11949,6 +12537,9 @@ CSS;
                 window.__BELL = j;
                 var dot = document.getElementById('sp-bell-dot');
                 var n = (j && j.count) || 0;
+                // 30 Sep 2026 — when the notifications badge (rmBell) sits on this bell, it is
+                // the one count shown; two numbers on one icon was confusing.
+                if (dot && document.querySelector('#sp-bell .rm-badge')) { dot.style.display = 'none'; dot = null; }
                 if (dot) { dot.textContent = n > 99 ? '99+' : n; dot.style.display = n > 0 ? 'block' : 'none'; }
                 var p = document.getElementById('sp-bell-panel');
                 if (p && p.style.display === 'block') { bellRenderPanel(); }
@@ -12120,11 +12711,20 @@ CSS;
     window.mailSave = function () {
         var g = function (id) { var e = document.getElementById(id); return e ? e.value : ''; };
         var payload = { company_id: window.__mailSel || '0', host: g('m_host'), port: g('m_port'), username: g('m_user'), password: g('m_pass'), encryption: g('m_enc'), from_address: g('m_from'), from_name: g('m_fromname') };
+        if ((payload.encryption === 'ssl' && String(payload.port) === '587') || (payload.encryption === 'tls' && String(payload.port) === '465')) {
+            if (typeof toast === 'function') { toast('Port and encryption do not match: use 587 with TLS, or 465 with SSL.'); }
+            return;
+        }
         fetch(cfg.mailSaveUrl, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(payload) })
             .then(function (r) { return r.json(); }).then(function (d) {
                 if (d && d.ok) { window.__MAIL = null; if (typeof toast === 'function') { toast('SMTP settings saved'); } if (typeof render === 'function') { render(); } }
-                else if (typeof toast === 'function') { toast('Save failed — admin only'); }
-            }).catch(function () { if (typeof toast === 'function') { toast('Save failed'); } });
+                else if (typeof toast === 'function') {
+                    // 8 Oct 2026 (Ejaz) - show the server's real reason (demo lock, validation...), not a guess.
+                    var why = (d && (d.error || d.message)) || 'Save failed';
+                    if (d && d.errors) { why = Object.keys(d.errors).map(function (k) { return d.errors[k][0]; }).join(' '); }
+                    toast(why);
+                }
+            }).catch(function () { if (typeof toast === 'function') { toast('Save failed - the server did not answer'); } });
     };
     window.mailTest = function () {
         var to = (document.getElementById('m_test') || {}).value || '';
@@ -12133,8 +12733,8 @@ CSS;
             .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
             .then(function (res) {
                 if (res.ok && res.j && res.j.ok) { if (typeof toast === 'function') { toast(res.j.message || 'Test email sent'); } }
-                else if (typeof toast === 'function') { toast((res.j && res.j.error) || 'Test failed'); }
-            }).catch(function () { if (typeof toast === 'function') { toast('Test failed'); } });
+                else if (typeof toast === 'function') { toast((res.j && (res.j.error || res.j.message)) || ('Test failed (HTTP error)')); }
+            }).catch(function () { if (typeof toast === 'function') { toast('Test failed - the server did not answer (check the network / server log)'); } });
     };
     // Show Logs modal — every punch, break after each, totals, rating + remarks.
     window.attLogsOpen = function (code, date) {
@@ -12212,6 +12812,17 @@ CSS;
             if (d && d.ok) { if (typeof toast === 'function') { toast('Rating saved'); } attLogClose(); if (window.__attFrom) { attLoad(window.__attFrom, window.__attTo); } }
         }).catch(function () {});
     };
+    // 8 Oct 2026 (Ejaz) - same rule as AppDataController::statDeferred (this month).
+    function spStatDeferred(r, doj) {
+        var n = Number((r && r.stat_defer_months) || 0);
+        if (!n || !doj) { return []; }
+        var m = String(doj).match(/^(\d{4})-(\d{2})-(\d{2})/) || String(doj).match(/^(\d{2})-(\d{2})-(\d{4})/);
+        if (!m) { return []; }
+        var y = m[1].length === 4 ? +m[1] : +m[3], mo = +m[2];
+        var t = (y * 12 + (mo - 1)) + n, now = new Date();
+        if (now.getFullYear() * 12 + now.getMonth() >= t) { return []; }
+        return (r.stat_defer_items || ['pf', 'esi', 'pt', 'bonus']).slice();
+    }
     function statutoryScreen(id) {
         var emps = (typeof DB !== 'undefined' && DB.employees) || [];
         var period = new Date().toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
@@ -12221,8 +12832,9 @@ CSS;
             var rr = spRates();
             emps.forEach(function (e) {
                 var gross = (Number(e.ctc) || 0) / 12, basic = gross * 0.5;
-                var pfW = Math.min(basic, Number(rr.pf_wage_cap)), pe = Math.round(pfW * Number(rr.pf_rate) / 100), pr = pe;
-                var elig = gross <= Number(rr.esi_threshold), ee = elig ? Math.round(gross * Number(rr.esi_employee_rate) / 100) : 0, er = elig ? Math.round(gross * Number(rr.esi_employer_rate) / 100) : 0;
+                var dfr = spStatDeferred(rr, e.doj);   // 8 Oct 2026 - new-joiner statutory deferral
+                var pfW = dfr.indexOf('pf') >= 0 ? 0 : Math.min(basic, Number(rr.pf_wage_cap)), pe = Math.round(pfW * Number(rr.pf_rate) / 100), pr = pe;
+                var elig = gross <= Number(rr.esi_threshold) && dfr.indexOf('esi') < 0, ee = elig ? Math.round(gross * Number(rr.esi_employee_rate) / 100) : 0, er = elig ? Math.round(gross * Number(rr.esi_employer_rate) / 100) : 0;
                 pfEe += pe; pfEr += pr; esiEe += ee; esiEr += er;
                 body += '<tr><td><strong>' + e.id + '</strong></td><td>' + e.name + '</td><td>' + (e.uan || '—') + '</td><td>' + inr(pfW) + '</td><td>' + inr(pe) + '</td><td>' + inr(pr) + '</td><td>' + inr(ee) + '</td><td>' + inr(er) + '</td></tr>';
             });
@@ -12277,6 +12889,68 @@ CSS;
         var on = Number(val) ? 1 : 0;
         return '<div><label style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:4px">' + label + '</label><select id="rate_' + key + '" style="' + inp + '"><option value="1"' + (on ? ' selected' : '') + '>Enabled</option><option value="0"' + (on ? '' : ' selected') + '>Disabled</option></select></div>';
     }
+    // 2026-09-28 — Weekly offs moved from Statutory Rate Settings (PF/ESIC ->
+    // Edit Rates) to the end of Attendance -> Working Shifts. Same settings
+    // keys, same /app/settings save (it merges partial payloads), so payroll
+    // reads them exactly as before.
+    function weeklyOffCard() {
+        var r = window.__RATES;
+        if (!r) {
+            setTimeout(function () {
+                if (window.__RATES) { return; }
+                fetch(cfg.settingsUrl, { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin' })
+                    .then(function (x) { return x.json(); })
+                    .then(function (d) { window.__RATES = (d && d.rates) || {}; if (typeof render === 'function') { render(); } })
+                    .catch(function () {});
+            }, 10);
+            return '<div class="card" style="padding:16px 18px;margin-top:14px;color:var(--text3)">Loading weekly offs&hellip;</div>';
+        }
+        var selStyle = 'width:100%;padding:9px 11px;border:1.5px solid var(--border);border-radius:9px;font-size:14px;background:#f8fafc;font-family:var(--font2)';
+        var selLbl = 'font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:4px';
+        var mkSel = function (id, opts, cur) { return '<select id="wo_' + id + '" style="' + selStyle + '">' + opts.map(function (o) { return '<option value="' + o[0] + '"' + (String(cur || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>'; };
+        var wodOpts = [['sunday', 'Sunday'], ['monday', 'Monday'], ['tuesday', 'Tuesday'], ['wednesday', 'Wednesday'], ['thursday', 'Thursday'], ['friday', 'Friday'], ['saturday', 'Saturday']];
+        var satOpts = [['none', 'All Saturdays working'], ['2_4', '2nd & 4th Saturday off'], ['1_3', '1st & 3rd Saturday off'], ['all', 'All Saturdays off'], ['custom', 'Custom - choose the Saturdays']];
+        // 7 Oct 2026 (Ejaz) - weekly offs per company (override) + custom Saturdays.
+        var woCo = window.__woCo || '';
+        var coOver = woCo ? ((r.weekly_offs_company || {})[woCo] || null) : null;
+        var cur = coOver || r;
+        var weeks = (cur.sat_off_weeks || []).map(Number);
+        var coSel = '<select id="wo_company" onchange="window.__woCo=this.value;render()" style="' + selStyle + '"><option value="">All companies (default rule)</option>'
+            + ((typeof DB !== 'undefined' && DB.companies) || []).map(function (c) { var has = !!((r.weekly_offs_company || {})[String(c.id)]); return '<option value="' + c.id + '"' + (String(c.id) === woCo ? ' selected' : '') + '>' + c.name + (has ? ' (own rule)' : '') + '</option>'; }).join('') + '</select>';
+        var satSel = '<select id="wo_sat_off_mode" onchange="document.getElementById(&#39;wo_satweeks&#39;).style.display=(this.value===&#39;custom&#39;?&#39;flex&#39;:&#39;none&#39;)" style="' + selStyle + '">'
+            + satOpts.map(function (o) { return '<option value="' + o[0] + '"' + ((cur.sat_off_mode || 'none') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>';
+        var weekBoxes = '<div id="wo_satweeks" style="display:' + ((cur.sat_off_mode === 'custom') ? 'flex' : 'none') + ';gap:10px;flex-wrap:wrap;margin-top:6px">'
+            + [1, 2, 3, 4, 5].map(function (n) { return '<label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="wo_wk" value="' + n + '"' + (weeks.indexOf(n) >= 0 ? ' checked' : '') + '> ' + ['1st', '2nd', '3rd', '4th', '5th'][n - 1] + ' Sat</label>'; }).join('') + '</div>';
+        // rev177 — LOP / per-day basis: what one day of salary is worth when prorating.
+        var lopOpts = [['calendar', 'Calendar days (weekly offs, holidays & paid leave are paid days)'], ['fixed30', 'Fixed 30 days every month']];
+        return '<div class="card" style="padding:18px 20px;margin-top:14px">'
+            + '<h3 style="margin:0 0 6px;font-size:15px">Weekly offs (non-working days)</h3>'
+            + '<p style="font-size:12px;color:var(--text3);margin:0 0 10px">Payroll working days = days in month &minus; weekly offs below &minus; holidays from the <b>Leave &rarr; Holidays</b> calendar. Loss-of-pay is never charged for these days.</p>'
+            + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">'
+            + '<div><label style="' + selLbl + '">Applies to</label>' + coSel + '<div style="font-size:11px;color:var(--text3);margin-top:3px">' + (woCo ? (coOver ? 'This company has its own rule. <a style="cursor:pointer;color:var(--red)" onclick="weeklyOffSave(true)">Remove it</a> to follow the default.' : 'Saving creates this company&rsquo;s own rule.') : 'Pick a company to give it different weekly offs.') + '</div></div>'
+            + '<div><label style="' + selLbl + '">Weekly off day</label>' + mkSel('weekly_off_day', wodOpts, cur.weekly_off_day || 'sunday') + '</div>'
+            + '<div><label style="' + selLbl + '">Saturday policy</label>' + satSel + weekBoxes + '<div style="font-size:11px;color:var(--text3);margin-top:3px">e.g. banks/NBFCs: 2nd &amp; 4th Saturday off; Custom = tick any Saturdays</div></div>'
+            + (woCo ? '' : '<div><label style="' + selLbl + '">Salary / LOP day basis</label>' + mkSel('lop_basis', lopOpts, r.lop_basis === 'fixed30' ? 'fixed30' : 'calendar') + '<div style="font-size:11px;color:var(--text3);margin-top:3px">Weekly offs, holidays and paid leave are always paid days; only Absent and Leave without pay are LOP. Calendar: 1 LOP day costs gross &divide; days in month (e.g. "Total days 31, LOP 2"). Fixed 30: gross &divide; 30.</div></div>'
+            + '<div><label style="' + selLbl + '">Sandwich rule</label>' + mkSel('sandwich_rule', [['0', 'Off (default)'], ['1', 'On — off-day between two absent days = LOP']], String(r.sandwich_rule != null ? r.sandwich_rule : 0)) + '<div style="font-size:11px;color:var(--text3);margin-top:3px">Example: absent Saturday &amp; Monday &rarr; Sunday also becomes loss-of-pay when ON.</div></div>')
+            + '</div>'
+            + '<div style="text-align:right;margin-top:14px"><button class="btn btn-primary" onclick="weeklyOffSave()"><i class="fas fa-check"></i> Save Weekly Offs</button></div>'
+            + '</div>';
+    }
+    window.weeklyOffSave = function (clearCo) {
+        var g = function (k) { var el = document.getElementById('wo_' + k); return el ? el.value : ''; };
+        var weeks = [].slice.call(document.querySelectorAll('.wo_wk')).filter(function (c) { return c.checked; }).map(function (c) { return Number(c.value); });
+        if (g('sat_off_mode') === 'custom' && !weeks.length && !clearCo) { if (typeof toast === 'function') { toast('Tick at least one Saturday, or pick All Saturdays working'); } return; }
+        var co = window.__woCo || '';
+        var payload = { weekly_off_day: g('weekly_off_day'), sat_off_mode: g('sat_off_mode'), sat_off_weeks: weeks };
+        if (co) { payload.off_company_id = Number(co); if (clearCo === true) { payload.off_company_clear = true; } }
+        else { payload.lop_basis = g('lop_basis'); payload.sandwich_rule = Number(g('sandwich_rule') || 0); }
+        fetch(cfg.settingsSaveUrl, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(payload) })
+            .then(function (x) { return x.json(); })
+            .then(function (d) {
+                if (d && d.ok) { window.__RATES = d.rates; if (typeof toast === 'function') { toast(clearCo === true ? 'Company rule removed' : 'Weekly offs saved'); } if (typeof render === 'function') { render(); } }
+                else if (typeof toast === 'function') { toast('Save failed — admin only'); }
+            }).catch(function () { if (typeof toast === 'function') { toast('Save failed — admin only'); } });
+    };
     function rateSettingsRender(d) {
         var r = (d && d.rates) || spRates();
         var canManage = !d || d.canManage !== false;
@@ -12307,20 +12981,7 @@ CSS;
             + '</div>';
         var selStyle = 'width:100%;padding:9px 11px;border:1.5px solid var(--border);border-radius:9px;font-size:14px;background:#f8fafc;font-family:var(--font2)';
         var selLbl = 'font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:4px';
-        var wodOpts = [['sunday', 'Sunday'], ['monday', 'Monday'], ['tuesday', 'Tuesday'], ['wednesday', 'Wednesday'], ['thursday', 'Thursday'], ['friday', 'Friday'], ['saturday', 'Saturday']];
-        var satOpts = [['none', 'All Saturdays working'], ['2_4', '2nd & 4th Saturday off'], ['1_3', '1st & 3rd Saturday off'], ['all', 'All Saturdays off']];
-        // rev177 — LOP / per-day basis: what one day of salary is worth when prorating.
-        var lopOpts = [['working', 'Working days (month minus offs & holidays)'], ['calendar', 'Calendar days (offs & holidays are paid)'], ['fixed30', 'Fixed 30 days every month']];
         var mkSel = function (id, opts, cur) { return '<select id="rate_' + id + '" style="' + selStyle + '">' + opts.map(function (o) { return '<option value="' + o[0] + '"' + (String(cur || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>'; };
-        var weekOff = '<h3 style="margin:20px 0 6px;font-size:15px">Weekly offs (non-working days)</h3>'
-            + '<p style="font-size:12px;color:var(--text3);margin:0 0 8px">Payroll working days = days in month &minus; weekly offs below &minus; holidays from the <b>Leave &rarr; Holidays</b> calendar. Loss-of-pay is never charged for these days.</p>'
-            + '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">'
-            + '<div><label style="' + selLbl + '">Weekly off day</label>' + mkSel('weekly_off_day', wodOpts, r.weekly_off_day || 'sunday') + '</div>'
-            + '<div><label style="' + selLbl + '">Saturday policy</label>' + mkSel('sat_off_mode', satOpts, r.sat_off_mode || 'none') + '<div style="font-size:11px;color:var(--text3);margin-top:3px">e.g. banks/NBFCs: 2nd &amp; 4th Saturday off</div></div>'
-            + '<div><label style="' + selLbl + '">Salary / LOP day basis</label>' + mkSel('lop_basis', lopOpts, r.lop_basis || 'working') + '<div style="font-size:11px;color:var(--text3);margin-top:3px">Calendar: 1 LOP day costs gross &divide; days in month (matches most Indian payslips, e.g. "Total days 31"). Working: gross &divide; working days. Fixed 30: gross &divide; 30.</div></div>'
-            + '<div><label style="' + selLbl + '">Sandwich rule</label>' + mkSel('sandwich_rule', [['0', 'Off (default)'], ['1', 'On — off-day between two absent days = LOP']], String(r.sandwich_rule != null ? r.sandwich_rule : 0)) + '<div style="font-size:11px;color:var(--text3);margin-top:3px">Example: absent Saturday &amp; Monday &rarr; Sunday also becomes loss-of-pay when ON.</div></div>'
-            + '</div>';
-        grid += weekOff;
         // rev181 — money-point gates (collection industry): DRA validity + points eligibility.
         var gateOpts = [['off', 'Off - no check'], ['warn', 'Warn - pay but flag (default)'], ['block', 'Block - refuse until valid']];
         var gates = '<h3 style="margin:20px 0 6px;font-size:15px">Money-point gates (collection industry)</h3>'
@@ -12331,6 +12992,19 @@ CSS;
             + rateField('Incentive payout lag (months, 0 = off)', 'incentive_payout_lag', r.incentive_payout_lag != null ? r.incentive_payout_lag : 0, 'Entries without a payout date auto-pay N months after the earned month — the retention-guard lag.')
             + '</div>';
         grid += gates;
+        // 8 Oct 2026 (Ejaz) - statutory deferral for new joiners (probation etc.).
+        var dItems = r.stat_defer_items || ['pf', 'esi', 'pt', 'bonus'];
+        var dOn = Number(r.stat_defer_months || 0) > 0;
+        grid += '<h3 style="margin:20px 0 6px;font-size:15px;display:flex;align-items:center;gap:10px">Statutory not applicable for new joiners'
+            + ' <button type="button" class="btn btn-outline btn-sm" onclick="var p=document.getElementById(&#39;rate_defer_box&#39;);p.style.display=(p.style.display===&#39;none&#39;?&#39;block&#39;:&#39;none&#39;)"><i class="fas fa-sliders"></i> Customize</button>'
+            + '<span style="font-size:12px;font-weight:600;color:' + (dOn ? 'var(--green,#16a34a)' : 'var(--text3)') + '">' + (dOn ? 'ON - first ' + Number(r.stat_defer_months) + ' month(s)' : 'Off') + '</span></h3>'
+            + '<div id="rate_defer_box" style="display:' + (dOn ? 'block' : 'none') + ';border:1px dashed var(--border);border-radius:10px;padding:12px 14px">'
+            + '<p style="font-size:12px;color:var(--text3);margin:0 0 10px">Counted from the <b>Date of Joining</b>. The ticked items are not deducted until the months complete, and apply from that payroll month. Example: joined 15-01-2026, 3 months &rarr; no PF / ESI / PT for Jan, Feb, Mar; deducted from the <b>April</b> payroll. 0 = off. Used by payroll generation, payslips, Live Salary, the PF / ESIC challans, the PT report and the Bonus register.</p>'
+            + '<div style="display:grid;grid-template-columns:1fr 2fr;gap:14px;align-items:start">'
+            + rateField('Not applicable for (months)', 'stat_defer_months', r.stat_defer_months != null ? r.stat_defer_months : 0, '0 = off')
+            + '<div><label style="' + selLbl + '">Items not applicable</label><div style="display:flex;gap:16px;flex-wrap:wrap;padding-top:6px">'
+            + [['pf', 'PF (employee + employer)'], ['esi', 'ESI (employee + employer)'], ['pt', 'Professional Tax'], ['bonus', 'Statutory Bonus']].map(function (o) { return '<label style="font-size:13px;display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="rate_defer_item" value="' + o[0] + '"' + (dItems.indexOf(o[0]) >= 0 ? ' checked' : '') + '> ' + o[1] + '</label>'; }).join('')
+            + '</div></div></div></div>';
         // F4 — attendance notifications.
         var att = '<h3 style="margin:20px 0 6px;font-size:15px">Attendance notifications</h3>'
             + '<p style="font-size:12px;color:var(--text3);margin:0 0 8px">When ON, an employee who arrives late (first punch after shift start + grace, per the <b>Late Policy</b>) is emailed automatically the moment the punch is recorded — the reporting manager is cc\'d when known. Requires employee emails and a configured mail server.</p>'
@@ -12353,13 +13027,14 @@ CSS;
         m.onclick = function (e) { if (e.target === m) { rateSettingsClose(); } };
     }
     window.rateSettingsSave = function () {
-        var keys = ['pf_wage_cap', 'pf_rate', 'pt_amount', 'pt_female_exempt', 'pt_female_exempt_upto', 'esi_threshold', 'esi_employee_rate', 'esi_employer_rate', 'std_deduction', 'rebate_87a_limit', 'cess_rate', 'comm_tds_rate', 'no_pan_tds_rate', 'conveyance_enabled', 'conveyance_rate', 'bonus_pct', 'sandwich_rule', 'points_gate_min', 'incentive_payout_lag', 'late_email_enabled'];
+        var keys = ['pf_wage_cap', 'pf_rate', 'pt_amount', 'pt_female_exempt', 'pt_female_exempt_upto', 'esi_threshold', 'esi_employee_rate', 'esi_employer_rate', 'std_deduction', 'rebate_87a_limit', 'cess_rate', 'comm_tds_rate', 'no_pan_tds_rate', 'conveyance_enabled', 'conveyance_rate', 'bonus_pct', 'sandwich_rule', 'points_gate_min', 'incentive_payout_lag', 'late_email_enabled', 'stat_defer_months'];
         var payload = {};
         keys.forEach(function (k) { var el = document.getElementById('rate_' + k); if (el && el.value !== '') { payload[k] = Number(el.value); } });
         ['weekly_off_day', 'sat_off_mode', 'lop_basis', 'dra_gate'].forEach(function (k) { var el = document.getElementById('rate_' + k); if (el && el.value !== '') { payload[k] = el.value; } });
         var uptos = document.querySelectorAll('.slab_upto'); var rs = document.querySelectorAll('.slab_rate');
         var slabs = []; for (var i = 0; i < uptos.length; i++) { slabs.push({ upto: Number(uptos[i].value) || 0, rate: Number(rs[i].value) || 0 }); }
         payload.tds_slabs = slabs;
+        payload.stat_defer_items = [].slice.call(document.querySelectorAll('.rate_defer_item')).filter(function (c) { return c.checked; }).map(function (c) { return c.value; });   // 8 Oct 2026
         fetch(cfg.settingsSaveUrl, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(payload) })
             .then(function (r) { return r.json(); })
             .then(function (d) {
@@ -12401,7 +13076,7 @@ CSS;
             + sfd('Salary structure', 'company', compOpts, '', 'Pick a company to apply ITS component structure')
             + sfd('Employment stage', 'stage', [['', 'Permanent'], ['probation', 'Probation — no PF / PT / TDS'], ['internship', 'Internship — no PF / PT / TDS']], '')
             + fld('PT state (optional)', 'ptstate', '', 'text', 'e.g. Telangana, Maharashtra — drives the state PT slab; blank = default slab')
-            + sfd('LOP day basis', 'basis', [['working', 'Working days'], ['calendar', 'Calendar days (offs paid)'], ['fixed30', 'Fixed 30 days']], (r.lop_basis || 'working'), 'What one absent day costs')
+            + sfd('LOP day basis', 'basis', [['calendar', 'Calendar days (offs paid)'], ['fixed30', 'Fixed 30 days']], (r.lop_basis === 'fixed30' ? 'fixed30' : 'calendar'), 'What one absent day costs')
             + fld('LOP / absent days', 'lop', 0, 'number', 'Days of pay lost this month')
             + divider('Extra earnings')
             + fld('Commission / incentive (₹ net)', 'comm', 0, 'number', 'Approved commission due this month, after TDS')
@@ -12535,7 +13210,7 @@ CSS;
     function sampleVal(k) {
         k = (k || '').toLowerCase();
         if (k.indexOf('email') >= 0) { return 'sample@company.in'; }
-        if (k.indexOf('date') >= 0 || k === 'doj' || k === 'dob') { return '2026-01-01'; }
+        if (k.indexOf('date') >= 0 || k === 'doj' || k === 'dob') { return '01-01-2026'; }
         if (k.indexOf('mobile') >= 0 || k.indexOf('phone') >= 0 || k.indexOf('whatsapp') >= 0) { return '+919999999999'; }
         if (k.indexOf('amount') >= 0 || k.indexOf('ctc') >= 0 || k.indexOf('salary') >= 0 || k.indexOf('rate') >= 0 || k.indexOf('price') >= 0 || k.indexOf('emi') >= 0) { return '10000'; }
         if (k.indexOf('status') >= 0) { return 'Active'; }
@@ -12653,6 +13328,17 @@ CSS;
 })();
 </script>
 HTML;
+
+        // 30 Sep 2026 (Ejaz) — Asset Stock + Asset Issue & Returns screens. A plain
+        // static file loaded right after the boot script (runs before boot()), so its
+        // JS never passes through the heredoc above. ?v= busts the browser cache.
+        foreach (['smartprs-dates.js', 'smartprs-assets.js', 'smartprs-requests.js', 'smartprs-complaints.js', 'smartprs-menu-trim.js', 'smartprs-pt-slabs.js', 'smartprs-leave-report.js'] as $extraJs) {   // 1 Oct 2026 (Ejaz) - menu trims: Escalation Desk only under Main, no Banks under Administration.
+              // 30 Sep 2026 — + request View / Edit dialogs
+            $extraPath = public_path('js/'.$extraJs);
+            if (is_file($extraPath)) {
+                $boot .= '<script src="'.e(asset('js/'.$extraJs)).'?v='.filemtime($extraPath).'"></script>';
+            }
+        }
 
         // Inject before the LAST </body> (the real document end), so we never
         // land inside a JS string that happens to contain "</body>".

@@ -122,14 +122,14 @@ class CodeOfConductController extends Controller
                     ->get(['employee', 'ack_date'])
                     ->map(fn ($a) => [
                         'employee' => $a->employee ?: '—',
-                        'date' => $a->ack_date ? Carbon::parse($a->ack_date)->format('d M Y') : '',
+                        'date' => $a->ack_date ? Carbon::parse($a->ack_date)->format('d-m-Y') : '',
                     ])->values();
             }
 
             return response()->json([
                 'content' => $content,
                 'acknowledged' => (bool) $mine,
-                'ackDate' => $mine && $mine->ack_date ? Carbon::parse($mine->ack_date)->format('d M Y') : null,
+                'ackDate' => $mine && $mine->ack_date ? Carbon::parse($mine->ack_date)->format('d-m-Y') : null,
                 'me' => $this->personName($request),
                 'canManage' => $canManage,
                 'acks' => $acks,
@@ -175,7 +175,7 @@ class CodeOfConductController extends Controller
                 DB::table('code_of_conduct_ack')->insert($data);
             }
 
-            return response()->json(['ok' => true, 'message' => 'Thank you — your acknowledgement is recorded.', 'date' => now()->format('d M Y')]);
+            return response()->json(['ok' => true, 'message' => 'Thank you — your acknowledgement is recorded.', 'date' => now()->format('d-m-Y')]);
         } catch (\Throwable $e) {
             return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
         }

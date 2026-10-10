@@ -62,7 +62,9 @@ class AppDataController extends Controller
             // 27 Aug 2026 (Ejaz) — DRA EXPIRY / PCC EXPIRY are import-template
             // columns and are now captured on the Documents tab, so an install
             // patched before the create-table carried them still gets them.
-            'dra_expiry', 'pcc_expiry'];
+            'dra_expiry', 'pcc_expiry',
+            // 7 Oct 2026 (Ejaz) — Access Role (Roles & Permissions label) per employee.
+            'access_role'];
         $missing = array_values(array_filter($cols, fn ($c) => ! Schema::hasColumn('employees', $c)));
         if (! $missing) {
             return;
@@ -220,28 +222,51 @@ class AppDataController extends Controller
      */
     public static function selfScope(Request $request, bool $allNonPrivileged = false): ?array
     {
+        // 7 Oct 2026 (Ejaz) — HIERARCHY: a scoped login sees its own record PLUS
+        // everyone reporting to it, any depth (U3 sees U1+U2; U4 sees U3+U1+U2).
+        // Who is scoped: App\Services\Hierarchy::teamScoped() — Employee / Field
+        // Agent, any role set to Self on Roles & Permissions, unconfigured custom
+        // roles. Admin, Super Admin, HR and Company/Group-scope roles see all.
+        // 'id'/'code' stay the login's own record; 'ids'/'codes' are the visible set.
         $user = $request->user();
-        if (! $user || $user->hasAnyRole(['super_admin', 'admin', 'hr_manager'])) {
+        $ids = \App\Services\Hierarchy::visibleIds($user);
+        if ($ids === null) {
             return null;
         }
-        // rev190 — attendance callers pass $allNonPrivileged=true so a Field Agent
-        // (not just the 'employee' role) is also scoped to their own punches; the
-        // Directory/bootstrap callers keep the stricter employee-only default.
-        if (! $allNonPrivileged && ! $user->hasRole('employee')) {
-            return null;
+        $tid = $user->tenant_id ? (int) $user->tenant_id : null;
+        $me = \App\Services\Hierarchy::meId($user);
+        $codes = \App\Services\Hierarchy::codes($ids, $tid);
+        $myCode = $me ? (\App\Services\Hierarchy::codes([$me], $tid)[0] ?? '__no_such_employee__') : '__no_such_employee__';
+
+        return ['id' => $me ?? -1, 'code' => $myCode, 'ids' => $ids, 'codes' => $codes ?: ['__no_such_employee__']];
+    }
+
+    /**
+     * 29 Sep 2026 — this login's row from Roles & Permissions (saved in the
+     * tenant's app_state, matched by role label like the browser does), or null.
+     */
+    public static function roleMatrixRow($user): ?array
+    {
+        static $memo = [];
+        $label = AppController::roleLabel($user->getRoleNames()->first());
+        $tk = (int) ($user->tenant_id ?? 0);
+        $key = $tk.'|'.$label;
+        if (array_key_exists($key, $memo)) {
+            return $memo[$key];
         }
-        $tid = $user->tenant_id;
-        $e = null;
-        if (! empty($user->employee_id)) {
-            $e = DB::table('employees')->where('id', $user->employee_id)->whereNull('deleted_at')->first();
+        $memo[$key] = null;
+        try {
+            $state = json_decode((string) DB::table('settings')->where('tenant_id', $tk)->where('key', 'app_state')->value('value'), true);
+            foreach ((array) ($state['roles'] ?? []) as $r) {
+                if (is_array($r) && strcasecmp(trim((string) ($r['role'] ?? '')), $label) === 0) {
+                    $memo[$key] = $r;
+                    break;
+                }
+            }
+        } catch (\Throwable $e) {
         }
-        if (! $e) {
-            $e = DB::table('employees')->whereNull('deleted_at')
-                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
-                ->where(fn ($q) => $q->where('email', $user->email)->orWhere('name', $user->name))
-                ->first();
-        }
-        return ['id' => (int) ($e->id ?? -1), 'code' => (string) ($e->emp_code ?? '__no_such_employee__')];
+
+        return $memo[$key];
     }
 
     public function bootstrap(Request $request)
@@ -254,6 +279,13 @@ class AppDataController extends Controller
             // adding optional hierarchy columns is best-effort; never block bootstrap
         }
 
+        // 7 Oct 2026 — reporting-line FKs follow the Reporting Manager names (at most every 10 min).
+        try {
+            if (\Illuminate\Support\Facades\Cache::add('hier-sync-'.(int) $tenantId, 1, 600)) {
+                \App\Services\Hierarchy::syncManagerIds($tenantId ? (int) $tenantId : null);
+            }
+        } catch (\Throwable $e) {
+        }
         self::processDueBackups($tenantId);   // rev183d — run any elapsed 3-day backup schedules first
         $empQ = DB::table('employees')->whereNull('deleted_at');
         if (Schema::hasColumn('employees', 'archived_at')) { $empQ->whereNull('archived_at'); }   // rev183b — hide backed-up (Old data) employees
@@ -267,7 +299,7 @@ class AppDataController extends Controller
         // from $emps, so scoping here isolates every one of them.
         $selfScope = self::selfScope($request);
         if ($selfScope) {
-            $empQ->where('id', $selfScope['id']);
+            $empQ->whereIn('id', $selfScope['ids']);   // 7 Oct 2026 — own record + reporting line
         }
 
         $deptNames = DB::table('departments')->pluck('name', 'id');
@@ -299,7 +331,21 @@ class AppDataController extends Controller
         $refsByEmp = DB::table('employee_references')
             ->whereIn('employee_id', $emps->pluck('id'))->get()->groupBy('employee_id');
 
-        $employees = $emps->map(function ($e) use ($deptNames, $desigNames, $compNames, $branchNames, $teamNames, $teamLeaderId, $empNames, $refsByEmp, $scheduleLabels) {
+        // 7 Oct 2026 — the role of each employee's linked login (shown when the
+        // employee row has no Access Role of its own yet).
+        $loginRole = [];
+        try {
+            if (Schema::hasTable('model_has_roles') && Schema::hasColumn('users', 'employee_id')) {
+                foreach (DB::table('users as u')->join('model_has_roles as mr', fn ($j) => $j->on('mr.model_id', '=', 'u.id')->where('mr.model_type', \App\Models\User::class))
+                    ->join('roles as r', 'r.id', '=', 'mr.role_id')->whereNotNull('u.employee_id')
+                    ->when($tenantId, fn ($q) => $q->where('u.tenant_id', $tenantId))
+                    ->get(['u.employee_id', 'r.name']) as $lr) {
+                    $loginRole[(int) $lr->employee_id] = AppController::roleLabel($lr->name);
+                }
+            }
+        } catch (\Throwable $e) {
+        }
+        $employees = $emps->map(function ($e) use ($deptNames, $desigNames, $compNames, $branchNames, $teamNames, $teamLeaderId, $empNames, $refsByEmp, $scheduleLabels, $loginRole) {
             $refs = ($refsByEmp[$e->id] ?? collect())->map(fn ($r) => [
                 'name' => $r->name, 'relation' => $r->relation, 'aadhaar' => $r->aadhaar,
                 'pan' => $r->pan, 'mobile' => $r->mobile,
@@ -346,6 +392,8 @@ class AppDataController extends Controller
                 // for 'Field'.)
                 'type' => $col('type') === 'field' ? 'Field' : 'Office',
                 'employment_stage' => \App\Services\EmployeeFieldRules::EMPLOYMENT_STAGE[(string) ($col('employment_stage') ?? '')] ?? 'Permanent',
+                'probationMonths' => $col('probation_months') ?: '',   // 2026-09-28
+                'accessRole' => $col('access_role') ?: ($loginRole[(int) $col('id')] ?? ''),   // 7 Oct 2026 — Roles & Permissions
                 'doj' => $col('doj') ?? '',
                 // 2026-08-05 — FIX "edits revert after refresh": these form fields
                 // were SAVED by storeEmployee but never sent back here, so after a
@@ -442,7 +490,7 @@ class AppDataController extends Controller
                 'seatsLicensed' => (int) $t->seats_licensed,
                 'mrr' => (float) $t->mrr,
                 'deployment' => $t->deployment === 'saas' ? 'SaaS' : 'On-Premise',
-                'signup' => $t->created_at ? \Illuminate\Support\Carbon::parse($t->created_at)->format('d M Y') : '',
+                'signup' => $t->created_at ? \Illuminate\Support\Carbon::parse($t->created_at)->format('d-m-Y') : '',
             ])->values();
         }
 
@@ -541,7 +589,7 @@ class AppDataController extends Controller
                 $arQ->whereNotNull('deleted_at');
             }
             if ($tenantId) { $arQ->where('tenant_id', $tenantId); }
-            if ($selfScope) { $arQ->where('id', $selfScope['id']); }
+            if ($selfScope) { $arQ->whereIn('id', $selfScope['ids']); }
             $arRows = $arQ->orderByRaw($hasArch ? 'COALESCE(archived_at, deleted_at) DESC' : 'deleted_at DESC')->limit(1000)->get();
             $archived = $arRows->map(function ($e) use ($deptNames, $compNames) {
                 $a = (array) $e;
@@ -859,6 +907,7 @@ class AppDataController extends Controller
                 $skipped++;
             }
         }
+        \App\Services\Hierarchy::syncManagerIds($request->user()->tenant_id ? (int) $request->user()->tenant_id : null);   // 7 Oct 2026
 
         return response()->json([
             'ok' => true,
@@ -964,6 +1013,8 @@ class AppDataController extends Controller
             '@shifts' => ['header' => 'SHIFTS', 'values' => $names('shifts')],
             '@schedules' => ['header' => 'SALARY SCHEDULES', 'values' => $names('salary_schedules')],
             '@ptStates' => ['header' => 'PT STATES', 'values' => $rules::PT_STATES],
+            // 7 Oct 2026 — ACCESS ROLE dropdown = built-ins + the tenant's Roles & Permissions rows.
+            '@roles' => ['header' => 'ACCESS ROLES', 'values' => \App\Services\AccessRoles::labels($tenantId ? (int) $tenantId : null)],
         ];
         $lists = array_values($sources);
         $srcCol = array_flip(array_keys($sources));
@@ -1155,8 +1206,8 @@ class AppDataController extends Controller
             ->first();   // rev183c — include archived/deleted so Old-data payslip links work (self-scope 403 still applies)
         // rev175 — an employee may download only their OWN payslip.
         $selfScope = self::selfScope($request);
-        if ($selfScope && $selfScope['code'] !== $code) {
-            abort(403, 'You can only access your own payslip.');
+        if ($selfScope && ! in_array(strtolower($code), array_map('strtolower', $selfScope['codes']), true)) {
+            abort(403, 'You can only access your own payslip or those of people reporting to you.');
         }
 
         if (! $e) {
@@ -1260,7 +1311,8 @@ class AppDataController extends Controller
             ];
             $note = Schema::hasColumn('payslips', 'calc_note') ? ($slipRow->calc_note ?? null) : null;
         } else {
-            $s = self::computeSlip((float) $e->ctc, $rates, (string) ($e->employment_stage ?? ''));
+            $s = self::computeSlip((float) $e->ctc, $rates, (string) ($e->employment_stage ?? ''), ['doj' => $e->doj ?? null, 'month' => $month,   // 8 Oct 2026 — statutory deferral
+                'company_id' => $e->company_id ?? null, 'pt_state' => (string) ($e->pt_state ?? ''), 'gender' => (string) ($e->gender ?? '')] + self::ptCtx($e));   // 10 Oct 2026 — PT rules
         }
 
         // --- rev162 (Payslip Phase 1, DISPLAY-ONLY): richer, A4 payslip metadata.
@@ -1273,9 +1325,17 @@ class AppDataController extends Controller
         // Paid days / LOP — read from the calc note if it recorded proration,
         // otherwise assume a full month (no LOP).
         $totalDays = \Illuminate\Support\Carbon::parse($month.'-01')->daysInMonth;
+        if (! empty($slipRow->period_start) && ! empty($slipRow->period_end)) {   // 7 Oct 2026 — the pay cycle's days
+            $totalDays = (int) \Illuminate\Support\Carbon::parse($slipRow->period_start)->diffInDays(\Illuminate\Support\Carbon::parse($slipRow->period_end)) + 1;
+        }
         $paidDays = $totalDays;
         $lopDays = 0;
-        if ($note && preg_match('/Paid\s+([\d.]+)\s+of\s+(\d+)\s+days/i', $note, $pm)) {
+        if ($note && preg_match('/Payslip days: Paid ([\d.]+) \/ LOP ([\d.]+) of ([\d.]+)/', $note, $pm)) {
+            // 7 Oct 2026 — written by the payroll engine: paid / LOP in the LOP basis's own days.
+            $paidDays = (float) $pm[1];
+            $lopDays = (float) $pm[2];
+            $totalDays = (float) $pm[3];
+        } elseif ($note && preg_match('/Paid\s+([\d.]+)\s+of\s+(\d+)\s+days/i', $note, $pm)) {
             $paidDays = (float) $pm[1];
             $totalDays = (int) $pm[2];
             $lopDays = round($totalDays - $paidDays, 1);
@@ -1368,7 +1428,9 @@ class AppDataController extends Controller
             'ytd' => $ytd,
             'showYtd' => (int) ($rates['payslip_show_ytd'] ?? 1) !== 0, // rev179 — YTD column toggle (Payslip Policy)
             'netWords' => self::amountInWords((float) ($s['net'] ?? 0)),
-            'payDate' => self::payDateFor($e->tenant_id ?? null, (string) ($company->name ?? ''), $month), // rev181b
+            // 7 Oct 2026 — the pay date the run recorded; the master only when no run exists.
+            'payDate' => (($slipRow && ! empty($slipRow->run_id)) ? substr((string) DB::table('payroll_runs')->where('id', $slipRow->run_id)->value('pay_date'), 0, 10) : '')
+                ?: self::payDateFor($e->tenant_id ?? null, (string) ($company->name ?? ''), $month),
         ];
     }
 
@@ -1382,46 +1444,11 @@ class AppDataController extends Controller
      */
     public static function payDateFor($tid, string $companyName, string $month): string
     {
-        $cn = strtolower(trim($companyName));
-        try {
-            $payDay = 0; $cutoff = 0; $bestGeneric = 0; $bestGenericCut = 0;
-            foreach (['salary_schedules', 'pay_cycles'] as $table) {
-                if (! Schema::hasTable($table) || ! Schema::hasColumn($table, 'pay_day')) {
-                    continue;
-                }
-                $rows = DB::table($table)
-                    ->when($tid && Schema::hasColumn($table, 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
-                    ->when(Schema::hasColumn($table, 'status'), fn ($q) => $q->where(fn ($x) => $x->where('status', 'active')->orWhereNull('status')))
-                    ->orderByDesc('id')->limit(50)->get();
-                foreach ($rows as $row) {
-                    $rcn = strtolower(trim((string) ($row->company_name ?? '')));
-                    if ($rcn !== '' && $rcn !== 'all' && $rcn !== $cn) {
-                        continue;
-                    }
-                    $pd = (int) ($row->pay_day ?? 0);
-                    if ($pd < 1 || $pd > 28) {
-                        continue;
-                    }
-                    $co = Schema::hasColumn($table, 'cutoff_day') ? (int) ($row->cutoff_day ?? 0) : 0;
-                    if ($rcn !== '' && $rcn !== 'all') {
-                        $payDay = $pd; $cutoff = $co;
-                        break 2;
-                    }
-                    if ($bestGeneric === 0) { $bestGeneric = $pd; $bestGenericCut = $co; }
-                }
-            }
-            if ($payDay === 0 && $bestGeneric > 0) { $payDay = $bestGeneric; $cutoff = $bestGenericCut; }
-            if ($payDay >= 1 && $payDay <= 28) {
-                $base = \Illuminate\Support\Carbon::createFromFormat('Y-m-d', $month.'-01');
-                $d = ($cutoff >= 2 && $cutoff <= 28)
-                    ? $base->day($payDay)                          // cut-off cycle -> pay this run month
-                    : $base->addMonthNoOverflow()->day($payDay);   // calendar cycle -> pay next month
-                return $d->toDateString();
-            }
-        } catch (\Throwable $e) {
-        }
+        // 7 Oct 2026 (Ejaz) — one rule, in PeriodResolver::window(): the first
+        // pay day after the attendance period ends; no pay day → the period end.
+        $w = \App\Services\PeriodResolver::window($tid ? (int) $tid : null, $companyName, $month);
 
-        return \Illuminate\Support\Carbon::createFromFormat('Y-m-d', $month.'-01')->endOfMonth()->toDateString();
+        return $w['pay_date'] ?: $w['end'];
     }
 
     /** "Rupees Twenty Thousand One Hundred One Only" (Indian numbering, incl. paise). */
@@ -1511,7 +1538,7 @@ class AppDataController extends Controller
             return '—';
         };
         $doj = (property_exists($e, 'doj') && $e->doj)
-            ? \Illuminate\Support\Carbon::parse($e->doj)->format('d M Y') : '—';
+            ? \Illuminate\Support\Carbon::parse($e->doj)->format('d-m-Y') : '—';
 
         return [
             'designation' => $name('designation', 'designation_id', 'designations'),
@@ -1666,8 +1693,8 @@ class AppDataController extends Controller
                 ['k' => 'total', 'l' => 'Total', 'amt' => true],
             ];
             foreach ($emps as $e) {
-                $s = self::computeSlip((float) $e->ctc, $rates, (string) ($e->employment_stage ?? ''));
-                $wage = min($s['basic'], (float) $rates['pf_wage_cap']);
+                $s = self::computeSlip((float) $e->ctc, $rates, (string) ($e->employment_stage ?? ''), ['doj' => $e->doj ?? null, 'month' => now()->format('Y-m')]);
+                $wage = $s['pf'] > 0 ? min($s['basic'], (float) $rates['pf_wage_cap']) : 0;   // 8 Oct 2026 — deferred / exempt → no PF wage
                 $ee = $s['pf']; $er = $ee; $tot = $ee + $er;
                 $addSum($sum, 'basic', $wage); $addSum($sum, 'ee', $ee); $addSum($sum, 'er', $er); $addSum($sum, 'total', $tot);
                 $rows[] = ['code' => $e->emp_code, 'name' => $e->name, 'uan' => $e->uan ?: '—', 'basic' => $n2($wage), 'ee' => $n2($ee), 'er' => $n2($er), 'total' => $n2($tot)];
@@ -1684,7 +1711,7 @@ class AppDataController extends Controller
             ];
             foreach ($emps as $e) {
                 $s = self::computeSlip((float) $e->ctc, $rates, (string) ($e->employment_stage ?? ''));
-                $elig = $s['gross'] <= $esiThreshold;
+                $elig = $s['gross'] <= $esiThreshold && ! in_array('esi', self::statDeferred($rates, $e->doj ?? null, now()->format('Y-m')), true);   // 8 Oct 2026 — statutory deferral
                 $ee = $elig ? round($s['gross'] * $esiEeRate, 2) : 0;
                 $er = $elig ? round($s['gross'] * $esiErRate, 2) : 0;
                 $tot = $ee + $er;
@@ -1804,7 +1831,7 @@ class AppDataController extends Controller
                 'deductees' => $deductees,
                 'taxDeducted' => $perQ,
                 'deposited' => $status === 'Filed' ? $perQ : 0,
-                'dueDate' => $due->format('d M Y'),
+                'dueDate' => $due->format('d-m-Y'),
                 'status' => $status,
             ];
         }
@@ -1916,14 +1943,125 @@ class AppDataController extends Controller
     }
 
     /**
+     * 10 Oct 2026 (Ejaz) — every custom PT rule as [company, branches, designations, genders, slabs].
+     * New rules live in rates.pt_custom_rules (Salary Structure card). The 8 Oct
+     * per-company map rates.pt_custom_slabs is still read, as company-only rules.
+     */
+    public static function ptRules(array $r): array
+    {
+        $out = [];
+        foreach ((array) ($r['pt_custom_rules'] ?? []) as $x) {
+            if (is_array($x) && ! empty($x['slabs']) && is_array($x['slabs'])) {
+                $out[] = $x;
+            }
+        }
+        foreach ((array) ($r['pt_custom_slabs'] ?? []) as $k => $rows) {
+            if (is_array($rows) && $rows) {
+                $out[] = ['company' => $k === 'all' ? 0 : (int) $k, 'slabs' => $rows];
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Custom PT slab rows [[from, to, amt], ...] for this employee, or null.
+     * A rule matches when every criterion it sets (company, branches,
+     * designations, genders) holds for the employee. MOST SPECIFIC WINS (Ejaz,
+     * 10 Oct): the matching rule with the most criteria decides; on a tie the
+     * one higher in the list. $emp = ['branch' => name, 'designation' => name, 'gender' => …].
+     */
+    public static function ptCustomRows(array $r, $companyId = null, array $emp = []): ?array
+    {
+        $lc = fn ($v) => mb_strtolower(trim((string) $v));
+        $sex = fn ($v) => substr($lc($v), 0, 1);   // Male / Female / Other — also M / F
+        $best = null;
+        $bestScore = -1;
+        foreach (self::ptRules($r) as $rule) {
+            $score = 0;
+            $co = (int) ($rule['company'] ?? 0);
+            if ($co) {
+                if ($co !== (int) $companyId) {
+                    continue;
+                }
+                $score++;
+            }
+            foreach (['branches' => 'branch', 'designations' => 'designation', 'genders' => 'gender'] as $k => $f) {
+                $norm = $k === 'genders' ? $sex : $lc;
+                $list = array_values(array_filter(array_map($norm, (array) ($rule[$k] ?? [])), 'strlen'));
+                if (! $list) {
+                    continue;
+                }
+                $mine = $norm($emp[$f] ?? '');
+                if ($mine === '' || ! in_array($mine, $list, true)) {
+                    continue 2;
+                }
+                $score++;
+            }
+            if ($score > $bestScore) {
+                $best = $rule['slabs'];
+                $bestScore = $score;
+            }
+        }
+
+        return $best ?: null;
+    }
+
+    /**
+     * Branch + designation NAMES for the PT rules (ctx keys pt_branch / pt_designation).
+     * Same rule as the Directory: the name column first, else the FK's name.
+     */
+    public static function ptCtx($e): array
+    {
+        static $names = [];
+        $e = (object) $e;
+        $nm = function (string $table, $id) use (&$names) {
+            if (! $id) {
+                return '';
+            }
+            $k = $table.':'.$id;
+            if (! array_key_exists($k, $names)) {
+                try {
+                    $names[$k] = (string) (DB::table($table)->where('id', $id)->value('name') ?? '');
+                } catch (\Throwable $x) {
+                    $names[$k] = '';
+                }
+            }
+
+            return $names[$k];
+        };
+
+        return [
+            'pt_branch' => trim((string) ($e->branch ?? '')) ?: $nm('branches', $e->branch_id ?? null),
+            'pt_designation' => trim((string) ($e->designation ?? '')) ?: $nm('designations', $e->designation_id ?? null),
+        ];
+    }
+
+    /**
      * Professional Tax — statutory MONTHLY slab on gross (not a flat amount).
      * rev180: STATE-AWARE. Resolution order:
      *   1. Employee's pt_state matches a built-in state table (incl. PT-free states → ₹0;
      *      Maharashtra February = ₹300 for the top slab).
      *   2. No/unknown state → the tenant's pt_slabs override, else the Telangana default.
      */
-    public static function ptForGross(float $gross, array $r, ?string $state = null, ?string $month = null, ?string $gender = null): float
+    public static function ptForGross(float $gross, array $r, ?string $state = null, ?string $month = null, ?string $gender = null, $companyId = null, array $emp = []): float
     {
+        // 8 Oct 2026 (Ejaz) — CUSTOM PT SLABS (Payroll → Salary Structure):
+        // when HR has entered From / To / PT rows for this company (or for All
+        // companies), they decide PT for every employee of it and outrank the
+        // state tables. Gross is compared in whole rupees; a blank To = and above.
+        // 10 Oct 2026 — rules can also narrow by branch / designation / gender.
+        $custom = self::ptCustomRows($r, $companyId, $emp + ['gender' => (string) $gender]);
+        if ($custom !== null) {
+            $g = round($gross);
+            foreach ($custom as $row) {
+                if ($g >= (float) $row[0] && ((float) $row[1] <= 0 || $g <= (float) $row[1])) {
+                    return round((float) $row[2], 2);
+                }
+            }
+
+            return 0.0;   // gross outside every range → no PT
+        }
         $st = strtolower(trim((string) $state));
         // Gender-based PT exemption. Under the Maharashtra State Tax on Professions
         // Act, women drawing a monthly gross up to ₹25,000 are exempt (PT = ₹0);
@@ -2056,6 +2194,39 @@ class AppDataController extends Controller
      *        each rounded UP to the next rupee (ESIC rule).
      *  - PT: monthly slab via ptForGross().
      */
+    /**
+     * 8 Oct 2026 (Ejaz) — Statutory deferral (Statutory Rate Settings → Customize).
+     * Items ('pf','esi','pt','bonus') NOT applicable to this employee in $month
+     * (YYYY-MM): the first stat_defer_months months from the date of joining.
+     * They apply again from the month in which the period completes —
+     * DOJ 15-Jan-2026 + 3 months = 15-Apr → April payroll deducts, Jan–Mar do not.
+     * Empty when off, no DOJ, or no month.
+     */
+    public static function statDeferred(array $r, $doj, $month): array
+    {
+        $n = (int) ($r['stat_defer_months'] ?? 0);
+        $from = self::statDeferUntil($r, $doj);
+        if ($n <= 0 || ! $from || ! preg_match('/^\d{4}-\d{2}/', (string) $month)) {
+            return [];
+        }
+
+        return substr((string) $month, 0, 7) < $from ? array_values(array_intersect(['pf', 'esi', 'pt', 'bonus'], (array) ($r['stat_defer_items'] ?? []))) : [];
+    }
+
+    /** First payroll month (YYYY-MM) the deferred items apply again, or null when the deferral is off / no DOJ. */
+    public static function statDeferUntil(array $r, $doj): ?string
+    {
+        $n = (int) ($r['stat_defer_months'] ?? 0);
+        if ($n <= 0 || empty($doj)) {
+            return null;
+        }
+        try {
+            return \Illuminate\Support\Carbon::parse((string) $doj)->addMonthsNoOverflow($n)->format('Y-m');
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
     public static function statutory(float $gross, float $pfWage, array $r, array $ctx = []): array
     {
         // rev180 — optional context: pt_state (state-wise PT), month (Maharashtra
@@ -2082,8 +2253,23 @@ class AppDataController extends Controller
         $convRate = (float) ($r['conveyance_rate'] ?? 0);
         $conveyance = (! empty($r['conveyance_enabled']) && $convRate > 0) ? round($pfBase * $convRate / 100, 2) : 0.0;
 
+        $pt = self::ptForGross($gross, $r, $ctx['pt_state'] ?? null, $ctx['month'] ?? null, $ctx['gender'] ?? null, $ctx['company_id'] ?? null,
+            ['branch' => $ctx['pt_branch'] ?? '', 'designation' => $ctx['pt_designation'] ?? '']);   // 10 Oct 2026 — PT rule criteria
+        // 8 Oct 2026 (Ejaz) — statutory deferral for new joiners (ctx doj + month).
+        $def = self::statDeferred($r, $ctx['doj'] ?? null, $ctx['month'] ?? null);
+        if (in_array('pf', $def, true)) {
+            $pfEmployee = $pfEmployer = $eps = $epfEmployer = $edli = 0.0;
+            $pfBase = 0.0;
+        }
+        if (in_array('esi', $def, true)) {
+            $esiEmployee = $esiEmployer = 0.0;
+        }
+        if (in_array('pt', $def, true)) {
+            $pt = 0.0;
+        }
+
         return [
-            'pf' => $pfEmployee, 'esi' => $esiEmployee, 'pt' => self::ptForGross($gross, $r, $ctx['pt_state'] ?? null, $ctx['month'] ?? null, $ctx['gender'] ?? null),
+            'pf' => $pfEmployee, 'esi' => $esiEmployee, 'pt' => $pt,
             'conveyance' => $conveyance,
             'pf_wage' => round($pfBase, 2),
             'pf_employer' => $pfEmployer, 'pf_eps' => $eps, 'pf_epf_employer' => $epfEmployer, 'pf_edli' => $edli,
@@ -2425,7 +2611,7 @@ class AppDataController extends Controller
             ->orderBy('cycle_label', 'desc')->get()->map(fn ($r) => [
                 'id' => 'RUN-'.$r->id,
                 'lot' => 'Lot 1',
-                'payDate' => \Illuminate\Support\Carbon::parse($r->pay_date)->format('d M Y'),
+                'payDate' => \Illuminate\Support\Carbon::parse($r->pay_date)->format('d-m-Y'),
                 'cycle' => \Illuminate\Support\Carbon::parse($r->cycle_label.'-01')->format('M Y'),
                 'components' => 'All',
                 'employees' => (int) $r->employees_count,
@@ -2583,12 +2769,12 @@ class AppDataController extends Controller
                     'to_name' => $rcpt['name'] ?? '',
                     'subject' => 'Action needed: '.$emp->name.' scheduled for backup & removal in 72 hours',
                     'heading' => 'Employee backup scheduled',
-                    'intro' => $emp->name.' ('.$emp->emp_code.')'.($company ? ' of '.$company : '').' has been scheduled to be backed up and removed from the active directory in about 72 hours (on '.$due->format('d M Y, H:i').'). If this was NOT intentional, open the Employee Directory in SmartPRS and click Cancel on that employee before the timer ends.',
+                    'intro' => $emp->name.' ('.$emp->emp_code.')'.($company ? ' of '.$company : '').' has been scheduled to be backed up and removed from the active directory in about 72 hours (on '.$due->format('d-m-Y H:i').'). If this was NOT intentional, open the Employee Directory in SmartPRS and click Cancel on that employee before the timer ends.',
                     'lines' => [
                         'Employee' => $emp->name,
                         'Employee ID' => $emp->emp_code,
                         'Scheduled by' => $by,
-                        'Will be removed at' => $due->format('d M Y, H:i'),
+                        'Will be removed at' => $due->format('d-m-Y H:i'),
                     ],
                     'kind' => 'employee.backup.scheduled',
                 ]);
@@ -3019,6 +3205,26 @@ class AppDataController extends Controller
             }
             $payload['schedule_id'] = $schedId;
         }
+        // 2026-09-28 (Ejaz) — probation duration on the employee (months; blank =
+        // company default). Column comes from the probation_tracking migration.
+        if ((array_key_exists('probationMonths', $e) || array_key_exists('probation_months', $e)) && Schema::hasColumn('employees', 'probation_months')) {
+            $pm = (int) ($e['probationMonths'] ?? ($e['probation_months'] ?? 0));
+            $payload['probation_months'] = $pm > 0 ? min($pm, 60) : null;
+        }
+        // 7 Oct 2026 (Ejaz) — ACCESS ROLE: must be a role that exists (built-in or
+        // a Roles & Permissions row); applied to the employee's login after save.
+        if (array_key_exists('accessRole', $e) && Schema::hasColumn('employees', 'access_role')) {
+            $ar = trim((string) $e['accessRole']);
+            if ($ar === '') {
+                $payload['access_role'] = null;
+            } else {
+                $canon = \App\Services\AccessRoles::canonical($ar, $tenantId ? (int) $tenantId : null);
+                if (! $canon) {
+                    return response()->json(['ok' => false, 'error' => 'Access Role "'.$ar.'" is not set up — add it in Settings → Roles & Permissions first.'], 422);
+                }
+                $payload['access_role'] = $canon;
+            }
+        }
         // DATE columns reject unknown shapes — normalise both (null when unreadable).
         $payload['doj'] = self::normDateWide($payload['doj']);
         $payload['dob'] = self::normDateWide($payload['dob']);
@@ -3054,6 +3260,20 @@ class AppDataController extends Controller
         // ESS login id.
         if ($dupErrs = $rules::duplicateErrors($payload, $tenantId, $existing->id ?? null)) {
             return response()->json(['ok' => false, 'error' => reset($dupErrs)], 422);
+        }
+        // 2026-09-28 — (re)starting probation, or changing its length, restarts the
+        // clock: clear any old end date / confirmation so the end is DOJ + months
+        // again and the HR alerts fire for the new date.
+        if ($existing && Schema::hasColumn('employees', 'probation_end')) {
+            $isProb = ($payload['employment_stage'] ?? '') === 'probation';
+            $wasProb = strtolower((string) ($existing->employment_stage ?? '')) === 'probation';
+            $monthsChanged = array_key_exists('probation_months', $payload)
+                && (int) ($payload['probation_months'] ?? 0) !== (int) ($existing->probation_months ?? 0);
+            if ($isProb && (! $wasProb || $monthsChanged)) {
+                $payload['probation_end'] = null;
+                $payload['probation_confirmed_on'] = null;
+                $payload['probation_confirmed_by'] = null;
+            }
         }
         try {
         if ($existing) {
@@ -3127,6 +3347,11 @@ class AppDataController extends Controller
             return response()->json(['ok' => false, 'error' => $friendly], 422);
         }
 
-        return response()->json(['ok' => true, 'id' => $empId, 'emp_code' => $code]);
+        // 7 Oct 2026 (Ejaz) — keep the reporting-line FK in step with the
+        // Reporting Manager name, and push the Access Role onto the login.
+        \App\Services\Hierarchy::syncManagerIds($tenantId ? (int) $tenantId : null);
+        $roleMsgs = \App\Services\AccessRoles::syncEmployees($tenantId ? (int) $tenantId : null, [(int) $empId], $user);
+
+        return response()->json(['ok' => true, 'id' => $empId, 'emp_code' => $code] + ($roleMsgs ? ['warning' => implode(' ', $roleMsgs)] : []));
     }
 }

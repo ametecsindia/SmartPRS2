@@ -261,42 +261,87 @@ class ReportController extends Controller
             return ['columns' => $cols, 'rows' => $rows, 'count' => $count];
         }
 
-        // D9 — Full & final settlement: prorated final salary + gratuity − advances − dues.
+        // D9 — Full & final settlement (7 Oct 2026, Ejaz): final payslip (the
+        // payroll engine pays a leaver up to the approved exit's last working
+        // day) + gratuity − outstanding loans − unrecovered advances − other dues.
         if ($dataset === 'fnf') {
-            $cols = ['Code', 'Name', 'Last Day', 'Final Month Salary', 'Gratuity', 'Advances Recovered', 'Dues', 'FnF Payable'];
+            $cols = ['Code', 'Name', 'Last Working Day', 'Final Payslip Net', 'Gratuity', 'Loan Outstanding', 'Advance Outstanding', 'Other Dues', 'FnF Payable', 'Note'];
             if (! Schema::hasTable('exits')) {
                 return ['columns' => $cols, 'rows' => [], 'count' => 0];
             }
+            $lwdCol = Schema::hasColumn('exits', 'last_working_day') ? 'x.last_working_day' : (Schema::hasColumn('exits', 'last_day') ? 'x.last_day' : 'x.created_at');
             $q = DB::table('exits as x')->join('employees as e', 'e.id', '=', 'x.employee_id')
                 ->when($tid, fn ($z) => $z->where('x.tenant_id', $tid))
-                ->when($companyId, fn ($z) => $z->where('x.company_id', $companyId))->orderByDesc('x.id');
+                ->when($companyId, fn ($z) => $z->where('e.company_id', $companyId))
+                ->where('x.status', 'approved')->orderByDesc('x.id');
             $count = (clone $q)->count();
-            $rows = $q->when($limit, fn ($z) => $z->limit($limit))
-                ->get(['e.emp_code', 'e.name', 'e.ctc', 'e.doj', 'x.last_day', 'x.advances_recovered', 'x.dues'])
-                ->map(function ($r) {
-                    $monthly = round(((float) $r->ctc) / 12, 2);
-                    $basic = round($monthly * 0.5, 2);
+            $sel = ['e.id', 'e.emp_code', 'e.name', 'e.ctc', 'e.doj', 'e.company_id', DB::raw($lwdCol.' as lwd')];
+            if (Schema::hasColumn('exits', 'dues')) {
+                $sel[] = 'x.dues';
+            }
+            $rows = $q->when($limit, fn ($z) => $z->limit($limit))->get($sel)
+                ->map(function ($r) use ($tid) {
+                    $lwd = substr((string) $r->lwd, 0, 10);
+                    $cn = (string) (DB::table('companies')->where('id', $r->company_id)->value('name') ?? '');
+                    $cut = \App\Services\PeriodResolver::masterDay($tid, $cn, 'cutoff_day');
+                    $m = $lwd ? \App\Services\PeriodResolver::payrollMonthFor($lwd, ($cut >= 2 && $cut <= 28) ? $cut : null) : '';
+                    $slip = $m ? DB::table('payslips')->where('employee_id', $r->id)->where('month', $m)->orderByDesc('id')->first() : null;
+                    $net = $slip ? (float) $slip->net : 0.0;
+                    $earn = $slip ? (array) json_decode((string) ($slip->earnings ?? ''), true) : [];
+                    $basic = (float) ($earn['Basic'] ?? 0) ?: round(((float) $r->ctc) / 12 * 0.5, 2);
+                    if ($slip && ! empty($earn['Basic']) && ! empty($slip->calc_note) && preg_match('/x([\d.]+)\)/', (string) $slip->calc_note, $fm) && (float) $fm[1] > 0) {
+                        $basic = round($basic / (float) $fm[1], 2);   // a prorated final month → the full monthly basic
+                    }
                     $grat = 0.0;
-                    if ($r->doj && $r->last_day) {
+                    if ($r->doj && $lwd) {
                         try {
-                            $yrs = Carbon::parse($r->doj)->diffInYears(Carbon::parse($r->last_day));
-                            if ($yrs >= 5) {
+                            $sv = Carbon::parse($r->doj)->diff(Carbon::parse($lwd));
+                            $yrs = $sv->y + ($sv->m >= 6 ? 1 : 0);   // Gratuity Act: over 6 months counts as a year
+                            if ($sv->y >= 5) {
                                 $grat = round(15 / 26 * $basic * $yrs, 2);
                             }
                         } catch (\Throwable $e) {
                         }
                     }
-                    $adv = (float) ($r->advances_recovered ?? 0);
+                    $loan = 0.0;
+                    if (Schema::hasTable('loans')) {
+                        foreach (DB::table('loans')->where('employee_id', $r->id)->whereIn('status', ['approved', 'active'])->get() as $ln) {
+                            if (isset($ln->outstanding) && $ln->outstanding !== null) {
+                                $loan += max(0.0, (float) $ln->outstanding);
+                                continue;
+                            }
+                            $emi = (float) (($ln->emi ?? null) ?: ($ln->installment_amount ?? 0));
+                            $tot = (int) (($ln->installments_total ?? null) ?: ($ln->tenure_months ?? 0));
+                            $loan += $tot > 0 ? max(0, $tot - (int) ($ln->installments_paid ?? 0)) * $emi : (float) ($ln->amount ?? 0);
+                        }
+                    }
+                    $adv = 0.0;
+                    if (Schema::hasTable('advances')) {
+                        // Partly recovered by a run, or approved after the last run was generated
+                        // (older unstamped advances were recovered by earlier runs).
+                        $hasPaid = Schema::hasColumn('advances', 'paid_run_id');
+                        $lastRun = (string) (DB::table('payroll_runs')->where('company_id', $r->company_id)->max('created_at') ?? '');
+                        foreach (DB::table('advances')->where('employee_id', $r->id)->where('status', 'approved')->get() as $av) {
+                            if ($hasPaid && ! empty($av->paid_run_id)) {
+                                $adv += max(0.0, (float) $av->amount - (float) ($av->paid_amount ?? 0));
+                            } elseif ((string) (($av->decided_at ?? null) ?: ($av->created_at ?? '')) > $lastRun) {
+                                $adv += (float) $av->amount;
+                            }
+                        }
+                    }
                     $dues = (float) ($r->dues ?? 0);
+                    $loan = round($loan, 2);
+                    $adv = round($adv, 2);
 
-                    return ['Code' => $r->emp_code, 'Name' => $r->name, 'Last Day' => $r->last_day,
-                        'Final Month Salary' => $monthly, 'Gratuity' => $grat, 'Advances Recovered' => $adv,
-                        'Dues' => $dues, 'FnF Payable' => round($monthly + $grat - $adv - $dues, 2)];
+                    return ['Code' => $r->emp_code, 'Name' => $r->name, 'Last Working Day' => $lwd,
+                        'Final Payslip Net' => round($net, 2), 'Gratuity' => $grat, 'Loan Outstanding' => $loan,
+                        'Advance Outstanding' => $adv, 'Other Dues' => $dues,
+                        'FnF Payable' => round($net + $grat - $loan - $adv - $dues, 2),
+                        'Note' => $slip ? 'Final payslip '.$m.' (paid to last working day)' : 'Final payslip for '.($m ?: 'the exit month').' not generated yet - run payroll first'];
                 })->all();
 
             return ['columns' => $cols, 'rows' => $rows, 'count' => $count];
         }
-
 
         // E3 — Overtime register: OT entries logged for the month.
         if ($dataset === 'reg-overtime') {
@@ -411,7 +456,7 @@ class ReportController extends Controller
 
                     return [
                         '#' => $rid,
-                        'When' => ! empty($a['created_at']) ? Carbon::parse($a['created_at'])->format('d M Y H:i:s') : '',
+                        'When' => ! empty($a['created_at']) ? Carbon::parse($a['created_at'])->format('d-m-Y H:i:s') : '',
                         'Action' => ucfirst(str_replace('_', ' ', (string) ($a['action'] ?? ''))),
                         'Subject' => trim(str_replace('_', ' ', (string) ($a['entity'] ?? '')).(! empty($a['entity_id']) ? ' #'.$a['entity_id'] : '')),
                         'Detail' => $detail,
@@ -487,7 +532,7 @@ class ReportController extends Controller
                 foreach ($built['columns'] as $c) {
                     $line[] = $row[$c] ?? '';
                 }
-                $out .= $this->csvLine($line);
+                $out .= $this->csvLine(\App\Support\DateFmt::row($line));   // 7 Oct 2026 — DD-MM-YYYY
             }
 
             // G3 — access/export logging: record who exported which dataset.

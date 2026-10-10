@@ -64,7 +64,7 @@ class TransferController extends Controller
         $toBranch = $t->to_branch ?: ($isCompanyMove || $isDeptMove ? '' : $fromBranch);
         $toDept = (string) ($t->to_department ?? '');
 
-        $effective = ! empty($t->effective_date) ? Carbon::parse($t->effective_date)->format('d M Y') : 'the date of this order';
+        $effective = ! empty($t->effective_date) ? Carbon::parse($t->effective_date)->format('d-m-Y') : 'the date of this order';
         $fromTxt = trim($fromCompany.($fromBranch !== '' ? ', '.$fromBranch.' branch' : ''));
         $toTxt = trim($toCompany.($toBranch !== '' ? ', '.$toBranch.' branch' : '').($toDept !== '' ? ', '.$toDept.' department' : ''));
 
@@ -94,7 +94,7 @@ class TransferController extends Controller
             'brand' => $brand,
             'company' => $fromCompany ?: ($toCompany ?: 'SmartPRS'),
             'companyAddress' => '',
-            'date' => now()->format('d M Y'),
+            'date' => now()->format('d-m-Y'),
             'empName' => $emp->name,
             'empCode' => $emp->emp_code,
         ]);
@@ -129,7 +129,7 @@ class TransferController extends Controller
         }
 
         $b = self::buildLetter($t);
-        $effective = ! empty($t->effective_date) ? Carbon::parse($t->effective_date)->format('d M Y') : 'immediately';
+        $effective = ! empty($t->effective_date) ? Carbon::parse($t->effective_date)->format('d-m-Y') : 'immediately';
         $isCompanyMove = stripos((string) $t->type, 'compan') !== false;
         $isDeptMove = ! $isCompanyMove && stripos((string) $t->type, 'depart') !== false;
 
@@ -194,14 +194,14 @@ class TransferController extends Controller
                 return $page('Link not valid', 'This acknowledgement link is not valid. Please contact your HR department.', '#dc2626');
             }
             if (! empty($t->accepted_at)) {
-                return $page('Already acknowledged', 'You acknowledged this transfer on '.Carbon::parse($t->accepted_at)->format('d M Y H:i').'. No further action is needed.', '#16a34a');
+                return $page('Already acknowledged', 'You acknowledged this transfer on '.Carbon::parse($t->accepted_at)->format('d-m-Y H:i').'. No further action is needed.', '#16a34a');
             }
             DB::table('transfers')->where('id', $t->id)->update(ApprovalService::safeRow('transfers', [
                 'accepted_at' => now(), 'updated_at' => now(),
             ]));
 
             return $page('Transfer acknowledged', 'Thank you — your acknowledgement has been recorded on your file'
-                .(! empty($t->effective_date) ? '. The transfer takes effect on '.Carbon::parse($t->effective_date)->format('d M Y').'.' : '.'), '#16a34a');
+                .(! empty($t->effective_date) ? '. The transfer takes effect on '.Carbon::parse($t->effective_date)->format('d-m-Y').'.' : '.'), '#16a34a');
         } catch (\Throwable $e) {
             return $page('Something went wrong', 'Please try the link again, or contact your HR department.', '#dc2626');
         }

@@ -10,6 +10,55 @@ Artisan::command('inspire', function () {
 
 /*
 |--------------------------------------------------------------------------
+| 2026-09-28 (Ejaz): the scheduler runs BY ITSELF — see App\Services\AutoScheduler
+|--------------------------------------------------------------------------
+| smartprs:tick is what the OS task (installed by the installer, or by the app
+| itself) and the web-traffic fallback both run every minute. It runs the
+| normal schedule, then catches up the hourly self-deduping notifiers once per
+| hour — Laravel fires an hourly task only in minute :00, and a web-driven tick
+| can miss that minute.
+*/
+Artisan::command('smartprs:tick', function () {
+    $this->call('schedule:run');
+    // Deliver queued mail (probation / absence / late-arrival emails). The .env
+    // uses QUEUE_CONNECTION=database and client servers run no queue worker, so
+    // these emails sat 'queued' forever. Drain the queue here, capped under a
+    // minute so ticks never pile up; concurrent workers are safe on the DB queue.
+    try {
+        $this->call('queue:work', ['--queue' => 'mail,default', '--stop-when-empty' => true, '--max-time' => 50, '--tries' => 3]);
+    } catch (\Throwable $e) {
+        report($e);
+    }
+    if (\Illuminate\Support\Facades\Cache::add('smartprs:tick:catchup:'.now()->format('YmdH'), 1, 7200)) {
+        foreach (['probation:notify', 'absence:notify'] as $c) {
+            try {
+                $this->call($c);
+            } catch (\Throwable $e) {
+                report($e);
+            }
+        }
+    }
+})->purpose('Run the SmartPRS scheduler once (every minute, by the OS task or web traffic)');
+
+Artisan::command('smartprs:scheduler-install', function () {
+    try {
+        $r = \App\Services\AutoScheduler::installOsTask();
+    } catch (\Throwable $e) {
+        $r = ['ok' => false, 'message' => $e->getMessage()];
+    }
+    $r['ok'] ? $this->info($r['message']) : $this->warn('Scheduler not registered: '.$r['message'].' (the app will keep it running from web traffic and retry daily).');
+})->purpose('Register the every-minute OS task that runs smartprs:tick');
+
+// Heartbeat: only a run started by the OS (not by web traffic) writes it, so
+// the web fallback steps aside as soon as a real OS task is ticking.
+Schedule::call(function () {
+    if (getenv('SMARTPRS_TICK_SOURCE') !== 'web') {
+        @touch(\App\Services\AutoScheduler::heartbeatFile());
+    }
+})->everyMinute()->name('smartprs-heartbeat');
+
+/*
+|--------------------------------------------------------------------------
 | rev 187 (Ejaz): STANDING invoice-number format
 |--------------------------------------------------------------------------
 | PRS-<financial year>-<month>-<count>  e.g. PRS-2026-27-07-0001
@@ -261,5 +310,15 @@ Schedule::command('probation:notify')
 */
 Schedule::command('absence:notify')
     ->hourly()
+    ->withoutOverlapping()
+    ->onOneServer();
+
+/*
+| 30 Sep 2026 (Ejaz) — Loan EMI / Salary Advance deduction reminder: email +
+| bell 3 days before each company's pay date, every month until settled.
+| Self-dedupes per employee per payroll month.
+*/
+Schedule::command('emi:remind')
+    ->dailyAt('09:05')
     ->withoutOverlapping()
     ->onOneServer();

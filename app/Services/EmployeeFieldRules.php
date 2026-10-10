@@ -148,6 +148,12 @@ class EmployeeFieldRules
         ['h' => 'EMPLOYMENT STAGE', 'c' => 'employment_stage', 'f' => 'employment_stage', 'l' => 'Employment Stage', 'tab' => 'ej',
             'o' => ['Permanent', 'Probation', 'Internship'], 'a' => ['stage', 'employmentstage'], 'hr' => true,
             's' => ['Permanent', 'Probation']],
+        // 2026-09-28 (Ejaz) — probation DURATION on the employee record. Blank =
+        // the company default in Probation Settings. ProbationService derives
+        // the end date as DOJ + these months and alerts HR/Admin when it's due.
+        ['h' => 'PROBATION PERIOD (MONTHS)', 'c' => 'probation_months', 'f' => 'probationMonths', 'l' => 'Probation Period (Months)', 'tab' => 'ej', 't' => 'number',
+            'a' => ['probationmonths', 'probationperiod', 'probation'], 'hint' => 'Only when Employment Stage is Probation. Blank = company default (Probation Settings).',
+            's' => ['', '3']],
         ['h' => 'STATUS', 'c' => 'status', 'f' => 'status', 'l' => 'Status', 'tab' => 'ej',
             'o' => ['Active', 'Inactive'], 'a' => ['employeestatus'], 'hr' => true, 's' => ['Active', 'Active']],
         ['h' => 'BRANCH', 'c' => 'branch', 'f' => 'branch', 'l' => 'Branch', 'tab' => 'ej', 'src' => '@branches',
@@ -158,6 +164,14 @@ class EmployeeFieldRules
             'a' => ['manager', 'reportsto', 'teammanager'], 'hr' => true, 's' => ['Reporting Manager Name', 'Sample Name']],
         ['h' => 'TEAM LEADER', 'c' => 'team_leader', 'f' => 'teamLeader', 'l' => 'Team Leader', 'tab' => 'ej', 'src' => '@employees',
             'a' => ['teamleader', 'leader'], 'hr' => true, 's' => ['Sample Name', 'Sample Name']],
+        // 7 Oct 2026 (Ejaz) — the employee's ROLE = their login's role on Settings →
+        // Roles & Permissions (what they can open / approve, and their data scope).
+        // Values: Admin, HR Manager, Accountant, Field Agent, Employee + any role
+        // added there. Applied to the linked login on save / import (AccessRoles).
+        // Header is ACCESS ROLE, not ROLE: 'role' is already a Designation alias.
+        ['h' => 'ACCESS ROLE', 'c' => 'access_role', 'f' => 'accessRole', 'l' => 'Access Role', 'tab' => 'ej', 'src' => '@roles',
+            'a' => ['accessrole', 'userrole', 'loginrole', 'permissionrole', 'approle'],
+            'hint' => 'Login role from Settings → Roles & Permissions', 's' => ['Employee', 'Employee']],
         ['h' => 'DOJ (DD-MM-YYYY)', 'c' => '__doj', 'f' => 'doj', 'l' => 'Date of Joining', 'tab' => 'ej', 't' => 'date',
             'a' => ['doj', 'dateofjoining', 'joiningdate'], 'hr' => true, 'v' => 'doj', 's' => ['01-04-2024', '10-05-2024']],
         ['h' => 'SHIFT', 'c' => 'shift', 'f' => 'shift', 'l' => 'Shift', 'tab' => 'ej', 'src' => '@shifts',

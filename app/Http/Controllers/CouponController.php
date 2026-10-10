@@ -128,11 +128,11 @@ class CouponController extends Controller
                 'to' => $email,
                 'subject' => 'An exclusive SmartPRS offer for you — '.$label,
                 'heading' => 'An exclusive offer, just for you',
-                'intro' => ($v['name'] ? 'Dear '.$v['name'].', ' : '').'we have reserved a personal discount on SmartPRS for this email address: '.$label.', valid till '.\Carbon\Carbon::parse($validTill)->format('d M Y').'.',
+                'intro' => ($v['name'] ? 'Dear '.$v['name'].', ' : '').'we have reserved a personal discount on SmartPRS for this email address: '.$label.', valid till '.\Carbon\Carbon::parse($validTill)->format('d-m-Y').'.',
                 'lines' => [
                     'Your exclusive code: '.$code,
                     'It is linked to this email — simply use '.$email.' on the page and the discount applies by itself.',
-                    'Valid for one purchase, till '.\Carbon\Carbon::parse($validTill)->format('d M Y').'.',
+                    'Valid for one purchase, till '.\Carbon\Carbon::parse($validTill)->format('d-m-Y').'.',
                 ],
                 'cta_label' => 'Claim your offer',
                 'cta_url' => url('/signup'),

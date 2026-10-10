@@ -526,9 +526,9 @@ class ComplianceController extends Controller
             'verdict' => 'COMPLIANT — WITH OPEN ITEMS',
             'ref' => 'RAC/'.$today->format('Y').'/SAMPLE',
             'hash' => 'SAMPLE-ILLUSTRATION',
-            'generatedAt' => $today->format('d M Y').', '.now()->format('H:i').' IST',
-            'auditFrom' => $today->copy()->subDays(90)->format('d M Y'),
-            'auditTo' => $today->format('d M Y'),
+            'generatedAt' => $today->format('d-m-Y').', '.now()->format('H:i').' IST',
+            'auditFrom' => $today->copy()->subDays(90)->format('d-m-Y'),
+            'auditTo' => $today->format('d-m-Y'),
             'isSample' => true,
         ];
 
@@ -653,9 +653,9 @@ class ComplianceController extends Controller
             'verdict' => $verdict,
             'ref' => $ref,
             'hash' => $hash,
-            'generatedAt' => $today->format('d M Y').', '.now()->format('H:i').' IST',
-            'auditFrom' => Carbon::parse($from)->format('d M Y'),
-            'auditTo' => $today->format('d M Y'),
+            'generatedAt' => $today->format('d-m-Y').', '.now()->format('H:i').' IST',
+            'auditFrom' => Carbon::parse($from)->format('d-m-Y'),
+            'auditTo' => $today->format('d-m-Y'),
         ];
     }
 }

@@ -132,12 +132,18 @@ class MasterController extends Controller
             // employee_id sits in cols so the self-created table gets the column.
             'posh' => [
                 'table' => 'posh_complaints',
-                'cols' => ['subject' => 'string', 'employee' => 'string', 'employee_id' => 'int', 'company_name' => 'string',
-                    'respondent' => 'string', 'incident_date' => 'date', 'description' => 'text', 'status' => 'string', 'hr_comment' => 'text'],
-                'fields' => ['subject', 'employee', 'company_name', 'respondent', 'incident_date', 'description', 'status', 'hr_comment'],
-                'label' => 'POSH Complaint',
+                // 30 Sep 2026 (Ejaz) — now "Raise a Complaint": General OR POSH, with the
+                // particulars an inquiry needs (who / when / where / witnesses / earlier
+                // reporting / relief sought). New columns self-create via ensureCols().
+                'cols' => ['category' => 'string', 'subject' => 'string', 'employee' => 'string', 'employee_id' => 'int', 'company_name' => 'string',
+                    'respondent' => 'string', 'relation' => 'string', 'incident_date' => 'date', 'incident_time' => 'string', 'location' => 'string',
+                    'witnesses' => 'text', 'description' => 'text', 'prior_reported' => 'string', 'resolution_sought' => 'text',
+                    'status' => 'string', 'hr_comment' => 'text'],
+                'fields' => ['category', 'subject', 'employee', 'company_name', 'respondent', 'relation', 'incident_date', 'incident_time', 'location',
+                    'witnesses', 'description', 'prior_reported', 'resolution_sought', 'status', 'hr_comment'],
+                'label' => 'Complaint',
                 'order' => 'id',
-                'required' => ['subject', 'company_name', 'employee'],
+                'required' => ['category', 'subject', 'company_name', 'employee', 'incident_date', 'description'],
                 'emp_map' => ['employee' => 'employee_id'],
             ],
             // Deductions ledger (ad-hoc deductions). employee_id NOT NULL.
@@ -577,6 +583,9 @@ class MasterController extends Controller
         });
     }
 
+    /** 30 Sep 2026 — the only fields a handler may change on a complaint / ticket after it is raised. */
+    private const RESPOND_ONLY = ['posh' => ['status', 'hr_comment'], 'helpdesk' => ['priority', 'status', 'hr_comment']];
+
     private function canManage(Request $request): bool
     {
         return $request->user()->hasAnyRole(['super_admin', 'admin', 'hr_manager']);
@@ -643,7 +652,10 @@ class MasterController extends Controller
             // a non-manager sees ONLY the rows they raised themselves.
             $canManage = $this->canManage($request);
             $selfEmp = null;
-            if ($this->selfServe($type) && ! $canManage) {
+            if ($type === 'posh') {
+                // 30 Sep 2026 (Ejaz) — POSH rows only for the Internal Committee; see ComplaintController.
+                [$canManage, $selfEmp] = ComplaintController::scopeList($q, $request);
+            } elseif ($this->selfServe($type) && ! $canManage) {
                 $selfEmp = $this->selfEmployee($request);
                 $q->where('employee_id', (int) ($selfEmp->id ?? -1));
             }
@@ -664,6 +676,12 @@ class MasterController extends Controller
 
                 return $item;
             })->values();
+            if ($type === 'posh' && $out->count()) {   // 30 Sep 2026 — evidence file count per complaint
+                ComplaintController::ensure();
+                $ev = DB::table('complaint_evidence')->whereIn('complaint_id', $out->pluck('id')->all())
+                    ->selectRaw('complaint_id, COUNT(*) n')->groupBy('complaint_id')->pluck('n', 'complaint_id');
+                $out = $out->map(fn ($i) => $i + ['evidence_count' => (int) ($ev[$i['id']] ?? 0)])->values();
+            }
 
             // Templates available for a letter screen's picker (titles).
             $templates = [];
@@ -687,6 +705,8 @@ class MasterController extends Controller
                 'label' => $def['label'],
                 'canManage' => $canManage,
                 'canCreate' => $canManage || ($this->selfServe($type) && $selfEmp !== null),
+                'hasCommittee' => $type === 'posh' ? ComplaintController::hasCommittee($tid ? (int) $tid : null) : null,
+                'canCommittee' => $type === 'posh' && $request->user()->hasAnyRole(['super_admin', 'admin']),
                 'templates' => $templates,
                 'candidates' => $candidates,
                 'companies' => DB::table('companies')->when($tid, fn ($x) => $x->where('tenant_id', $tid))->whereNull('deleted_at')->orderBy('name')->pluck('name')->values(),
@@ -706,7 +726,15 @@ class MasterController extends Controller
             // rev184 — self-serve CREATE: an employee/agent may raise their own
             // helpdesk ticket or POSH complaint (never edit, never someone else's).
             $selfServeEmp = null;
-            if (! $this->canManage($request)) {
+            // 30 Sep 2026 (Ejaz) — an existing complaint is edited only by whoever may see it
+            // (POSH → Internal Committee; General → Admin/HR); never by other Admin/HR.
+            $complaintEditor = false;
+            if ($type === 'posh' && ! empty($request->input('item.id'))) {
+                $cRow = DB::table('posh_complaints')->where('id', (int) $request->input('item.id'))->first();
+                abort_unless($cRow && ComplaintController::canAct($request, $cRow, false), 403);
+                $complaintEditor = true;
+            }
+            if (! $this->canManage($request) && ! $complaintEditor) {
                 abort_unless($this->selfServe($type) && empty($request->input('item.id')), 403);
                 $selfServeEmp = $this->selfEmployee($request);
                 abort_unless($selfServeEmp !== null, 403);
@@ -739,6 +767,19 @@ class MasterController extends Controller
                 $row['employee_id'] = (int) $selfServeEmp->id;
                 $row['status'] = 'open';
                 unset($row['priority'], $row['hr_comment']);
+            }
+            // 30 Sep 2026 (Ejaz) — FREE AND FAIR: what the employee wrote in a complaint or
+            // helpdesk ticket is never changed afterwards, by anyone (Admin, HR, committee
+            // or the employee). Whoever handles it may only set the status and add their
+            // remark (+ priority on a ticket). A new one always starts Open, with no remark.
+            if (isset(self::RESPOND_ONLY[$type])) {
+                if (! empty($input['id'])) {
+                    $row = array_intersect_key($row, array_flip(array_merge(self::RESPOND_ONLY[$type], ['updated_at'])));
+                    $row['updated_at'] = now();
+                } else {
+                    $row['status'] = 'open';
+                    unset($row['priority'], $row['hr_comment']);
+                }
             }
 
             // C3 — BGV re-verification scheduler: derive the next-due date from the
@@ -785,6 +826,11 @@ class MasterController extends Controller
                 }
                 $row['created_at'] = now();
                 $newId = DB::table($table)->insertGetId($row);
+                // 30 Sep 2026 (Ejaz) — bell for new helpdesk tickets (hierarchy + HR/Admin) and
+                // complaints (POSH → Internal Committee only; General → Admin/HR).
+                if ($type === 'posh' || $type === 'helpdesk') {
+                    ComplaintController::notifyNew($type, (int) $newId, $row, optional($request->user())->id);
+                }
             }
 
             // J2 — immutable audit trail: log every create / update of any master
@@ -821,7 +867,7 @@ class MasterController extends Controller
                 }
             }
 
-            return response()->json(['ok' => true]);
+            return response()->json(['ok' => true, 'id' => (int) ($id ?: ($newId ?? 0))]);   // id: lets the screen attach files right after a create
         } catch (\Throwable $e) {
             // 7 Aug 2026 test report (item 6) — the raw SQLSTATE / INSERT string
             // was being shown in the UI toast (info leak + confusing to users).
@@ -1093,7 +1139,7 @@ class MasterController extends Controller
             $skipped = 0;
             $errors = [];
             foreach ($lines as $ln => $line) {
-                $cells = str_getcsv($line);
+                $cells = array_map([\App\Support\DateFmt::class, 'toIso'], str_getcsv($line));   // 7 Oct 2026 — DD-MM-YYYY cells → ISO
                 if (count(array_filter($cells, fn ($c) => trim((string) $c) !== '')) === 0) {
                     continue;
                 }
@@ -1192,6 +1238,10 @@ class MasterController extends Controller
     {
         try {
             abort_unless($this->canManage($request), 403);
+            // 30 Sep 2026 (Ejaz) — complaints and helpdesk tickets are a record: never deleted.
+            if (isset(self::RESPOND_ONLY[$type])) {
+                return response()->json(['ok' => false, 'error' => 'Complaints and helpdesk tickets cannot be deleted — close them with a status and remark instead.'], 403);
+            }
             $def = $this->def($type);
             if (! $def) {
                 return response()->json(['ok' => false, 'error' => 'Unknown master'], 422);

@@ -53,9 +53,31 @@ class MobileDeviceController extends Controller
                     $t->timestamps();
                 });
             }
+            // 7 Oct 2026 (Ejaz) — WHOSE phone it is: the app sends the Employee ID at
+            // registration (or the admin links one on approval), so the admin sees
+            // Employee ID / Name / Department / Branch / Reporting Manager BEFORE approving.
+            if (! Schema::hasColumn('mobile_devices', 'employee_id')) {
+                Schema::table('mobile_devices', function (Blueprint $t) {
+                    $t->unsignedBigInteger('employee_id')->nullable()->index();
+                    $t->string('emp_code', 40)->nullable();
+                });
+            }
         } catch (\Throwable $e) {
             Log::warning('mobile_devices ensure: '.$e->getMessage());
         }
+    }
+
+    /** 7 Oct 2026 — an employee of this tenant by Employee ID (or Biometric ID). */
+    private static function findEmployee(?int $tid, string $code): ?object
+    {
+        $code = trim($code);
+        if ($code === '') {
+            return null;
+        }
+        $q = DB::table('employees')->when($tid, fn ($x) => $x->where('tenant_id', $tid))->whereNull('deleted_at');
+
+        return (clone $q)->whereRaw('LOWER(emp_code) = ?', [strtolower($code)])->first()
+            ?: (Schema::hasColumn('employees', 'device_user_id') ? (clone $q)->where('device_user_id', $code)->first() : null);
     }
 
     /** Resolve the tenant from the request host (custom domain) or a slug. */
@@ -90,6 +112,7 @@ class MobileDeviceController extends Controller
                 'device_name' => ['nullable', 'string', 'max:160'],
                 'platform' => ['nullable', 'string', 'max:20'],
                 'workspace' => ['nullable', 'string', 'max:60'],
+                'emp_code' => ['nullable', 'string', 'max:40'],   // 7 Oct 2026 — the phone owner's Employee ID
             ]);
             $tenant = $this->resolveTenant($request);
             // If we cannot resolve a tenant (e.g. someone typed the bare shared
@@ -104,6 +127,18 @@ class MobileDeviceController extends Controller
             $existing = DB::table('mobile_devices')
                 ->where('tenant_id', $tenant->id)->where('device_id', $v['device_id'])->first();
 
+            // 7 Oct 2026 — resolve the Employee ID now so the admin sees who it is.
+            $emp = null;
+            if (! empty($v['emp_code'])) {
+                $emp = self::findEmployee((int) $tenant->id, (string) $v['emp_code']);
+                if (! $emp) {
+                    return response()->json(['ok' => false, 'error' => 'Employee ID "'.$v['emp_code'].'" was not found in this workspace. Check it with HR and try again.'], 422);
+                }
+            }
+            // An approved phone keeps its owner; a pending/rejected one takes the latest ID typed.
+            $empCols = $emp && (! $existing || $existing->status !== 'approved')
+                ? ['employee_id' => $emp->id, 'emp_code' => $emp->emp_code] : [];
+
             $code = $existing->code ?? strtoupper(Str::substr(preg_replace('/[^A-Za-z0-9]/', '', $v['device_id']), -6)) ?: strtoupper(Str::random(6));
             if ($existing) {
                 DB::table('mobile_devices')->where('id', $existing->id)->update([
@@ -111,7 +146,7 @@ class MobileDeviceController extends Controller
                     'platform' => $v['platform'] ?? $existing->platform,
                     'host' => $request->getHost(),
                     'last_seen_at' => now(), 'updated_at' => now(),
-                ]);
+                ] + $empCols);
                 $row = DB::table('mobile_devices')->where('id', $existing->id)->first();
             } else {
                 $id = DB::table('mobile_devices')->insert([
@@ -119,7 +154,7 @@ class MobileDeviceController extends Controller
                     'device_name' => $v['device_name'] ?? null, 'platform' => $v['platform'] ?? null,
                     'host' => $request->getHost(), 'status' => 'pending', 'code' => $code,
                     'last_seen_at' => now(), 'created_at' => now(), 'updated_at' => now(),
-                ]);
+                ] + $empCols);
                 $row = DB::table('mobile_devices')->where('tenant_id', $tenant->id)
                     ->where('device_id', $v['device_id'])->first();
             }
@@ -221,17 +256,38 @@ class MobileDeviceController extends Controller
         self::ensure();
         $this->guard($request);
         $tid = $this->scopeTenantId($request);
-        $rows = DB::table('mobile_devices')
+        $devs = DB::table('mobile_devices')
             ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
             ->orderByRaw("FIELD(status,'pending','approved','rejected')")
-            ->orderByDesc('id')->limit(500)->get()
-            ->map(fn ($r) => [
+            ->orderByDesc('id')->limit(500)->get();
+        // 7 Oct 2026 (Ejaz) — employee details for the approver.
+        $emps = DB::table('employees')->whereIn('id', $devs->pluck('employee_id')->filter()->unique()->all() ?: [0])->get()->keyBy('id');
+        $deptNames = Schema::hasTable('departments') ? DB::table('departments')->pluck('name', 'id') : collect();
+        $branchNames = Schema::hasTable('branches') ? DB::table('branches')->pluck('name', 'id') : collect();
+        $mgrNames = DB::table('employees')->whereIn('id', $emps->pluck('reporting_manager_id')->filter()->unique()->all() ?: [0])->pluck('name', 'id');
+        $empInfo = function ($r) use ($emps, $deptNames, $branchNames, $mgrNames) {
+            $e = $emps[(int) ($r->employee_id ?? 0)] ?? null;
+            if (! $e) {
+                return ['empCode' => $r->emp_code ?? '', 'empName' => '', 'department' => '', 'branch' => '', 'manager' => ''];
+            }
+            $a = (array) $e;
+
+            return [
+                'empCode' => $a['emp_code'] ?? '', 'empName' => $a['name'] ?? '',
+                'department' => ($a['department'] ?? '') ?: ($deptNames[$a['department_id'] ?? 0] ?? ''),
+                'branch' => ($a['branch'] ?? '') ?: ($branchNames[$a['branch_id'] ?? 0] ?? ''),
+                'manager' => ($a['reporting_manager'] ?? '') ?: ($mgrNames[$a['reporting_manager_id'] ?? 0] ?? ''),
+                'empStatus' => $a['status'] ?? '',
+            ];
+        };
+        $rows = $devs
+            ->map(fn ($r) => $empInfo($r) + [
                 'id' => $r->id, 'deviceName' => $r->device_name, 'platform' => $r->platform,
                 'code' => $r->code, 'status' => $r->status, 'host' => $r->host,
                 'approvedBy' => $r->approved_by, 'rejectReason' => $r->reject_reason,
                 'hasPush' => ! empty($r->push_token),
                 'lastSeen' => $r->last_seen_at ? \Carbon\Carbon::parse($r->last_seen_at)->diffForHumans() : null,
-                'registered' => $r->created_at ? \Carbon\Carbon::parse($r->created_at)->format('d M Y H:i') : null,
+                'registered' => $r->created_at ? \Carbon\Carbon::parse($r->created_at)->format('d-m-Y H:i') : null,
             ])->values();
 
         return response()->json(['ok' => true, 'rows' => $rows]);
@@ -246,7 +302,21 @@ class MobileDeviceController extends Controller
         if (! $row) {
             return response()->json(['ok' => false, 'error' => 'Device not found.'], 404);
         }
-        DB::table('mobile_devices')->where('id', $id)->update([
+        // 7 Oct 2026 (Ejaz) — a device is approved FOR an employee. The phone sends the
+        // Employee ID; for older app builds the admin picks the employee here.
+        $link = [];
+        if ($request->filled('employee_id') || $request->filled('emp_code')) {
+            $emp = $request->filled('employee_id')
+                ? DB::table('employees')->where('id', (int) $request->input('employee_id'))->when($tid, fn ($q) => $q->where('tenant_id', $tid))->whereNull('deleted_at')->first()
+                : self::findEmployee($tid, (string) $request->input('emp_code'));
+            if (! $emp) {
+                return response()->json(['ok' => false, 'error' => 'Employee not found.'], 422);
+            }
+            $link = ['employee_id' => $emp->id, 'emp_code' => $emp->emp_code];
+        }
+        // No employee yet (older app build): approve anyway — the device links itself to
+        // the employee who signs in on it first (DeviceAutoLink middleware).
+        DB::table('mobile_devices')->where('id', $id)->update($link + [
             'status' => 'approved', 'token' => $row->token ?: Str::random(48),
             'approved_by' => (string) ($request->user()->name ?? ''), 'approved_at' => now(),
             'reject_reason' => null, 'updated_at' => now(),

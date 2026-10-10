@@ -25,17 +25,28 @@ class AttendanceCorrectionController extends Controller
             $user = $request->user();
             $tid = $user->tenant_id ? (int) $user->tenant_id : null;
             $emp = $this->currentEmployee($request);
-            $own = $this->canReview($request) ? null : (int) ($emp->id ?? 0);
+            // 7 Oct 2026 (Ejaz) — hierarchy: own + whole reporting line below
+            // (Admin / HR see all); any manager above the employee may decide.
+            $own = $this->canReview($request) ? null : (\App\Services\Hierarchy::visibleIds($user) ?? null);
+            $myId = isset($emp->id) ? (int) $emp->id : 0;
+            $items = array_map(function ($it) use ($user, $myId) {
+                $it['own'] = (int) $it['employee_id'] === $myId;
+                $it['can_decide'] = $it['status'] === 'pending'
+                    && \App\Services\Hierarchy::canApprove($user, (int) $it['employee_id'], null, 'attendance');
+
+                return $it;
+            }, Svc::listFor($tid, $own, [
+                'status' => $request->input('status'),
+                'from' => $request->input('from'),
+                'to' => $request->input('to'),
+            ]));
+            $leads = $myId && \App\Services\Hierarchy::downline($myId, $tid);
 
             return response()->json([
                 'ok' => true,
-                'can_review' => $this->canReview($request),
+                'can_review' => $this->canReview($request) || $leads,
                 'sub_types' => Svc::SUB_TYPES,
-                'items' => Svc::listFor($tid, $own, [
-                    'status' => $request->input('status'),
-                    'from' => $request->input('from'),
-                    'to' => $request->input('to'),
-                ]),
+                'items' => $items,
             ]);
         } catch (\Throwable $e) {
             return response()->json(['ok' => false, 'error' => $e->getMessage()]);
@@ -89,6 +100,13 @@ class AttendanceCorrectionController extends Controller
             if (! $res['ok']) {
                 return response()->json(['ok' => false, 'error' => $res['error']], 422);
             }
+            // 30 Sep 2026 (Ejaz) — bell notification up the hierarchy + Admins / HR.
+            \App\Services\NotificationService::notifyUpline($emp, 'request.att_correction', 'Attendance correction · '.$emp->name,
+                trim($request->input('date').' · '.(Svc::SUB_TYPES[$request->input('sub_type')] ?? $request->input('sub_type'))
+                    .($request->input('req_in') ? ' · In '.$request->input('req_in') : '').($request->input('req_out') ? ' · Out '.$request->input('req_out') : '')
+                    .($request->input('reason') ? ' · '.$request->input('reason') : '')),
+                'att-correction', (int) $res['id'], null, $user->id ?? null);
+
             AuditTrail::log($request, 'attendance.correction.requested', 'attendance_corrections', $res['id'], [
                 'date' => $request->input('date'), 'sub_type' => $request->input('sub_type'),
             ]);
@@ -123,11 +141,17 @@ class AttendanceCorrectionController extends Controller
      */
     public function decide(Request $request, $id)
     {
-        if ($deny = FeaturePermissions::guard($request, 'attendance.correction.review')) {
-            return $deny;
-        }
         try {
             $user = $request->user();
+            // 7 Oct 2026 (Ejaz) — HR / Admin as before, or any manager above the
+            // employee in the reporting line (never your own request).
+            $rowEmp = (int) (DB::table('attendance_corrections')->where('id', (int) $id)
+                ->when($user->tenant_id, fn ($q) => $q->where('tenant_id', $user->tenant_id))->value('employee_id') ?? 0);
+            $hrOk = FeaturePermissions::guard($request, 'attendance.correction.review') === null;
+            if (! ($hrOk && $rowEmp !== (int) (\App\Services\Hierarchy::meId($user) ?? -1))
+                && ! \App\Services\Hierarchy::canApprove($user, $rowEmp, null, 'attendance')) {
+                return response()->json(['ok' => false, 'error' => 'Only a manager above this employee in the reporting line (or HR / Admin) can decide this correction.'], 403);
+            }
             $res = Svc::decide((int) $id, (string) $request->input('action'), [
                 'tenant_id' => $user->tenant_id ? (int) $user->tenant_id : null,
                 'by' => $user->name ?? $user->email ?? 'HR',
@@ -142,6 +166,10 @@ class AttendanceCorrectionController extends Controller
                 'punches_written' => $res['punches_written'] ?? 0,
                 'payroll_locked' => $res['payroll_locked'] ?? false,
             ]);
+            // 8 Oct 2026 (Ejaz) — bell to the employee: their correction was decided.
+            \App\Services\NotificationService::notifyEmployee($rowEmp, 'decision.att_correction.'.($res['status'] ?? 'decided'),
+                'Attendance correction '.($res['status'] ?? 'decided').' by '.($user->name ?? 'your manager'),
+                $request->input('remarks') ? (string) $request->input('remarks') : null, 'att-correction', (int) $id, $user->id ?? null);
 
             return response()->json($res);
         } catch (\Throwable $e) {

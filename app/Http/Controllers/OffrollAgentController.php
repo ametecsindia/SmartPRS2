@@ -158,7 +158,7 @@ class OffrollAgentController extends Controller
             }
             $entries[] = [
                 'id' => $r->id,
-                'date' => $r->entry_date ? Carbon::parse($r->entry_date)->format('d M') : '',
+                'date' => $r->entry_date ? Carbon::parse($r->entry_date)->format('d-m-Y') : '',
                 'kind' => $r->kind,
                 'sign' => $r->kind === 'deduction' ? '-' : '+',
                 'head' => ['visit' => 'Field visits', 'collection' => 'Collection commission', 'fixed' => 'Fixed payout', 'adjustment' => 'Adjustment / bonus', 'deduction' => 'Deduction'][$r->kind] ?? ucfirst($r->kind),

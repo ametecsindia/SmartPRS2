@@ -96,7 +96,7 @@
             <div class="ok">✔ Acknowledged (e-signed)</div>
             <div style="margin-top:4px">
                 Signed by <strong>{{ $p->ack_name ?: $p->emp_name }}</strong>
-                @if(!empty($p->ack_at)) on {{ \Illuminate\Support\Carbon::parse($p->ack_at)->format('d M Y H:i') }} @endif
+                @if(!empty($p->ack_at)) on {{ \Illuminate\Support\Carbon::parse($p->ack_at)->format('d-m-Y H:i') }} @endif
                 @if(!empty($p->ack_ip)) · IP {{ $p->ack_ip }} @endif
             </div>
         @else

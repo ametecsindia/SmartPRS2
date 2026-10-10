@@ -29,7 +29,7 @@
         <td class="right">
             <div class="h">TAX INVOICE</div>
             <div><strong>{{ $c->invoice_no }}</strong></div>
-            <div class="muted">Date: {{ now()->format('d M Y') }}</div>
+            <div class="muted">Date: {{ now()->format('d-m-Y') }}</div>
         </td>
     </tr></table>
 

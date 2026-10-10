@@ -55,7 +55,7 @@ class NdaSignController extends Controller
         $body = ($tpl && trim((string) $tpl->body)) ? $tpl->body
             : "CONFIDENTIALITY & NON-DISCLOSURE UNDERTAKING\n\nI, {{employee_name}} ({{emp_code}}), engaged as {{designation}} in {{department}} at {{company}}, will access confidential borrower and customer information and undertake to: keep it strictly confidential and use it only for authorised recovery work; never share, export or handle it via personal devices, email or messaging; comply with the RBI fair-practices / recovery-conduct norms and the Digital Personal Data Protection Act, 2023; return or securely destroy it and surrender all access on the end of my engagement; and accept that any breach may lead to disciplinary action and civil / criminal consequences.\n\nSigned on {{date}}.\n\n{{employee_name}}\nFor {{company}}";
 
-        $date = $letter->issued_on ? Carbon::parse($letter->issued_on)->format('d M Y') : now()->format('d M Y');
+        $date = $letter->issued_on ? Carbon::parse($letter->issued_on)->format('d-m-Y') : now()->format('d-m-Y');
         $body = strtr($body, [
             '{{employee_name}}' => $emp->name ?? ($emp->full_name ?? ''),
             '{{emp_code}}' => $emp->emp_code ?? '',

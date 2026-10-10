@@ -24,7 +24,8 @@ class ProbationController extends Controller
             $tid = $request->user()->tenant_id ?? null;
             ProbationService::ensureSchema();
 
-            return response()->json(['ok' => true, 'items' => $tid ? ProbationService::board((int) $tid) : []]);
+            // NULL tenant = self-hosted install: board it too (was always empty).
+            return response()->json(['ok' => true, 'items' => ProbationService::board($tid !== null ? (int) $tid : null)]);
         } catch (\Throwable $e) {
             return response()->json(['ok' => false, 'error' => $e->getMessage()]);
         }
@@ -76,7 +77,7 @@ class ProbationController extends Controller
         }
         try {
             $user = $request->user();
-            $tid = (int) ($user->tenant_id ?? 0);
+            $tid = $user->tenant_id !== null ? (int) $user->tenant_id : null;
             $by = $user->name ?? $user->email ?? 'HR';
             $ok = ProbationService::confirm($tid, (int) $emp, $by, $request->input('remarks'));
 
@@ -102,7 +103,7 @@ class ProbationController extends Controller
                 return response()->json(['ok' => false, 'error' => 'Remarks are mandatory when extending probation.'], 422);
             }
             $user = $request->user();
-            $tid = (int) ($user->tenant_id ?? 0);
+            $tid = $user->tenant_id !== null ? (int) $user->tenant_id : null;
             $by = $user->name ?? $user->email ?? 'HR';
             $ok = ProbationService::extend($tid, (int) $emp, $newEnd, $by, $remarks);
 
@@ -116,9 +117,9 @@ class ProbationController extends Controller
     public function history(Request $request, $emp)
     {
         try {
-            $tid = (int) ($request->user()->tenant_id ?? 0);
+            $t = $request->user()->tenant_id ?? null;
 
-            return response()->json(['ok' => true, 'items' => ProbationService::history($tid, (int) $emp)]);
+            return response()->json(['ok' => true, 'items' => ProbationService::history($t !== null ? (int) $t : null, (int) $emp)]);
         } catch (\Throwable $e) {
             return response()->json(['ok' => false, 'error' => $e->getMessage()]);
         }

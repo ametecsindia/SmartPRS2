@@ -140,7 +140,7 @@ class EssController extends Controller
         $out['present'] = (int) DB::table('attendance_logs')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->where('emp_code', $code)
             ->whereBetween('log_date', [$w['start'], $w['attendance_end']])->distinct()->count('log_date'); // rev172 — tenant-scoped (emp codes repeat across tenants)
         $last = DB::table('attendance_logs')->when($tid, fn ($q) => $q->where('tenant_id', $tid))->where('emp_code', $code)->orderByDesc('punch_at')->value('punch_at');
-        $out['last_punch'] = $last ? Carbon::parse($last)->format('d M, H:i') : null;
+        $out['last_punch'] = $last ? Carbon::parse($last)->format('d-m-Y H:i') : null;
 
         return $out;
     }

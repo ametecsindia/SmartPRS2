@@ -36,7 +36,7 @@
                     <td class="mono" style="font-weight:700;">{{ $d->serial_number ?: '—' }}</td>
                     <td>{{ $d->label ?: '—' }}</td>
                     <td class="muted">{{ $d->provider ?: '—' }}</td>
-                    <td class="muted small">{{ $d->last_sync_at ? substr((string) $d->last_sync_at, 0, 16) : 'never' }}</td>
+                    <td class="muted small">{{ $d->last_sync_at ? \App\Support\DateFmt::display(substr((string) $d->last_sync_at, 0, 16)) : 'never' }}</td>
                     <td>
                         <form method="POST" action="{{ route('app.pending.assign') }}"
                               style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;"
@@ -72,6 +72,12 @@
     @if ($totalHeld)
         <p style="margin:12px 0 0; font-weight:600;">
             {{ $totalHeld }} punch(es) held across {{ $rows->count() }} code/device combination(s).
+        </p>
+    @endif
+    @if (! empty($unusable))
+        <p class="muted small" style="margin:8px 0 0;">
+            {{ $unusable }} older punch(es) arrived with no device code, no device and no time, so they cannot be
+            mapped to anyone and are not listed below. They are kept in the database, not deleted.
         </p>
     @endif
 </div>

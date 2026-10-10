@@ -241,6 +241,14 @@ function renderQuote(){
     q.total = Math.round((q.amount + q.tax) * 100) / 100;
     h += '<div class="row"><span>Coupon ' + state.coupon.code + ' (' + state.coupon.label + ')</span><b style="color:#16a34a">−' + inr(cd) + '</b></div>';
   }
+  // 8 Oct 2026 (Ejaz): one-time Setup & Onboarding charge from Super Admin → Plans & Pricing; GST applies, coupon does not.
+  var setup = Number(q.p.setup_charge || 0);
+  if (setup > 0) {
+    h += '<div class="row"><span>Setup &amp; Onboarding charges (one-time)</span><b>'+inr(setup)+'</b></div>';
+    q.amount = Math.round((q.amount + setup) * 100) / 100;
+    q.tax = Math.round(q.amount * GST) / 100;
+    q.total = Math.round((q.amount + q.tax) * 100) / 100;
+  }
   h += '<div class="row"><span>Subtotal</span><b>'+inr(q.amount)+'</b></div>';
   h += '<div class="row"><span>GST (18%)</span><b>'+inr(q.tax)+'</b></div>';
   h += '<div class="total"><span>Payable now</span><span>'+inr(q.total)+'</span></div>';

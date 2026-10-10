@@ -23,8 +23,10 @@ use Illuminate\Support\Facades\Schema;
  *   present    = any attendance_logs row for (emp_code, log_date)
  *   holiday    = holidays row (tenant_id, date)
  *   on leave   = approved leaves row spanning the date
- *   weekly-off = ShiftResolver 'off' for that date, else the configured
- *                working_days fallback when no shift is defined.
+ *   weekly-off = a roster entry for that date decides; otherwise the Weekly
+ *                Offs setting (Attendance -> Working Shifts: weekly_off_day +
+ *                sat_off_mode), via PayrollGenController::isWeekOff() — the
+ *                SAME rule payroll uses, so attendance and pay never disagree.
  *
  * No WFH table exists in this codebase, so WFH is not separately excluded; a
  * WFH day is expected to be recorded as leave or regularised via the link.
@@ -40,9 +42,6 @@ class AbsenceService
             'send_hour' => 11,           // local hour the sweep should fire (grace for late imports)
             'notify_employee' => true,
             'notify_manager' => false,
-            // Fallback weekly pattern when no shift/roster defines the day.
-            // ISO weekday: 1=Mon … 7=Sun. Default Mon–Sat working, Sun off.
-            'working_days' => [1, 2, 3, 4, 5, 6],
             'regularise_screen' => 'att-correction',   // F2 deep link
         ];
     }
@@ -93,37 +92,46 @@ class AbsenceService
             $ymd = $day->toDateString();
             $iso = (int) $day->isoWeekday();   // 1..7
 
+            // NULL tenant = self-hosted install; it used to be filtered out, so
+            // on-prem absence alerts never ran (2026-09-28).
             $tenantIds = $tenantId !== null ? [$tenantId]
-                : DB::table('employees')->distinct()->pluck('tenant_id')->filter()->values()->all();
+                : DB::table('employees')->distinct()->pluck('tenant_id')->unique()->values()->all();
 
             foreach ($tenantIds as $tid) {
-                $tid = (int) $tid;
+                $tid = $tid === null ? null : (int) $tid;
                 $cfg = self::config($tid);
                 if (empty($cfg['enabled'])) {
                     continue;
                 }
-                if ($hourGate !== null && (int) ($cfg['send_hour'] ?? 11) !== $hourGate) {
+                // At or AFTER send_hour (was: exactly that hour). Notices dedupe per
+                // employee/day, so a later hourly run is safe — and a web-driven tick
+                // that missed the send hour still delivers the alert that day.
+                if ($hourGate !== null && (int) ($cfg['send_hour'] ?? 11) > $hourGate) {
                     continue;
                 }
                 $tenantsRun++;
 
-                // Tenant-wide holiday? then nobody is absent.
-                if (self::isHoliday($tid, $ymd)) {
-                    continue;
-                }
+                // 7 Oct 2026 — holidays per company / branch (Applies To), checked per employee below.
+                $holSet = \App\Services\WorkCalendar::holidays($tid, $ymd, $ymd);
 
                 // Bulk sets for this date (one query each, not per-employee).
                 $present = self::presentEmpCodes($tid, $ymd);          // lower-cased emp_codes with a punch
                 $onLeave = self::onLeaveEmployeeIds($tid, $ymd);       // employee ids with approved leave
                 [$shiftDefs, $rosterMap] = self::shiftContext($tid, $ymd);
-                $workingDays = array_map('intval', (array) ($cfg['working_days'] ?? [1, 2, 3, 4, 5, 6]));
+                $offRules = \App\Http\Controllers\SettingsController::rates($tid);   // Weekly Offs setting
 
                 $emps = DB::table('employees')->where('tenant_id', $tid)
                     ->whereNull('deleted_at')->where('status', 'active')->get();
 
                 foreach ($emps as $e) {
+                    if (! empty($e->doj) && substr((string) $e->doj, 0, 10) > $ymd) {
+                        continue;   // not yet joined
+                    }
+                    if (\App\Services\WorkCalendar::isHoliday($holSet, $ymd, \App\Services\WorkCalendar::companyName((int) ($e->company_id ?? 0)), $e->branch ?? null)) {
+                        continue;   // holiday for this employee's company / branch
+                    }
                     $evaluated++;
-                    if (self::isAbsent($e, $ymd, $iso, $present, $onLeave, $shiftDefs, $rosterMap, $workingDays)) {
+                    if (self::isAbsent($e, $ymd, $iso, $present, $onLeave, $shiftDefs, $rosterMap, $offRules)) {
                         if (self::notify($tid, $e, $ymd, $cfg)) {
                             $notified++;
                         }
@@ -138,7 +146,7 @@ class AbsenceService
     }
 
     /** Absence decision for one employee on one date. Pure given the prepared sets. */
-    public static function isAbsent($emp, string $ymd, int $iso, array $present, array $onLeave, array $shiftDefs, array $rosterMap, array $workingDays): bool
+    public static function isAbsent($emp, string $ymd, int $iso, array $present, array $onLeave, array $shiftDefs, array $rosterMap, array $offRules): bool
     {
         $a = (array) $emp;
         $code = strtolower((string) ($a['emp_code'] ?? ''));
@@ -153,7 +161,7 @@ class AbsenceService
         if (isset($onLeave[(int) ($a['id'] ?? 0)])) {
             return false;
         }
-        if (self::isWeeklyOff($emp, $ymd, $iso, $shiftDefs, $rosterMap, $workingDays)) {
+        if (self::isWeeklyOff($emp, $ymd, $iso, $shiftDefs, $rosterMap, $offRules)) {
             return false;   // weekly-off — not expected to work
         }
 
@@ -161,31 +169,30 @@ class AbsenceService
     }
 
     /**
-     * Weekly-off decision for one employee on one date. Prefers the resolved
-     * shift/roster 'off' flag; falls back to the configured working_days
-     * pattern when no shift is defined. Split out of isAbsent() so both the F10
-     * sweep and AttendanceReportController's day-by-day classification share
-     * the exact same rule instead of two copies that could drift apart.
+     * Weekly-off decision for one employee on one date. A ROSTER entry for the
+     * date wins (Week-off = off; a scheduled shift = working, even on the usual
+     * off day). Otherwise the Weekly Offs setting decides ($offRules =
+     * SettingsController::rates(): weekly_off_day + sat_off_mode) through
+     * PayrollGenController::isWeekOff() — the exact rule payroll uses for
+     * working days / LOP. 2026-09-28: previously this read a separate
+     * absence_notify.working_days list and treated any employee with a default
+     * shift as working every day, so reports and payroll could disagree.
      */
-    public static function isWeeklyOff($emp, string $ymd, int $iso, array $shiftDefs, array $rosterMap, array $workingDays): bool
+    public static function isWeeklyOff($emp, string $ymd, int $iso, array $shiftDefs, array $rosterMap, array $offRules): bool
     {
         $a = (array) $emp;
-        $off = null;
         if ($shiftDefs) {
             try {
                 $sh = ShiftResolver::resolve($shiftDefs, $rosterMap, (string) ($a['name'] ?? ''), $a['shift'] ?? null, $ymd);
-                if (is_array($sh) && array_key_exists('off', $sh)) {
-                    $off = (bool) $sh['off'];
+                if (is_array($sh) && ($sh['source'] ?? '') === 'roster') {
+                    return (bool) ($sh['off'] ?? false);
                 }
             } catch (\Throwable $e) {
-                $off = null;
             }
         }
-        if ($off === null) {
-            $off = ! in_array($iso, $workingDays, true);   // no shift info → configured pattern
-        }
 
-        return $off;
+        // 7 Oct 2026 — the employee's company may override the weekly offs.
+        return \App\Http\Controllers\PayrollGenController::isWeekOff(Carbon::parse($ymd), \App\Services\WorkCalendar::forCompany($offRules, $a['company_id'] ?? null));
     }
 
     /**
@@ -195,22 +202,8 @@ class AbsenceService
      */
     public static function holidaysInRange(?int $tid, string $from, string $to): array
     {
-        $set = [];
-        try {
-            if (! Schema::hasTable('holidays')) {
-                return $set;
-            }
-            $rows = DB::table('holidays')
-                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
-                ->whereDate('date', '>=', $from)->whereDate('date', '<=', $to)
-                ->pluck('date');
-            foreach ($rows as $d) {
-                $set[Carbon::parse($d)->toDateString()] = true;
-            }
-        } catch (\Throwable $e) {
-        }
-
-        return $set;
+        // 7 Oct 2026 — 'Y-m-d' => [] (everyone) | [company/branch scopes]; see WorkCalendar.
+        return \App\Services\WorkCalendar::holidays($tid, $from, $to);
     }
 
     /**
@@ -259,12 +252,12 @@ class AbsenceService
      * @param  array  $leavesByEmp  from leavesInRange()
      * @return string 'holiday'|'on_leave'|'half_day'|'weekly_off'|'absent'
      */
-    public static function classifyNoPunchDay($emp, string $ymd, array $holidaySet, array $leavesByEmp, array $shiftDefs, array $rosterMap, array $workingDays): string
+    public static function classifyNoPunchDay($emp, string $ymd, array $holidaySet, array $leavesByEmp, array $shiftDefs, array $rosterMap, array $offRules): string
     {
-        if (isset($holidaySet[$ymd])) {
+        $a = (array) $emp;
+        if (\App\Services\WorkCalendar::isHoliday($holidaySet, $ymd, \App\Services\WorkCalendar::companyName((int) ($a['company_id'] ?? 0)), $a['branch'] ?? null)) {
             return 'holiday';
         }
-        $a = (array) $emp;
         $empId = (int) ($a['id'] ?? 0);
         foreach ($leavesByEmp[$empId] ?? [] as $lv) {
             if ($ymd >= $lv['from'] && $ymd <= $lv['to']) {
@@ -273,7 +266,7 @@ class AbsenceService
             }
         }
         $iso = (int) Carbon::parse($ymd)->isoWeekday();
-        if (self::isWeeklyOff($emp, $ymd, $iso, $shiftDefs, $rosterMap, $workingDays)) {
+        if (self::isWeeklyOff($emp, $ymd, $iso, $shiftDefs, $rosterMap, $offRules)) {
             return 'weekly_off';
         }
 
@@ -281,11 +274,11 @@ class AbsenceService
     }
 
     /** Send the absence notice to the employee (and optionally the manager). */
-    private static function notify(int $tid, $emp, string $ymd, array $cfg): bool
+    private static function notify(?int $tid, $emp, string $ymd, array $cfg): bool
     {
         $a = (array) $emp;
         $empId = (int) ($a['id'] ?? 0);
-        $nice = Carbon::parse($ymd)->format('D, d M Y');
+        $nice = Carbon::parse($ymd)->format('D, d-m-Y');
         $screen = $cfg['regularise_screen'] ?? 'att-correction';
         $any = false;
 
@@ -327,7 +320,7 @@ class AbsenceService
 
     // ---- prepared-set helpers (one query each per tenant/day) ---------------
 
-    private static function isHoliday(int $tid, string $ymd): bool
+    private static function isHoliday(?int $tid, string $ymd): bool
     {
         try {
             if (! Schema::hasTable('holidays')) {
@@ -341,7 +334,7 @@ class AbsenceService
     }
 
     /** Lower-cased emp_codes that have at least one punch on the date. */
-    private static function presentEmpCodes(int $tid, string $ymd): array
+    private static function presentEmpCodes(?int $tid, string $ymd): array
     {
         $set = [];
         try {
@@ -359,7 +352,7 @@ class AbsenceService
     }
 
     /** Employee ids with an APPROVED leave spanning the date. */
-    private static function onLeaveEmployeeIds(int $tid, string $ymd): array
+    private static function onLeaveEmployeeIds(?int $tid, string $ymd): array
     {
         $set = [];
         try {
@@ -382,7 +375,7 @@ class AbsenceService
     }
 
     /** [shiftDefs, rosterMap] for the tenant/date, or [[], []] on any issue. */
-    private static function shiftContext(int $tid, string $ymd): array
+    private static function shiftContext(?int $tid, string $ymd): array
     {
         try {
             $defs = ShiftResolver::shifts($tid);

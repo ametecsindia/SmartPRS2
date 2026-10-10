@@ -90,7 +90,7 @@ class LetterController extends Controller
                 .'Create one in HR Letters → Templates first.', 422)->header('Content-Type', 'text/plain')];
         }
 
-        $date = $letter->issued_on ? Carbon::parse($letter->issued_on)->format('d M Y') : now()->format('d M Y');
+        $date = $letter->issued_on ? Carbon::parse($letter->issued_on)->format('d-m-Y') : now()->format('d-m-Y');
 
         // An OFFER letter goes to a CANDIDATE (in Recruitment), not an employee.
         // Other letter types are for existing employees.
@@ -106,7 +106,7 @@ class LetterController extends Controller
             $designation = $cand->position ?? '';
             $department = '';
             $ctc = ($cand && $cand->offered_ctc) ? '₹'.number_format((float) $cand->offered_ctc) : '';
-            $doj = ($cand && $cand->offer_doj) ? Carbon::parse($cand->offer_doj)->format('d M Y') : '';
+            $doj = ($cand && $cand->offer_doj) ? Carbon::parse($cand->offer_doj)->format('d-m-Y') : '';
             $incentive = ($cand && $cand->offer_incentive) ? '₹'.number_format((float) $cand->offer_incentive) : '';
             $joiningBonus = ($cand && $cand->joining_bonus) ? '₹'.number_format((float) $cand->joining_bonus) : '';
             $pan = '';
@@ -121,7 +121,7 @@ class LetterController extends Controller
             $designation = $letter->designation_id ? DB::table('designations')->where('id', $letter->designation_id)->value('name') : '';
             $department = $letter->department_id ? DB::table('departments')->where('id', $letter->department_id)->value('name') : '';
             $ctc = $letter->ctc ? '₹'.number_format((float) $letter->ctc) : '';
-            $doj = $letter->doj ? Carbon::parse($letter->doj)->format('d M Y') : '';
+            $doj = $letter->doj ? Carbon::parse($letter->doj)->format('d-m-Y') : '';
             $incentive = '';
             $joiningBonus = '';
             $pan = $letter->pan ?? '';

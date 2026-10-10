@@ -223,6 +223,163 @@ class NotificationService
         return null;
     }
 
+    // ---- Request submitted → tell everyone above the employee ----------------
+
+    /**
+     * 30 Sep 2026 (Ejaz) — when an employee submits a request (leave, attendance
+     * correction, salary advance, loan, expense …) every person ABOVE them gets a
+     * bell notification: the reporting-manager chain all the way up (plus the
+     * resolved approver, which may be an escalated one), and every Company Admin
+     * and HR Manager login of the tenant. The submitter never notifies themself.
+     *
+     * $url is the SPA screen id the bell opens (e.g. 'loans', 'leave-apply').
+     * One notification_log row per recipient, deduped on kind + record + user, so
+     * a retried request never double-notifies. Fails soft like send().
+     * Returns the number of notifications written.
+     */
+    public static function notifyUpline($emp, string $kind, string $title, ?string $body, string $url, int $recordId, ?int $approverEmpId = null, ?int $submitterUserId = null): int
+    {
+        try {
+            if (! $emp || ! Schema::hasTable('users')) {
+                return 0;
+            }
+            $tid = $emp->tenant_id ?? null;
+
+            // 1) Reporting chain upward — the app-wide hierarchy (7 Oct 2026), loop-safe.
+            $chain = [];
+            $up = \App\Services\Hierarchy::upline(isset($emp->id) ? (int) $emp->id : null, $tid ? (int) $tid : null);
+            if ($up) {
+                foreach (DB::table('employees')->whereIn('id', $up)->whereNull('deleted_at')->get() as $row) {
+                    $chain[$row->id] = $row;
+                }
+            }
+            if ($approverEmpId && ! isset($chain[$approverEmpId])) {
+                $a = DB::table('employees')->where('id', $approverEmpId)->first();
+                if ($a) {
+                    $chain[$a->id] = $a;
+                }
+            }
+
+            // 2) Their logins: users.employee_id when present, else matching email.
+            $userIds = [];
+            if ($chain) {
+                $uq = DB::table('users')->when($tid, fn ($q) => $q->where('tenant_id', $tid));
+                $emails = array_values(array_filter(array_map(fn ($e) => isset($e->email) ? strtolower(trim((string) $e->email)) : '', $chain)));
+                $hasEmpCol = Schema::hasColumn('users', 'employee_id');
+                $uq->where(function ($w) use ($chain, $emails, $hasEmpCol) {
+                    if ($hasEmpCol) {
+                        $w->whereIn('employee_id', array_keys($chain));
+                    }
+                    if ($emails) {
+                        $w->orWhereIn(DB::raw('LOWER(email)'), $emails);
+                    }
+                    if (! $hasEmpCol && ! $emails) {
+                        $w->whereRaw('1 = 0');
+                    }
+                });
+                $userIds = $uq->pluck('id')->all();
+            }
+
+            // 3) Every Company Admin + HR Manager login of this tenant.
+            $userIds = array_merge($userIds, self::roleUserIds($tid, ['admin', 'hr_manager']));
+
+            $userIds = array_values(array_diff(array_unique(array_map('intval', $userIds)), [(int) $submitterUserId]));
+            $n = 0;
+            foreach ($userIds as $uid) {
+                if (self::send([
+                    'tenant_id' => $tid,
+                    'company_id' => $emp->company_id ?? null,
+                    'user_id' => $uid,
+                    'employee_id' => $emp->id ?? null,
+                    'kind' => $kind,
+                    'title' => $title,
+                    'body' => $body,
+                    'url' => $url,
+                    'dedupe_key' => $kind.':'.$recordId.':'.$uid,
+                    'meta' => ['record_id' => $recordId],
+                ])) {
+                    $n++;
+                }
+            }
+
+            return $n;
+        } catch (\Throwable $e) {
+            Log::warning('NotificationService::notifyUpline failed ('.$kind.'): '.$e->getMessage());
+
+            return 0;
+        }
+    }
+
+    /**
+     * 8 Oct 2026 (Ejaz) — tell the EMPLOYEE (their own logins) that their request
+     * was decided. Never notifies the person who made the decision. Fail-soft.
+     */
+    public static function notifyEmployee($empId, string $kind, string $title, ?string $body, string $url, int $recordId, ?int $actorUserId = null): int
+    {
+        try {
+            $emp = $empId ? DB::table('employees')->where('id', (int) $empId)->first() : null;
+            if (! $emp || ! Schema::hasTable('users')) {
+                return 0;
+            }
+            $tid = $emp->tenant_id ?? null;
+            $uq = DB::table('users')->when($tid, fn ($q) => $q->where('tenant_id', $tid));
+            $hasEmpCol = Schema::hasColumn('users', 'employee_id');
+            $email = strtolower(trim((string) ($emp->email ?? '')));
+            $uq->where(function ($w) use ($emp, $email, $hasEmpCol) {
+                if ($hasEmpCol) {
+                    $w->where('employee_id', (int) $emp->id);
+                }
+                if ($email !== '') {
+                    $w->orWhere(DB::raw('LOWER(email)'), $email);
+                }
+                if (! $hasEmpCol && $email === '') {
+                    $w->whereRaw('1 = 0');
+                }
+            });
+            $n = 0;
+            foreach (array_diff(array_map('intval', $uq->pluck('id')->all()), [(int) $actorUserId]) as $uid) {
+                if (self::send(['tenant_id' => $tid, 'company_id' => $emp->company_id ?? null, 'user_id' => $uid, 'employee_id' => $emp->id,
+                    'kind' => $kind, 'title' => $title, 'body' => $body, 'url' => $url,
+                    'dedupe_key' => $kind.':'.$recordId.':'.$uid, 'meta' => ['record_id' => $recordId]])) {
+                    $n++;
+                }
+            }
+
+            return $n;
+        } catch (\Throwable $e) {
+            Log::warning('NotificationService::notifyEmployee failed ('.$kind.'): '.$e->getMessage());
+
+            return 0;
+        }
+    }
+
+    /** Login ids holding any of these roles in the tenant (e.g. ['admin','hr_manager']). */
+    public static function roleUserIds(?int $tid, array $roles): array
+    {
+        try {
+            if (! Schema::hasTable('model_has_roles') || ! Schema::hasTable('roles')) {
+                return [];
+            }
+            $ids = DB::table('model_has_roles as mr')->join('roles as r', 'r.id', '=', 'mr.role_id')
+                ->whereIn('r.name', $roles)->where('mr.model_type', \App\Models\User::class)->pluck('mr.model_id')->all();
+
+            return $ids ? DB::table('users')->whereIn('id', $ids)->when($tid, fn ($q) => $q->where('tenant_id', $tid))->pluck('id')->map(fn ($x) => (int) $x)->all() : [];
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    /**
+     * Everyone BELOW an employee in the reporting chain (ids). Used so a manager
+     * who opens a notification can actually see their reportee's request.
+     */
+    public static function downlineIds(?int $empId, ?int $tenantId): array
+    {
+        // 7 Oct 2026 — one hierarchy for the whole app (reads the reporting-manager
+        // NAME the Directory writes, not only the rarely-filled _id column).
+        return \App\Services\Hierarchy::downline($empId, $tenantId);
+    }
+
     // ---- In-app inbox reads (used by NotificationController) ----------------
 
     /** Recent notifications for one app user (newest first). */
@@ -282,6 +439,20 @@ class NotificationService
                 ->when($userId, fn ($q) => $q->where('user_id', $userId))
                 ->whereNull('read_at')
                 ->update(['read_at' => now(), 'updated_at' => now()]) > 0;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /** Mark one notification UNREAD again (only if it belongs to the user). 2026-09-28. */
+    public static function markUnread(int $id, ?int $userId): bool
+    {
+        try {
+            return DB::table('notification_log')
+                ->where('id', $id)
+                ->when($userId, fn ($q) => $q->where('user_id', $userId))
+                ->whereNotNull('read_at')
+                ->update(['read_at' => null, 'updated_at' => now()]) > 0;
         } catch (\Throwable $e) {
             return false;
         }

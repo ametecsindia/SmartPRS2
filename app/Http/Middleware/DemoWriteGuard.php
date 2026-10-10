@@ -27,7 +27,7 @@ class DemoWriteGuard
         '#^app/roles#',
         '#^app/change-password$#',
         // Platform/tenant config & credentials.
-        '#^app/mail-settings#',
+        // 8 Oct 2026 (Ejaz) — mail-settings UNBLOCKED: SMTP save / test must work from Demo Admin to test the app.
         '#^app/branding#',
         '#^app/master/(wa-settings|sms-settings|sms-templates)(/|$)#',
         '#^app/wa-templates#',

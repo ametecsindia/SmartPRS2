@@ -106,9 +106,10 @@ class PunchIngestService
                     ? $employeeCode
                     : self::prefixFor($deviceSn, $tenantId, $prefixCache).$deviceUserId;
 
-                $cacheKey = $full.'|'.$deviceUserId;
+                $cacheKey = $full.'|'.$deviceUserId.'|'.$deviceSn;
                 if (! array_key_exists($cacheKey, $empCache)) {
-                    $empCache[$cacheKey] = ETimeOfficeService::matchEmployee($full, $deviceUserId, $tenantId) ?: false;
+                    // Branch-aware: the device's branch settles a Biometric ID shared across branches.
+                    $empCache[$cacheKey] = ETimeOfficeService::matchEmployee($full, $deviceUserId, $tenantId, ETimeOfficeService::branchForSn($tenantId, $deviceSn)) ?: false;
                 }
                 $emp = $empCache[$cacheKey];
 

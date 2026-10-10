@@ -91,7 +91,7 @@ class GreetingController extends Controller
             // {{company}} variable was broken).
             $tenantCompany = GreetingService::tenantCompany($tid) ?: 'Your Company';
             $vars = ['name' => 'Asha Rao', 'first_name' => 'Asha', 'company' => $tenantCompany,
-                'years' => $type === 'anniversary' ? '3' : '', 'date' => now()->format('d M Y'),
+                'years' => $type === 'anniversary' ? '3' : '', 'date' => now()->format('d-m-Y'),
                 'arrival_time' => '10:12 AM', 'shift_start' => '09:30', 'grace' => '10', 'late_by' => '32 min'];
             $empId = $request->input('employee_id');
             if ($empId && Schema::hasTable('employees')) {
@@ -144,7 +144,7 @@ class GreetingController extends Controller
             // 2026-08-05 — real company name in test sends too (was "Your Company").
             $vars = ['name' => $user->name ?? 'there', 'first_name' => trim(explode(' ', (string) ($user->name ?? 'there'))[0]),
                 'company' => GreetingService::tenantCompany($tid) ?: 'Your Company',
-                'years' => $type === 'anniversary' ? '3' : '', 'date' => now()->format('d M Y'),
+                'years' => $type === 'anniversary' ? '3' : '', 'date' => now()->format('d-m-Y'),
                 'arrival_time' => '10:12 AM', 'shift_start' => '09:30', 'grace' => '10', 'late_by' => '32 min'];
 
             $id = NotificationService::send([

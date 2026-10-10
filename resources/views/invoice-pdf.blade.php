@@ -75,14 +75,14 @@
                     @if(!empty($tenant->gstin))<div><b>GSTIN:</b> {{ $tenant->gstin }}</div>@endif
                     <div style="margin-top:8px;">
                         <span class="label">Invoice date</span>
-                        {{ $inv->issued_on ? \Illuminate\Support\Carbon::parse($inv->issued_on)->format('d M Y') : now()->format('d M Y') }}
+                        {{ $inv->issued_on ? \Illuminate\Support\Carbon::parse($inv->issued_on)->format('d-m-Y') : now()->format('d-m-Y') }}
                     </div>
                     <div>
                         <span class="label">Due date</span>
-                        {{ $inv->due_on ? \Illuminate\Support\Carbon::parse($inv->due_on)->format('d M Y') : '—' }}
+                        {{ $inv->due_on ? \Illuminate\Support\Carbon::parse($inv->due_on)->format('d-m-Y') : '—' }}
                     </div>
                     @if($inv->status === 'paid' && !empty($inv->paid_on))
-                        <div><span class="label">Paid on</span> {{ \Illuminate\Support\Carbon::parse($inv->paid_on)->format('d M Y') }}</div>
+                        <div><span class="label">Paid on</span> {{ \Illuminate\Support\Carbon::parse($inv->paid_on)->format('d-m-Y') }}</div>
                     @endif
                 </td>
             </tr>
@@ -103,8 +103,16 @@
                 </td>
                 <td>{{ $seller['sac'] }}</td>
                 <td class="amt">{{ (int) ($sub->seats ?? 0) }}</td>
-                <td class="amt">{{ number_format($amount, 2) }}</td>
+                <td class="amt">{{ number_format($amount - (float) ($inv->setup_charge ?? 0), 2) }}</td>
             </tr>
+            @if((float) ($inv->setup_charge ?? 0) > 0)
+            <tr>
+                <td>Setup &amp; Onboarding charges (one-time)</td>
+                <td>{{ $seller['sac'] }}</td>
+                <td class="amt"></td>
+                <td class="amt">{{ number_format((float) $inv->setup_charge, 2) }}</td>
+            </tr>
+            @endif
             <tr class="tot">
                 <td colspan="3">Taxable value</td>
                 <td class="amt">{{ number_format($amount, 2) }}</td>
@@ -127,7 +135,7 @@
             @if(empty($seller['gstin']))
                 <br><b>Note:</b> Seller GSTIN not configured — set BILLING_SELLER_GSTIN in the environment for a compliant invoice.
             @endif
-            <br>Generated {{ now()->format('d M Y, H:i') }}.
+            <br>Generated {{ now()->format('d-m-Y H:i') }}.
         </div>
     </div>
 </body>

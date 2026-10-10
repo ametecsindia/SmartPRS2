@@ -244,7 +244,7 @@ class GreetingService
             'first_name' => $first ?: $name,
             'company' => $company ?: 'our company',
             'years' => $years !== null ? (string) $years : '',
-            'date' => now()->format('d M Y'),
+            'date' => now()->format('d-m-Y'),
         ];
     }
 

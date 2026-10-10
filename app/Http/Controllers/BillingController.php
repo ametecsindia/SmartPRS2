@@ -200,7 +200,7 @@ class BillingController extends Controller
                         'cycle' => $s->cycle ?? ($plan->billing_cycle ?? 'monthly'),
                         'amount' => (float) ($s->amount ?? 0),
                         'status' => $s->status ?? 'none',
-                        'renewal' => ! empty($s->next_renewal) ? Carbon::parse($s->next_renewal)->format('d M Y') : '',
+                        'renewal' => ! empty($s->next_renewal) ? Carbon::parse($s->next_renewal)->format('d-m-Y') : '',
                         'daysLeft' => $daysLeft,
                         'lifecycle' => $lifecycle,   // active | grace | locked | ''
                     ];
@@ -216,7 +216,7 @@ class BillingController extends Controller
                         'tenant' => $tenantNames[$a->tenant_id] ?? ('#'.$a->tenant_id),
                         'kind' => $a->kind, 'channel' => $a->channel, 'status' => $a->status,
                         'detail' => $a->detail ?: '', 'periodEnd' => $a->period_end ?: '',
-                        'at' => Carbon::parse($a->created_at)->format('d M Y H:i'),
+                        'at' => Carbon::parse($a->created_at)->format('d-m-Y H:i'),
                     ])->values();
             } catch (\Throwable $e) {
             }
@@ -457,7 +457,7 @@ class BillingController extends Controller
                 'id' => $p->id, 'tenant' => $tenants[$p->tenant_id] ?? '—', 'invoice' => $invNo[$p->invoice_id] ?? '—',
                 'amount' => (float) $p->amount, 'gateway' => $p->gateway ?: '', 'method' => $p->method ?: '',
                 'txn' => $p->gateway_txn_id ?: '', 'status' => $p->status,
-                'paidAt' => ! empty($p->paid_at) ? Carbon::parse($p->paid_at)->format('d M Y H:i') : '',
+                'paidAt' => ! empty($p->paid_at) ? Carbon::parse($p->paid_at)->format('d-m-Y H:i') : '',
             ])->values();
 
             return response()->json(['rows' => $rows]);
@@ -902,7 +902,7 @@ class BillingController extends Controller
             $intro = $paid
                 ? 'Thank you — we have received your payment of ₹'.$total.'. Your tax invoice is attached.'
                 : 'Please find attached your tax invoice '.$inv->number.' for ₹'.$total.', due by '
-                    .($inv->due_on ? Carbon::parse($inv->due_on)->format('d M Y') : 'the due date').'.';
+                    .($inv->due_on ? Carbon::parse($inv->due_on)->format('d-m-Y') : 'the due date').'.';
             $pdfData = $b['pdf']->output();
 
             // rev 170 (Ejaz): invoices/receipts now use the BRANDED email template
@@ -922,7 +922,7 @@ class BillingController extends Controller
                 'lines' => [
                     'Invoice' => $inv->number,
                     'Amount (incl. GST)' => '₹'.$total,
-                    'Status' => $paid ? 'PAID' : ('Due by '.($inv->due_on ? Carbon::parse($inv->due_on)->format('d M Y') : '—')),
+                    'Status' => $paid ? 'PAID' : ('Due by '.($inv->due_on ? Carbon::parse($inv->due_on)->format('d-m-Y') : '—')),
                 ],
                 'bodyText' => 'Your GST tax invoice is attached as a PDF for your records.',
                 'ctaLabel' => 'Open your workspace',

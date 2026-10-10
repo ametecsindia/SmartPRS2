@@ -172,9 +172,9 @@ class SchemeController extends Controller
         return DB::table('employees')
             ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
             ->whereNull('deleted_at')
-            ->where(function ($q) use ($me) {
-                $q->where('reporting_manager_id', $me->id)
-                    ->orWhere('reporting_manager', $me->name)
+            ->where(function ($q) use ($me, $tid) {
+                // 7 Oct 2026 — the whole reporting line below (any depth) + team members led.
+                $q->whereIn('id', \App\Services\Hierarchy::downline((int) $me->id, $tid ? (int) $tid : null) ?: [-1])
                     ->orWhere('team_leader', $me->name);
             })->get(['id', 'name', 'emp_code', 'team', 'mobile', 'email']);
     }
@@ -350,8 +350,8 @@ class SchemeController extends Controller
             return [
                 'approvalStatus' => $appr, 'approver' => $s->approver ?? null,
                 'rejectReason' => $s->reject_reason ?? null, 'decidedBy' => $s->decided_by ?? null,
-                'decidedAt' => ! empty($s->decided_at) ? \Carbon\Carbon::parse($s->decided_at)->format('d M Y H:i') : null,
-                'createdAt' => ! empty($s->created_at) ? \Carbon\Carbon::parse($s->created_at)->format('d M Y H:i') : null,
+                'decidedAt' => ! empty($s->decided_at) ? \Carbon\Carbon::parse($s->decided_at)->format('d-m-Y H:i') : null,
+                'createdAt' => ! empty($s->created_at) ? \Carbon\Carbon::parse($s->created_at)->format('d-m-Y H:i') : null,
                 'canDecide' => $appr === 'pending' && ($adminish || ($me && (int) ($s->approver_emp ?? 0) === (int) $me->id)),
                 // rev 117: edit allowed even with claims (unlocked ones recalc);
                 // creator or admin. Withdrawn schemes get Re-open instead.
@@ -944,7 +944,7 @@ class SchemeController extends Controller
             $rateTxt = $s->rate_type === 'percent'
                 ? rtrim(rtrim(number_format((float) $s->rate_value, 2), '0'), '.').'% of the collected amount'
                 : ($s->rate_type === 'fixed' ? '₹'.number_format((float) $s->rate_value).' per claim' : 'as per entry');
-            $tillTxt = $s->valid_till ? Carbon::parse($s->valid_till)->format('d M Y') : 'until withdrawn';
+            $tillTxt = $s->valid_till ? Carbon::parse($s->valid_till)->format('d-m-Y') : 'until withdrawn';
 
             // 1) Notice Board (shows on the dashboard notice card).
             try {

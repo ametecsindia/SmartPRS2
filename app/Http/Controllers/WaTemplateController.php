@@ -241,9 +241,9 @@ class WaTemplateController extends Controller
                     'language' => $r->language, 'category' => $r->category,
                     'body' => $r->body, 'sampleValues' => $r->sample_values,
                     'varCount' => (int) $r->var_count, 'status' => $r->status,
-                    'lastTestAt' => $r->last_test_at ? \Illuminate\Support\Carbon::parse($r->last_test_at)->format('d M Y H:i') : null,
+                    'lastTestAt' => $r->last_test_at ? \Illuminate\Support\Carbon::parse($r->last_test_at)->format('d-m-Y H:i') : null,
                     'lastError' => $r->last_error,
-                    'updated' => $r->updated_at ? \Illuminate\Support\Carbon::parse($r->updated_at)->format('d M Y') : '',
+                    'updated' => $r->updated_at ? \Illuminate\Support\Carbon::parse($r->updated_at)->format('d-m-Y') : '',
                 ])->values();
 
             return response()->json([

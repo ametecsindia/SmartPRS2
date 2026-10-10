@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\FieldForceApiController;
 use App\Http\Controllers\Api\PublicApiController;
 use App\Http\Controllers\Api\SmarteptWebhookController;
 use Illuminate\Support\Facades\Route;
@@ -20,6 +21,8 @@ use Illuminate\Support\Facades\Route;
 |     GET  /api/v1/ping
 |     POST /api/v1/attendance/punches            (SBB, X-Api-Key)
 |     POST /api/v1/webhooks/smartept/{slug}      (SmartEPT, HMAC signature)
+|     POST /api/v1/fieldforce/geofence/check     (Caller app server, X-Api-Key)
+|     POST /api/v1/fieldforce/attendance         (Caller app server, X-Api-Key)
 |
 | The two are authenticated differently because the two senders are different.
 | SBB is ours and presents an API key. SmartEPT's OutboundPusher presents only
@@ -40,4 +43,8 @@ Route::prefix('v1')->middleware('throttle:300,1')->group(function () {
         ->where('slug', '[A-Za-z0-9]{8,32}')
         ->middleware('smartept-webhook')
         ->name('api.smartept.webhook');
+
+    // Caller (Ametecs Managed Mobile) — field-force sign-in geofence + login/logout attendance.
+    Route::post('fieldforce/geofence/check', [FieldForceApiController::class, 'geofenceCheck'])->middleware('api-key:ingest');
+    Route::post('fieldforce/attendance', [FieldForceApiController::class, 'attendance'])->middleware('api-key:ingest');
 });

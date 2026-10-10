@@ -177,7 +177,7 @@ class EmployeeExportController extends Controller
                     $raw = trim((string) ($r[$prop === '__doj' ? 'doj' : 'dob'] ?? ''));
                     $val = preg_match('/^(\d{4})-(\d{2})-(\d{2})/', $raw, $m) ? ($m[3].'-'.$m[2].'-'.$m[1]) : $raw;
                 } else {
-                    $val = $r[$prop] ?? '';
+                    $val = \App\Support\DateFmt::display($r[$prop] ?? '');   // 7 Oct 2026 — DRA/PCC/other dates as DD-MM-YYYY
                 }
                 if (in_array($prop, $boolCols, true)) {
                     $val = ((int) $val === 1) ? 'Yes' : 'No';

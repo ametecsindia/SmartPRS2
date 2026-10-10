@@ -113,6 +113,10 @@ class WaService
     {
         $ok = false;
         $error = null;
+        // 7 Oct 2026 (Ejaz) — template variables carry DD-MM-YYYY dates.
+        if (! empty($opts['bodyValues']) && is_array($opts['bodyValues'])) {
+            $opts['bodyValues'] = \App\Support\DateFmt::row($opts['bodyValues']);
+        }
         $digits = preg_replace('/\D+/', '', (string) ($opts['mobile'] ?? ''));
         $phone = substr($digits, -10);
         $template = $opts['template'] ?? (env('INTERAKT_TEMPLATE_WELCOME') ?: 'smartprs_welcome');

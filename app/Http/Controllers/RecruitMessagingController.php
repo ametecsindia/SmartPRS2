@@ -150,7 +150,7 @@ class RecruitMessagingController extends Controller
             $sharedVars = array_values(array_map('strval', $v['vars'] ?? []));
             $campaignRow = [
                 'tenant_id' => $tid, 'job_id' => $v['job_id'] ?? null,
-                'title' => $v['title'] ?: ('WhatsApp campaign '.now()->format('d M H:i')),
+                'title' => $v['title'] ?: ('WhatsApp campaign '.now()->format('d-m-Y H:i')),
                 'template' => $v['template'], 'purpose' => $v['purpose'] ?? 'custom',
                 'vars_json' => json_encode($sharedVars), 'total' => count($valid),
                 'sent' => 0, 'failed' => 0,
@@ -282,7 +282,7 @@ class RecruitMessagingController extends Controller
             'id' => (int) $c->id, 'title' => $c->title, 'template' => $c->template,
             'purpose' => $c->purpose, 'total' => (int) $c->total, 'sent' => (int) $c->sent,
             'failed' => (int) $c->failed, 'createdBy' => $c->created_by,
-            'when' => $c->created_at ? \Illuminate\Support\Carbon::parse($c->created_at)->format('d M Y H:i') : '',
+            'when' => $c->created_at ? \Illuminate\Support\Carbon::parse($c->created_at)->format('d-m-Y H:i') : '',
             'funnel' => $byCamp[$c->id] ?? [], 'delivery' => $byStatus[$c->id] ?? [],
         ])->values()]);
     }
@@ -311,7 +311,7 @@ class RecruitMessagingController extends Controller
                 'id' => (int) $m->id, 'candidateId' => $m->candidate_id ? (int) $m->candidate_id : null,
                 'name' => $m->name, 'mobile' => $m->mobile, 'status' => $m->status,
                 'error' => $m->error, 'response' => $m->response,
-                'sentAt' => $m->sent_at ? \Illuminate\Support\Carbon::parse($m->sent_at)->format('d M H:i') : null,
+                'sentAt' => $m->sent_at ? \Illuminate\Support\Carbon::parse($m->sent_at)->format('d-m-Y H:i') : null,
             ])->values(),
         ]);
     }
@@ -365,7 +365,7 @@ class RecruitMessagingController extends Controller
             fwrite($out, "\xEF\xBB\xBF");
             fputcsv($out, ['Name', 'Mobile', 'WhatsApp status', 'Error', 'Response', 'Sent at']);
             foreach ($rows as $r) {
-                fputcsv($out, [$r->name, $r->mobile, $r->status, $r->error, $r->response, $r->sent_at]);
+                fputcsv($out, \App\Support\DateFmt::row([$r->name, $r->mobile, $r->status, $r->error, $r->response, (string) $r->sent_at]));
             }
             fclose($out);
         }, 'recruitment-campaign-'.$id.'.csv', ['Content-Type' => 'text/csv; charset=UTF-8']);

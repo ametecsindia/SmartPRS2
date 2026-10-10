@@ -299,6 +299,16 @@ class EmployeeImportService
                     $rowErr = reset($fmt);
                 }
             }
+            // 7 Oct 2026 (Ejaz) — ACCESS ROLE must be a role that exists.
+            if ($rowErr === null && ! empty($v['access_role'])) {
+                $canonRole = \App\Services\AccessRoles::canonical($v['access_role'], $tid);
+                if (! $canonRole) {
+                    $rowErr = 'Access Role "'.$v['access_role'].'" is not set up — add it in Settings → Roles & Permissions, or use one of: '
+                        .implode(', ', \App\Services\AccessRoles::labels($tid)).'.';
+                } else {
+                    $v['access_role'] = $canonRole;
+                }
+            }
             if ($rowErr !== null) {
                 $errors[] = ['row' => $lineNo, 'message' => $rowErr];
 
@@ -367,7 +377,7 @@ class EmployeeImportService
             $payload = self::payload($v, $tid, $companyId);
             // Kept OUT of the employees payload — applied to the users table after
             // the import transaction (see applyLogin).
-            $login = $pwd !== '' ? ['email' => $v['email'], 'name' => $name, 'password' => $pwd] : null;
+            $login = $pwd !== '' ? ['email' => $v['email'], 'name' => $name, 'password' => $pwd, 'role' => $v['access_role'] ?? null] : null;
 
             if ($existing && $dupMode === 'update') {
                 $toUpdate[] = ['id' => $existing->id, 'payload' => $payload, 'row' => $lineNo, 'login' => $login];
@@ -439,6 +449,17 @@ class EmployeeImportService
                 }
             }
 
+            // 7 Oct 2026 (Ejaz) — reporting-line FKs follow the imported manager
+            // names; Access Roles go onto existing logins.
+            \App\Services\Hierarchy::syncManagerIds($tid);
+            $impCodes = array_values(array_filter(array_map(fn ($x) => $x['payload']['emp_code'] ?? null, array_merge($toUpdate, $toCreate))));
+            $impIds = $impCodes ? DB::table('employees')->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                ->whereIn('emp_code', $impCodes)->whereNull('deleted_at')->pluck('id')->map(fn ($x) => (int) $x)->all() : [];
+            $roleMsgs = $impIds ? \App\Services\AccessRoles::syncEmployees($tid, $impIds, auth()->user()) : [];
+            foreach (array_slice($roleMsgs, 0, 50) as $rm) {
+                $errors[] = ['row' => 0, 'message' => 'Access Role not applied — '.$rm];
+            }
+
             DB::table('employee_import_jobs')->where('token', $token)->update([
                 'status' => 'imported', 'dup_mode' => $dupMode,
                 'total_rows' => count($rows),
@@ -448,6 +469,8 @@ class EmployeeImportService
                 'imported_by' => $by, 'imported_at' => now(), 'updated_at' => now(),
             ]);
 
+            $summary['errors'] = array_slice($errors, 0, 200);
+            $summary['error_count'] = count($errors);
             $summary['created'] = $created;
             $summary['updated'] = $updated;
             $summary['imported'] = $created + $updated;
@@ -490,7 +513,8 @@ class EmployeeImportService
             // `nationality` was captured by Self-Onboarding and read by nothing;
             // `team_leader` was saved by the form but had no file column;
             // `also_works_for` was a form control that was never saved at all.
-            'id_marks', 'nationality', 'team_leader', 'also_works_for'] as $f) {
+            'id_marks', 'nationality', 'team_leader', 'also_works_for',
+            'access_role'] as $f) {   // 7 Oct 2026 — Access Role (validated in process())
             if (! empty($v[$f])) {
                 $out[$f] = $v[$f];
             }
@@ -555,6 +579,10 @@ class EmployeeImportService
         }
         if (! empty($v['status'])) {
             $out['status'] = strtolower(trim((string) $v['status']));
+        }
+        // 2026-09-28 — PROBATION PERIOD (MONTHS); blank = company default.
+        if (isset($v['probation_months']) && (int) $v['probation_months'] > 0) {
+            $out['probation_months'] = min((int) $v['probation_months'], 60);
         }
         // 27 Aug 2026 (Ejaz) — DRA Certificate / PCC Status go through the ONE
         // canonical set (pending|submitted|verified), the same gate the Documents
@@ -644,7 +672,8 @@ class EmployeeImportService
             try {
                 $um = \App\Models\User::find($uid);
                 if ($um && method_exists($um, 'syncRoles')) {
-                    $um->syncRoles(['employee']);
+                    // 7 Oct 2026 — the row's ACCESS ROLE, else Employee.
+                    $um->syncRoles([\App\Services\AccessRoles::spatieName((string) ($login['role'] ?? '') ?: 'Employee')]);
                 }
             } catch (\Throwable $e) {
                 // role package optional

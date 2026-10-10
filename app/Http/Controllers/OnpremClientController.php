@@ -213,7 +213,7 @@ class OnpremClientController extends Controller
         abort_unless($c, 404);
         DB::table('onprem_clients')->where('id', $id)->update([
             'activate_on_partial' => $c->activate_on_partial ? 0 : 1,
-            'notes' => trim(($c->notes ?? '')."\n".now()->format('d M Y').': Activate-on-partial '.($c->activate_on_partial ? 'OFF' : 'ON').' by '.$request->user()->name),
+            'notes' => trim(($c->notes ?? '')."\n".now()->format('d-m-Y').': Activate-on-partial '.($c->activate_on_partial ? 'OFF' : 'ON').' by '.$request->user()->name),
             'updated_at' => now(),
         ]);
 

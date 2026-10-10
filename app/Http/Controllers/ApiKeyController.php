@@ -388,6 +388,7 @@ class ApiKeyController extends Controller
         $tid = $this->tid($request);
         $rows = collect();
         $employees = collect();
+        $unusable = 0;
 
         if (Schema::hasTable('attendance_pending')) {
             // 18 Aug 2026 hotfix — group by device_code (the value the mapping
@@ -405,6 +406,12 @@ class ApiKeyController extends Controller
                 ->orderByDesc('punches')
                 ->limit(500)
                 ->get();
+
+            // 6 Oct 2026 — rows with no device code AND no punch time carry nothing to map
+            // (replayPending skips a blank code), so list them as a count, not a mappable row.
+            $isBlank = fn ($r) => trim((string) ($r->device_code ?: $r->device_user_id)) === '' && empty($r->first_seen);
+            $unusable = (int) $rows->filter($isBlank)->sum('punches');
+            $rows = $rows->reject($isBlank)->values();
         }
 
         // Devices that auto-registered with no tenant. Until one is claimed its
@@ -447,6 +454,7 @@ class ApiKeyController extends Controller
             'unassigned' => $unassigned,
             'companies' => $companies,
             'totalHeld' => $rows->sum('punches'),
+            'unusable' => $unusable,
         ]);
     }
 

@@ -68,6 +68,18 @@ class PayrollGenController extends Controller
      * Statutory Settings? weekly_off_day (default sunday) + sat_off_mode
      * (none | all | 2_4 | 1_3 — Nth Saturdays of the month off).
      */
+    /**
+     * 8 Oct 2026 (Ejaz) — salary day-value basis. Weekly offs, holidays and
+     * paid leave are always PAID days; the old 'working' basis (which left them
+     * out of the paid-day count) is retired and reads as 'calendar'.
+     */
+    public static function lopBasisOf(array $r, ?string $override = null): string
+    {
+        $b = strtolower(trim((string) ($override ?: ($r['lop_basis'] ?? ''))));
+
+        return $b === 'fixed30' ? 'fixed30' : 'calendar';
+    }
+
     public static function isWeekOff(Carbon $d, array $r): bool
     {
         $map = ['sunday' => 0, 'monday' => 1, 'tuesday' => 2, 'wednesday' => 3, 'thursday' => 4, 'friday' => 5, 'saturday' => 6];
@@ -80,9 +92,13 @@ class PayrollGenController extends Controller
             if ($mode === 'all') {
                 return true;
             }
+            $nth = (int) ceil($d->day / 7); // 1st–5th Saturday of the month
             if ($mode === '2_4' || $mode === '1_3') {
-                $nth = (int) ceil($d->day / 7); // 1st–5th Saturday of the month
                 return $mode === '2_4' ? ($nth === 2 || $nth === 4) : ($nth === 1 || $nth === 3);
+            }
+            // 7 Oct 2026 (Ejaz) — CUSTOM: any set of Saturdays (1st..5th) off.
+            if ($mode === 'custom') {
+                return in_array($nth, array_map('intval', (array) ($r['sat_off_weeks'] ?? [])), true);
             }
         }
 
@@ -90,23 +106,29 @@ class PayrollGenController extends Controller
     }
 
     /**
-     * rev172 (M1) — working days in [fromDay..toDay] of a month, excluding weekly
-     * offs and working-day holidays. Used to prorate a mid-month joiner: their
-     * denominator is the working days available FROM their date of joining, not
-     * the whole month, so an employee who joined on the 15th isn't underpaid.
+     * 7 Oct 2026 (Ejaz) — approved Exit & FnF requests: employee id => last
+     * working day ('Y-m-d'). The payroll pays a leaver only up to that date.
      */
-    private function workingDaysInRange(Carbon $start, int $fromDay, int $toDay, array $rates, array $holidays): int
+    private function exitDates(?int $tid): array
     {
-        $n = 0;
-        for ($d = max(1, $fromDay); $d <= $toDay; $d++) {
-            $cur = $start->copy()->addDays($d - 1);   // rev191 — index INTO the period, not day-of-month
-            if (self::isWeekOff($cur, $rates) || isset($holidays[$cur->toDateString()])) {
-                continue;
+        try {
+            if (! Schema::hasTable('exits')) {
+                return [];
             }
-            $n++;
-        }
+            $col = Schema::hasColumn('exits', 'last_working_day') ? 'last_working_day' : (Schema::hasColumn('exits', 'last_day') ? 'last_day' : null);
+            if (! $col) {
+                return [];
+            }
+            $out = [];
+            foreach (DB::table('exits')->when($tid && Schema::hasColumn('exits', 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
+                ->where('status', 'approved')->whereNotNull($col)->orderBy('id')->get(['employee_id', $col.' as lwd']) as $x) {
+                $out[(int) $x->employee_id] = substr((string) $x->lwd, 0, 10);
+            }
 
-        return $n;
+            return $out;
+        } catch (\Throwable $e) {
+            return [];
+        }
     }
 
     /** rev181 — run-scoped attendance cut-off day. 0/1 = calendar month (1..end).
@@ -535,7 +557,7 @@ class PayrollGenController extends Controller
     }
 
     /** Plain-English explanation of how one employee's pay was computed (for the payslip + sheet). */
-    private function calcNote(float $ctc, array $s, bool $lop, int $present, float $leave, int $working, float $factor, int $lateDays, float $lateCut, float $breakCut, ?array $pol, float $commission = 0.0, array $commLines = [], ?float $dispPaid = null, ?float $dispDen = null): string
+    private function calcNote(float $ctc, array $s, bool $lop, int $present, float $leave, int $working, float $factor, int $lateDays, float $lateCut, float $breakCut, ?array $pol, float $commission = 0.0, array $commLines = [], ?float $dispPaid = null, ?float $dispDen = null, ?string $attLine = null): string
     {
         $rs = fn ($x) => 'Rs '.number_format((float) $x, 0);
         $dy = fn ($x) => rtrim(rtrim(number_format((float) $x, 2), '0'), '.');
@@ -547,7 +569,7 @@ class PayrollGenController extends Controller
                 $att .= ' + '.$dy($leave).' paid-leave day(s)';
             }
             $att .= ' of '.$working.' working days.';
-            $p[] = $att;
+            $p[] = $attLine ?: $att;   // 8 Oct 2026 — paid-day / LOP breakdown from the scorer
             if ($lateCut > 0) {
                 $mode = $pol['mode'] ?? 'simple';
                 $modeLabel = $mode === 'tiered' ? 'tiered L1/L2/L3' : ($mode === 'net_hours' ? 'net working hours' : 'simple late rule');
@@ -641,8 +663,11 @@ class PayrollGenController extends Controller
                 }
                 $payout = trim((string) ($r->payout_date ?? ''));
                 if ($payout !== '') {
-                    // Payout date rules: pay in the month it falls in.
-                    if (substr($payout, 0, 7) !== $month) {
+                    // Payout date rules: pay in the payroll whose PERIOD holds the
+                    // date (7 Oct 2026 — with a cut-off cycle, a date after the
+                    // cut-off belongs to the next payroll).
+                    $c = (int) $this->runCutoff;
+                    if (PeriodResolver::payrollMonthFor(substr($payout, 0, 10), ($c >= 2 && $c <= 28) ? $c : null) !== $month) {
                         continue;
                     }
                 } elseif ($hasCycle) {
@@ -689,7 +714,8 @@ class PayrollGenController extends Controller
      * (unknown total → due until manually closed).
      * Returns [['id' => loanId, 'emi' => amount], ...].
      */
-    private function loanEmiDue(int $employeeId, $tid, string $month): array
+    // 30 Sep 2026 — public: EmiReminderService quotes the exact figure payroll will deduct.
+    public function loanEmiDue(int $employeeId, $tid, string $month): array
     {
         try {
             if (! Schema::hasTable('loans')) {
@@ -738,49 +764,75 @@ class PayrollGenController extends Controller
      */
     private function paidLeaveDates(int $empId, $tid, string $month, string $endDate, array $holidays, array $rates): array
     {
+        return array_keys($this->leaveDates($empId, $tid, $this->periodStart($month), $endDate, $holidays, $rates)['paid']);
+    }
+
+    /**
+     * 7 Oct 2026 (Ejaz) — approved leave in [from, to] on WORKING days, split
+     * into paid and unpaid ('Y-m-d' => true). Leaves store the type by NAME
+     * (leaves.type_name); the old check read leaves.type_id, which the leave
+     * form never writes, so every Loss of Pay leave was paid as a leave day.
+     */
+    private function leaveDates(int $empId, $tid, string $from, string $to, array $holidays, array $rates): array
+    {
+        $out = ['paid' => [], 'unpaid' => []];
+        if ($from > $to || ! Schema::hasTable('leaves')) {
+            return $out;
+        }
         try {
-            if (! Schema::hasTable('leaves')) {
-                return [];
-            }
-            $mStart = $this->periodStart($month);
             $rows = DB::table('leaves')->where('employee_id', $empId)
                 ->when($tid && Schema::hasColumn('leaves', 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
                 ->where('status', 'approved')
-                ->where('from_date', '<=', $endDate)
-                ->where('to_date', '>=', $mStart)
-                ->limit(40)->get();
-            if ($rows->isEmpty()) {
-                return [];
-            }
-            $paidMap = [];
-            if (Schema::hasTable('leave_types')) {
-                foreach (DB::table('leave_types')
-                    ->when($tid && Schema::hasColumn('leave_types', 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
-                    ->get(['id', 'paid']) as $lt) {
-                    $paidMap[(int) $lt->id] = (int) ($lt->paid ?? 1) === 1;
-                }
-            }
-            $out = [];
+                ->where('from_date', '<=', $to)
+                ->where('to_date', '>=', $from)
+                ->limit(60)->get();
             foreach ($rows as $lv) {
-                $typeId = (int) ($lv->type_id ?? 0);
-                $paid = array_key_exists($typeId, $paidMap) ? $paidMap[$typeId] : true; // unknown type → paid (conservative, matches paidLeaveDays)
-                if (! $paid) {
-                    continue;
-                }
-                $from = Carbon::parse(max((string) $lv->from_date, $mStart));
-                $to = Carbon::parse(min((string) $lv->to_date, $endDate));
-                for ($d = $from->copy(); $d->lte($to); $d->addDay()) {
-                    if (self::isWeekOff($d, $rates) || isset($holidays[$d->toDateString()])) {
-                        continue;
+                $bucket = self::leaveIsPaid($lv, $tid) ? 'paid' : 'unpaid';
+                $f = Carbon::parse(max(substr((string) $lv->from_date, 0, 10), $from));
+                $t = Carbon::parse(min(substr((string) $lv->to_date, 0, 10), $to));
+                for ($d = $f->copy(); $d->lte($t); $d->addDay()) {
+                    if (! self::isWeekOff($d, $rates) && ! isset($holidays[$d->toDateString()])) {
+                        $out[$bucket][$d->toDateString()] = true;
                     }
-                    $out[] = $d->toDateString();
                 }
             }
-
-            return $out;
+            $out['paid'] = array_diff_key($out['paid'], $out['unpaid']);   // overlapping LOP wins
         } catch (\Throwable $e) {
-            return [];
         }
+
+        return $out;
+    }
+
+    /** Is this approved leave a PAID type? leave_types by id, else by name; "Loss of Pay" / LWP / unpaid names are unpaid. */
+    private static function leaveIsPaid(object $lv, $tid): bool
+    {
+        static $maps = [];
+        $k = (int) $tid;
+        if (! isset($maps[$k])) {
+            $maps[$k] = ['id' => [], 'name' => []];
+            try {
+                if (Schema::hasTable('leave_types')) {
+                    foreach (DB::table('leave_types')
+                        ->when($tid && Schema::hasColumn('leave_types', 'tenant_id'), fn ($q) => $q->where(fn ($w) => $w->where('tenant_id', $tid)->orWhereNull('tenant_id')))
+                        ->get() as $lt) {
+                        $paid = (int) ($lt->paid ?? 1) === 1;
+                        $maps[$k]['id'][(int) $lt->id] = $paid;
+                        $maps[$k]['name'][strtolower(trim((string) ($lt->name ?? '')))] = $paid;
+                    }
+                }
+            } catch (\Throwable $e) {
+            }
+        }
+        $id = (int) ($lv->type_id ?? 0);
+        if ($id && isset($maps[$k]['id'][$id])) {
+            return $maps[$k]['id'][$id];
+        }
+        $name = strtolower(trim((string) ($lv->type_name ?? '')));
+        if ($name !== '' && isset($maps[$k]['name'][$name])) {
+            return $maps[$k]['name'][$name];
+        }
+
+        return ! preg_match('/loss\s*of\s*pay|\blop\b|\blwp\b|unpaid|without\s*pay/i', $name);
     }
 
     /**
@@ -826,6 +878,9 @@ class PayrollGenController extends Controller
                 }
                 $pd = $start->copy()->addDays($p - 1)->toDateString();   // rev191 — period index
                 $nd = $start->copy()->addDays($n - 1)->toDateString();
+                if ($nd > $endDate) {
+                    continue;   // 7 Oct 2026 — the next working day has not happened yet: not an absence
+                }
                 if (empty($covered[$pd]) && empty($covered[$nd])) {
                     $count++;
                 }
@@ -838,73 +893,87 @@ class PayrollGenController extends Controller
     }
 
     /**
-     * rev180 — PAY DATE from the Salary Schedules / Pay Cycle masters (Gap 7).
-     * Resolution: an active salary_schedules row for the company with a numeric
-     * pay_day (1–28) → that day of the FOLLOWING month; else an active
-     * pay_cycles row the same way; else the last day of the cycle month
-     * (the original behaviour). The attendance period stays the calendar month.
+     * PAY DATE — 7 Oct 2026 (Ejaz): the first Pay Day AFTER the attendance
+     * period ends (PeriodResolver::window). The pay day is never a day of the
+     * period it pays; no Pay Day configured → the period end.
      */
     private function resolvePayDate($tid, object $company, string $month, string $fallbackEnd): string
     {
-        $pick = function (string $table) use ($tid, $company): ?int {
-            try {
-                if (! Schema::hasTable($table) || ! Schema::hasColumn($table, 'pay_day')) {
-                    return null;
-                }
-                $rows = DB::table($table)
-                    ->when($tid && Schema::hasColumn($table, 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
-                    ->when(Schema::hasColumn($table, 'status'), fn ($q) => $q->where(fn ($x) => $x->where('status', 'active')->orWhereNull('status')->orWhere('status', '')))
-                    ->whereBetween('pay_day', [1, 28])
-                    ->orderByDesc('id')->limit(50)->get();
-                $best = null;
-                foreach ($rows as $row) {
-                    $cn = strtolower(trim((string) ($row->company_name ?? '')));
-                    if ($cn !== '' && $cn !== strtolower(trim((string) $company->name))) {
-                        continue;
-                    }
-                    $pd = (int) ($row->pay_day ?? 0);
-                    if ($pd >= 1 && $pd <= 28) {
-                        if ($cn !== '') {
-                            return $pd;   // company-specific row wins over an all-company row
-                        }
-                        $best = $best ?? $pd;
-                    }
-                }
-
-                return $best;
-            } catch (\Throwable $e) {
-                return null;
-            }
-        };
-        // rev181b — delegate to the shared cut-off-aware resolver so payslips,
-        // the payroll run and the PDF all agree (with a cut-off it pays the SAME
-        // run month; a plain calendar cycle pays the pay day of the NEXT month).
         return AppDataController::payDateFor($tid, (string) $company->name, $month);
     }
 
-    /**
-     * rev176 — salary advances approved INSIDE this month (recovered from the
-     * payslip). Bounded on BOTH sides: without the upper bound, generating
-     * June's payroll in early July would also pull in July's fresh advances —
-     * and July's own run would recover them a second time.
-     */
-    private function advanceRecovery(int $employeeId, $tid, string $month): float
+    /** 30 Sep 2026 — public: EmiReminderService quotes the exact figure payroll will deduct. */
+    public function advanceRecovery(int $employeeId, $tid, string $month): float
     {
-        try {
-            if (! Schema::hasTable('advances')) {
-                return 0.0;
-            }
-            $from = $month.'-01 00:00:00';
-            $to = Carbon::parse($month.'-01')->addMonth()->format('Y-m-d').' 00:00:00';
+        return round(array_sum(array_column($this->adhocDue('advances', $employeeId, $tid, $month), 'amount')), 2);
+    }
 
-            return round((float) DB::table('advances')->where('employee_id', $employeeId)
-                ->when($tid && Schema::hasColumn('advances', 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
+    /**
+     * 7 Oct 2026 (Ejaz) — one-off approved money items settled through payroll:
+     * expense reimbursements and bonus / leave encashment are PAID (+), salary
+     * advances are RECOVERED (−).
+     *
+     * An item belongs to the payroll whose PERIOD holds its approval date (a date
+     * after the cut-off goes to the next payroll). One period of catch-up: an
+     * item approved in the previous period AFTER that period's run was generated
+     * (or with no run at all) comes into this one, so nothing approved late is
+     * ever lost. Run-keyed (paid_run_id) — a regenerate reverses it cleanly.
+     */
+    private const ADHOC = [
+        'expenses' => ['sign' => 1, 'label' => 'Expense Reimbursement', 'kind' => null],
+        'bonus_encashment' => ['sign' => 1, 'label' => 'Bonus / Encashment', 'kind' => 'kind'],
+        'advances' => ['sign' => -1, 'label' => 'Salary Advance Recovery', 'kind' => null],
+    ];
+
+    /** @return array<int,array{id:int,amount:float,label:string}> */
+    private function adhocDue(string $table, int $empId, $tid, string $month): array
+    {
+        static $ctx = [];
+        try {
+            if (! Schema::hasTable($table) || ! Schema::hasColumn($table, 'amount') || ! Schema::hasColumn($table, 'employee_id')) {
+                return [];
+            }
+            $co = DB::table('employees')->where('id', $empId)->first(['company_id']);
+            $cid = (int) ($co->company_id ?? 0);
+            $key = $tid.'|'.$cid.'|'.$month;
+            if (! isset($ctx[$key])) {
+                $cname = (string) (DB::table('companies')->where('id', $cid)->value('name') ?? '');
+                $cut = PeriodResolver::masterDay($tid, $cname, 'cutoff_day');
+                $prev = Carbon::parse($month.'-01')->subMonthNoOverflow()->format('Y-m');
+                $ctx[$key] = [
+                    'cut' => ($cut >= 2 && $cut <= 28) ? $cut : null,
+                    'prev' => $prev,
+                    'prevRunAt' => (string) (DB::table('payroll_runs')->where('company_id', $cid)
+                        ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
+                        ->where('cycle_label', $prev)->min('created_at') ?? ''),
+                ];
+            }
+            $x = $ctx[$key];
+            $cfg = self::ADHOC[$table];
+            $rows = DB::table($table)->where('employee_id', $empId)
+                ->when($tid && Schema::hasColumn($table, 'tenant_id'), fn ($q) => $q->where('tenant_id', $tid))
                 ->where('status', 'approved')
-                ->where('created_at', '>=', $from)
-                ->where('created_at', '<', $to)
-                ->sum('amount'), 2);
+                ->when(Schema::hasColumn($table, 'paid_run_id'), fn ($q) => $q->whereNull('paid_run_id'))
+                ->when($table === 'expenses' && Schema::hasColumn($table, 'accounts_status'), fn ($q) => $q->where(fn ($w) => $w->whereNull('accounts_status')->orWhere('accounts_status', '')->orWhere('accounts_status', 'confirmed')))
+                ->where('amount', '>', 0)->orderBy('id')->limit(100)->get();
+            $out = [];
+            foreach ($rows as $r) {
+                $when = (string) (($r->decided_at ?? null) ?: ($r->created_at ?? ''));
+                if ($when === '') {
+                    continue;
+                }
+                $m = PeriodResolver::payrollMonthFor(substr($when, 0, 10), $x['cut']);
+                $due = $m === $month || ($m === $x['prev'] && ($x['prevRunAt'] === '' || $when > $x['prevRunAt']));
+                if (! $due) {
+                    continue;
+                }
+                $kind = $cfg['kind'] ? trim((string) ($r->{$cfg['kind']} ?? '')) : '';
+                $out[] = ['id' => (int) $r->id, 'amount' => round((float) $r->amount, 2), 'label' => $kind !== '' ? $kind : $cfg['label']];
+            }
+
+            return $out;
         } catch (\Throwable $e) {
-            return 0.0;
+            return [];
         }
     }
 
@@ -1040,10 +1109,11 @@ class PayrollGenController extends Controller
             return [];
         }
         try {
-            $rows = DB::table('holidays')
-                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
-                ->whereBetween('date', [$this->periodStart($month), $endDate])
-                ->pluck('date')->all();
+            // 7 Oct 2026 — company-scoped holidays (Applies To); a rates array that
+            // carries no company (tenant-wide screens) keeps every holiday.
+            $set = \App\Services\WorkCalendar::holidays($tid, $this->periodStart($month), $endDate);
+            $co = array_key_exists('__company', $rates) ? $rates['__company'] : null;
+            $rows = $co === null ? array_keys($set) : array_keys(\App\Services\WorkCalendar::holidaySetFor($set, $co));
             $out = [];
             foreach ($rows as $d) {
                 $ds = substr((string) $d, 0, 10);
@@ -1063,47 +1133,180 @@ class PayrollGenController extends Controller
     /** Approved PAID-leave working-days for an employee within the month. */
     private function paidLeaveDays(int $empId, ?int $tid, string $month, string $endDate, array $holidays, array $rates = []): float
     {
-        if (! Schema::hasTable('leaves')) {
-            return 0.0;
-        }
-        try {
-            $start = $this->periodStart($month);
-            $rows = DB::table('leaves')
-                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
-                ->where('employee_id', $empId)
-                ->where('status', 'approved')
-                ->where('from_date', '<=', $endDate)
-                ->where('to_date', '>=', $start)
-                ->get(['from_date', 'to_date', 'type_id']);
-            if ($rows->isEmpty()) {
-                return 0.0;
-            }
-            $paidByType = Schema::hasTable('leave_types')
-                ? DB::table('leave_types')->pluck('paid', 'id')->all()
-                : [];
-            $count = 0.0;
-            foreach ($rows as $lv) {
-                // Unknown type → treat as paid (conservative: credits the day).
-                $paid = $lv->type_id === null ? true : ((int) ($paidByType[$lv->type_id] ?? 1) === 1);
-                if (! $paid) {
-                    continue;   // Loss-of-Pay leave does NOT count as a present day
-                }
-                $fromS = substr((string) $lv->from_date, 0, 10);
-                $toS = substr((string) $lv->to_date, 0, 10);
-                $from = Carbon::parse($fromS < $start ? $start : $fromS);
-                $to = Carbon::parse($toS > $endDate ? $endDate : $toS);
-                for ($c = $from->copy(); $c->lte($to); $c->addDay()) {
-                    if (self::isWeekOff($c, $rates) || isset($holidays[$c->toDateString()])) {
-                        continue;
-                    }
-                    $count += 1;
-                }
-            }
+        return (float) count($this->leaveDates($empId, $tid, $this->periodStart($month), $endDate, $holidays, $rates)['paid']);
+    }
 
-            return $count;
-        } catch (\Throwable $e) {
-            return 0.0;
+    /**
+     * 7 Oct 2026 (Ejaz) — ONE attendance scorer for payroll, Live Salary and
+     * Live Salary (all): service window (DOJ → approved exit's last working
+     * day), present days on WORKING days only, paid vs unpaid leave, late /
+     * break cuts, sandwich rule, LOP basis → proration factor and the payslip's
+     * Paid / LOP days. Returns null when the employee is not in service at all
+     * inside the period.
+     *
+     * $x: tid, month, start (Carbon), periodEnd, endDate, daysInMonth, working,
+     *     rates, holidays, lopBasis, sandwichOn, polRows, shiftDefs, rosterMap,
+     *     lop, lwd (?string)
+     */
+    private function scoreEmployee(object $e, array $x): ?array
+    {
+        ['tid' => $tid, 'month' => $month, 'start' => $start, 'periodEnd' => $periodEnd, 'endDate' => $endDate,
+            'daysInMonth' => $daysInMonth, 'working' => $working, 'rates' => $rates, 'holidays' => $holidays,
+            'lopBasis' => $lopBasis, 'sandwichOn' => $sandwichOn, 'polRows' => $polRows, 'shiftDefs' => $shiftDefs,
+            'rosterMap' => $rosterMap, 'lop' => $lop, 'lwd' => $lwd] = $x;
+        // A holiday scoped to this employee's BRANCH (Leave → Holidays → Applies To)
+        // is a paid non-working day for them too, not an absence.
+        $br = trim((string) ($e->branch ?? ''));
+        if ($lop && $br !== '' && ! empty($x['holRaw'])) {
+            $more = 0;
+            foreach (\App\Services\WorkCalendar::holidaySetFor($x['holRaw'], $rates['__company'] ?? null, $br) as $hd => $_) {
+                if (! isset($holidays[$hd]) && ! self::isWeekOff(Carbon::parse($hd), $rates)) {
+                    $holidays[$hd] = true;
+                    $more++;
+                }
+            }
+            if ($more) {
+                [$working] = $this->workingSpan($start, $periodEnd, $periodEnd, $rates, $holidays);
+            }
         }
+        // 7 Oct 2026 (Ejaz) — SERVICE WINDOW inside the period: from the date of
+        // joining (if later) to the approved exit's last working day (if
+        // earlier). Days outside it are neither paid nor absences.
+        $svcFrom = $start->copy();
+        $dojDay = 1;
+        $dojField = property_exists($e, 'doj') ? $e->doj : null;
+        if ($dojField) {
+            try {
+                $doj = Carbon::parse(substr((string) $dojField, 0, 10))->startOfDay();
+                if ($doj->gt($start)) {
+                    $svcFrom = $doj;
+                    $dojDay = (int) $start->diffInDays($doj) + 1;
+                }
+            } catch (\Throwable $e2) {
+                // unparseable DOJ → whole period
+            }
+        }
+        $svcTo = ($lwd !== null && $lwd < $periodEnd) ? $lwd : $periodEnd;
+        if ($svcFrom->toDateString() > $svcTo) {
+            return null;
+        }
+        $scoreTo = $endDate < $svcTo ? $endDate : $svcTo;
+        [$empWorking, $empSoFar] = $this->workingSpan($svcFrom, $svcTo, $scoreTo, $rates, $holidays);
+        $empSoFar = min($empWorking, $empSoFar);
+
+        // Attendance on WORKING days only. A punch on a weekly off / holiday is
+        // not an extra paid day (those are already paid, or earn Comp-Off / OT);
+        // a paid-leave day the employee also punched counts once.
+        $present = 0;
+        $leave = 0.0;
+        $unpaidLeave = 0;
+        $offWorked = 0;
+        $workDates = [];
+        if ($lop) {
+            $fromS = $svcFrom->toDateString();
+            foreach ($this->presentDates($e->emp_code, $month, $endDate, $tid) as $pd) {
+                if ($pd < $fromS || $pd > $scoreTo) {
+                    continue;
+                }
+                if (self::isWeekOff(Carbon::parse($pd), $rates) || isset($holidays[$pd])) {
+                    $offWorked++;
+
+                    continue;
+                }
+                $workDates[$pd] = true;
+            }
+            $lvd = $this->leaveDates((int) $e->id, $tid, $fromS, $scoreTo, $holidays, $rates);
+            $present = count($workDates);
+            $leave = (float) count(array_diff_key($lvd['paid'], $workDates));
+            $unpaidLeave = count(array_diff_key($lvd['unpaid'], $workDates));
+        }
+        $lateCut = 0.0;
+        $breakCut = 0.0;
+        $lateDays = 0;
+        $factor = 1.0;
+        $pol = null;
+        $dispPaid = null;   // rev177 — paid/denominator pair for the calc note, in the chosen basis
+        $dispDen = null;
+        $sandwichDays = 0;  // rev180 — off-days between absences counted as LOP (sandwich rule)
+        $woDays = 0;        // 8 Oct 2026 — paid weekly offs / holidays (calc note)
+        $holDays = 0;
+        $absentOnly = 0;
+        $attLine = null;
+        $slipPaid = null;   // 7 Oct 2026 — "Paid X / LOP Y of Z" the payslip prints
+        $slipLop = 0.0;
+        $slipDen = null;
+        if ($lop) {
+            // Resolve the most specific policy (employee > team > company), then
+            // run the late / break engine on WORKING days inside the service window.
+            $team = property_exists($e, 'team') ? $e->team : null;
+            $pol = $polRows->isEmpty() ? null : $this->resolvePolicy($polRows, $e->emp_code, $team);
+            if ($pol) {
+                $stats = array_intersect_key($this->dayStats($e->emp_code, $month, $endDate, $tid), $workDates);
+                // rev173 — per-day shift resolution (roster > employee default).
+                $dayShifts = [];
+                if ($shiftDefs) {
+                    $empShift = property_exists($e, 'shift') ? $e->shift : null;
+                    foreach (array_keys($stats) as $sd) {
+                        $dayShifts[$sd] = \App\Services\ShiftResolver::resolve($shiftDefs, $rosterMap, (string) $e->name, $empShift, $sd);
+                    }
+                }
+                $res = $this->attendanceCut($stats, $pol, $dayShifts);
+                $lateCut = $res['lateCut'];
+                $breakCut = $res['breakCut'];
+                $lateDays = $res['late'];
+            }
+            // Paid leave counts as present; late / break cuts come off.
+            $paidDays = max(0.0, min($empWorking, $present + $leave) - $lateCut - $breakCut);
+            // 8 Oct 2026 (Ejaz) — weekly offs, holidays and paid leave are PAID
+            // days, exactly like a present day; ONLY leave without pay and
+            // absence (plus late cuts, and the sandwich rule when it is switched
+            // ON in Settings) are loss of pay. The 'working days' day-value was
+            // retired: paid days are now always counted over the calendar span
+            // (Paid = Present + Paid leave + Weekly offs + Holidays − cuts).
+            if ($sandwichOn) {
+                $sandwichDays = $this->sandwichDays($e->emp_code, (int) $e->id, $tid, $month, $daysInMonth, $start, $scoreTo, $holidays, $rates, $dojDay);
+            }
+            // Weekly offs / holidays inside the service window that have elapsed.
+            for ($d = $svcFrom->copy(); $d->toDateString() <= $scoreTo; $d->addDay()) {
+                if (self::isWeekOff($d, $rates)) {
+                    $woDays++;
+                } elseif (isset($holidays[$d->toDateString()])) {
+                    $holDays++;
+                }
+            }
+            // Absence is measured over the working days of the service window
+            // that have actually elapsed; days still to come are not absences.
+            $absentBase = (float) $empSoFar;
+            $absentOnly = max(0, $empSoFar - $present - (int) $leave - $unpaidLeave);
+            $absentDays = max(0.0, $absentBase - $paidDays) + $sandwichDays;   // = absent + LWP + cuts + sandwich
+            $svcCal = $scoreTo < $svcFrom->toDateString() ? 0 : (int) $svcFrom->diffInDays(Carbon::parse($scoreTo)) + 1;
+            if ($lopBasis === 'fixed30') {
+                $den = 30.0;
+                $avail = round(30.0 * $svcCal / max(1, $daysInMonth), 2);
+            } else {
+                $den = (float) $daysInMonth;
+                $avail = (float) $svcCal;
+            }
+            $factor = max(0.0, min(1.0, ($avail - $absentDays) / max(1.0, $den)));
+            // rev191 — no attendance and no approved paid leave means NO pay.
+            if ($paidDays <= 0) {
+                $factor = 0.0;
+            }
+            $dispPaid = $paidDays <= 0 ? 0.0 : max(0.0, round($avail - $absentDays, 2));
+            $dispDen = $den;
+            [$slipPaid, $slipLop, $slipDen] = [$dispPaid, $paidDays <= 0 ? round(min($den, $avail), 2) : round($absentDays, 2), $den];
+            $d2 = fn ($x) => rtrim(rtrim(number_format((float) $x, 2, '.', ''), '0'), '.');
+            $cuts = $lateCut + $breakCut;
+            $attLine = 'Attendance: Present '.$present.' + Paid leave '.$d2($leave).' + Weekly off '.$woDays.' + Holiday '.$holDays
+                .($cuts > 0 ? ' - late/break cut '.$d2($cuts) : '').($sandwichDays > 0 ? ' - sandwich '.$sandwichDays : '')
+                .' = '.$d2($paidDays <= 0 ? 0 : max(0, $present + $leave + $woDays + $holDays - $cuts - $sandwichDays)).' paid day(s)'
+                .($paidDays <= 0 ? ' (no attendance or paid leave in the period, so weekly offs / holidays are not paid either).' : '.')
+                .($paidDays <= 0 ? ' Loss of Pay: the whole period, '.$d2($slipLop).' day(s).' : ' Loss of Pay: Absent '.$absentOnly.' + Leave without pay '.$unpaidLeave
+                .($cuts > 0 ? ' + late/break cut '.$d2($cuts) : '').($sandwichDays > 0 ? ' + sandwich '.$sandwichDays : '')
+                .' = '.$d2($slipLop).' day(s).');
+        }
+
+        return compact('svcFrom', 'dojDay', 'lwd', 'scoreTo', 'empWorking', 'empSoFar', 'present', 'leave', 'unpaidLeave', 'offWorked', 'workDates', 'lateCut', 'breakCut', 'lateDays', 'factor', 'pol', 'dispPaid', 'dispDen', 'sandwichDays', 'slipPaid', 'slipLop', 'slipDen', 'woDays', 'holDays', 'absentOnly', 'attLine');
     }
 
     /**
@@ -1113,7 +1316,8 @@ class PayrollGenController extends Controller
     private function compute(Request $request, object $company, string $month, bool $lop): array
     {
         $tid = $request->user()->tenant_id;
-        $rates = SettingsController::rates($tid);
+        // 7 Oct 2026 — this company's weekly offs (override) + its holidays only.
+        $rates = \App\Services\WorkCalendar::forCompany(SettingsController::rates($tid), $company->id);
         $this->runCutoff = $this->resolveCutoffDay($tid, $company);   // rev181 — attendance cut-off period (0 = calendar month)
         [$start, $daysInMonth, , $periodEnd] = $this->monthMeta($month);
 
@@ -1139,10 +1343,7 @@ class PayrollGenController extends Controller
         //   fixed30  — every month is a flat 30 days; per-day value = gross/30.
         // Absence itself is always MEASURED in working-day terms (you can only
         // be absent on a day you were expected to work); only the day VALUE changes.
-        $lopBasis = strtolower(trim((string) ($rates['lop_basis'] ?? 'working')));
-        if (! in_array($lopBasis, ['working', 'calendar', 'fixed30'], true)) {
-            $lopBasis = 'working';
-        }
+        $lopBasis = self::lopBasisOf($rates);
         // rev180 — optional SANDWICH RULE: a weekly off / holiday that falls
         // BETWEEN two absent working days counts as LOP too. Off by default.
         $sandwichOn = ! empty($rates['sandwich_rule']);
@@ -1168,6 +1369,9 @@ class PayrollGenController extends Controller
             : ($lopBasis === 'fixed30' ? round(30.0 * $notElapsedCal / max(1, $daysInMonth), 2) : (float) $notElapsedCal);
 
         $empSel = ['id', 'emp_code', 'name', 'ctc'];
+        if (Schema::hasColumn('employees', 'branch')) {
+            $empSel[] = 'branch';   // 7 Oct 2026 — branch-scoped holidays
+        }
         if (Schema::hasColumn('employees', 'branch_id')) {
             $empSel[] = 'branch_id'; // F1 branch and location statutory scope
         }
@@ -1193,10 +1397,20 @@ class PayrollGenController extends Controller
         if (Schema::hasColumn('employees', 'gender')) {
             $empSel[] = 'gender'; // PT — Maharashtra female exemption (gross ≤ ₹25,000)
         }
+        foreach (['designation', 'designation_id'] as $c) {   // 10 Oct 2026 — PT rules by designation
+            if (Schema::hasColumn('employees', $c)) {
+                $empSel[] = $c;
+            }
+        }
+        // 7 Oct 2026 (Ejaz) — Full & Final: an approved exit's last working day
+        // closes the employee's service window. A leaver already marked inactive
+        // still gets the final period's salary if they worked part of it.
+        $exitLwd = $this->exitDates($tid);
+        $leavers = array_keys(array_filter($exitLwd, fn ($d) => $d >= $start->toDateString()));
         $emps = DB::table('employees')
             ->when($tid, fn ($q) => $q->where('tenant_id', $tid))
             ->where('company_id', $company->id)
-            ->where('status', 'active')
+            ->where(fn ($q) => $q->where('status', 'active')->orWhereIn('id', $leavers ?: [0]))
             ->whereNull('deleted_at')
             ->when(Schema::hasColumn('employees', 'archived_at'), fn ($q) => $q->whereNull('archived_at'))   // rev183b — exclude backed-up
             ->orderBy('emp_code')
@@ -1237,6 +1451,11 @@ class PayrollGenController extends Controller
         // rev176 — approved Overtime Register entries for the month (paid on the payslip).
         $otData = $this->overtimeByEmployee($tid, $month, $endDate);
 
+        $ctx = ['tid' => $tid, 'month' => $month, 'start' => $start, 'periodEnd' => $periodEnd, 'endDate' => $endDate,
+            'daysInMonth' => $daysInMonth, 'working' => $working, 'rates' => $rates, 'holidays' => $holidays,
+            'lopBasis' => $lopBasis, 'sandwichOn' => $sandwichOn, 'polRows' => $polRows, 'shiftDefs' => $shiftDefs,
+            'rosterMap' => $rosterMap, 'lop' => (bool) $lop,
+            'holRaw' => \App\Services\WorkCalendar::holidays($tid, $start->toDateString(), $periodEnd)];
         $rows = [];
         $skipped = 0;
         $tg = 0.0;
@@ -1249,124 +1468,11 @@ class PayrollGenController extends Controller
 
                 continue;   // no CTC set → cannot compute a salary; flagged to the user
             }
-            $present = $lop ? $this->presentDays($e->emp_code, $month, $endDate, $tid) : 0;
-            // rev191 — approved paid leave is counted even for an employee with NO
-            // punches at all. A full month of approved leave is PAID leave, not
-            // absence; the old `$present > 0` gate silently mis-scored exactly the
-            // people most likely to have none.
-            $leave = $lop ? $this->paidLeaveDays((int) $e->id, $tid, $month, $endDate, $holidays, $rates) : 0.0;
-            // rev172 (M1) — mid-month joiner: prorate against the working days
-            // available FROM the date of joining, not the whole month.
-            $empWorking = $working;
-            // rev191 — the joiner's position is an INDEX INTO THE PERIOD (1 = the
-            // period's first day), not a day-of-month. The old test only fired
-            // when the DOJ's calendar month equalled the run month, so someone who
-            // joined on 25 Aug inside a 21 Aug – 20 Sep period was paid as if they
-            // had worked the whole period.
-            $dojDay = 1;
-            $dojField = property_exists($e, 'doj') ? $e->doj : null;
-            if ($dojField) {
-                try {
-                    $doj = Carbon::parse(substr((string) $dojField, 0, 10))->startOfDay();
-                    if ($doj->gt($start) && $doj->toDateString() <= $periodEnd) {
-                        $dojDay = (int) $start->diffInDays($doj) + 1;
-                        $empWorking = max(1, $this->workingDaysInRange($start, $dojDay, $daysInMonth, $rates, $holidays));
-                    }
-                } catch (\Throwable $e2) {
-                    // unparseable DOJ → fall back to full-period working days
-                }
+            $sc = $this->scoreEmployee($e, $ctx + ['lwd' => $exitLwd[(int) $e->id] ?? null]);
+            if ($sc === null) {
+                continue;   // joins after this period, or left before it — nothing payable here
             }
-            $lateCut = 0.0;
-            $breakCut = 0.0;
-            $lateDays = 0;
-            $factor = 1.0;
-            $pol = null;
-            $dispPaid = null;   // rev177 — paid/denominator pair for the calc note, in the chosen basis
-            $dispDen = null;
-            $sandwichDays = 0;  // rev180 — off-days between absences counted as LOP (sandwich rule)
-            // rev191 — attendance is now scored for EVERY employee, not only those
-            // who happened to punch. Zero punches + zero approved leave is genuine
-            // absence and is treated as such. The company-wide safety net lives in
-            // generate(): if NOBODY punched in the window that is a broken feed, not
-            // a company that stayed home, and the run is refused instead of zeroed.
-            if ($lop) {
-                // Resolve the most specific policy for this employee (employee > team > company),
-                // then run the attendance engine (tiered / net-hours / simple + break deduction).
-                $team = property_exists($e, 'team') ? $e->team : null;
-                $pol = $polRows->isEmpty() ? null : $this->resolvePolicy($polRows, $e->emp_code, $team);
-                if ($pol) {
-                    $stats = $this->dayStats($e->emp_code, $month, $endDate, $tid);
-                    // rev173 — per-day shift resolution (roster > employee default).
-                    $dayShifts = [];
-                    if ($shiftDefs) {
-                        $empShift = property_exists($e, 'shift') ? $e->shift : null;
-                        foreach (array_keys($stats) as $sd) {
-                            $dayShifts[$sd] = \App\Services\ShiftResolver::resolve($shiftDefs, $rosterMap, (string) $e->name, $empShift, $sd);
-                        }
-                    }
-                    $res = $this->attendanceCut($stats, $pol, $dayShifts);
-                    $lateCut = $res['lateCut'];
-                    $breakCut = $res['breakCut'];
-                    $lateDays = $res['late'];
-                }
-                // Paid leave counts as present.
-                $paidDays = max(0.0, min($empWorking, $present + $leave) - $lateCut - $breakCut);
-                // rev180 — sandwich rule: each off-day between two uncovered
-                // (absent, non-leave) working days becomes an extra LOP day.
-                // rev191 — MANDATORY under calendar/fixed30. Those bases treat
-                // weekly offs and holidays as PAID days, which is only true of
-                // someone actually in service around them: without this, an
-                // employee absent every single working day still collected every
-                // Sunday (5/31 of a month's gross for zero attendance). Under the
-                // 'working' basis offs are outside the denominator already, so
-                // there it stays the policy option it was.
-                $offsArePaid = ($lopBasis === 'calendar' || $lopBasis === 'fixed30');
-                if ($sandwichOn || $offsArePaid) {
-                    $sandwichDays = $this->sandwichDays($e->emp_code, (int) $e->id, $tid, $month, $daysInMonth, $start, $endDate, $holidays, $rates, $dojDay);
-                    if ($sandwichDays > 0 && ! $offsArePaid) {
-                        // working basis: the penalty lands on the numerator.
-                        $paidDays = max(0.0, $paidDays - $sandwichDays);
-                    }
-                }
-                if ($offsArePaid) {
-                    // rev177 — absence measured in working days, VALUED against a
-                    // calendar (or flat-30) denominator: weekly offs & holidays
-                    // are paid days, so 1 LOP day costs gross/31 (or gross/30)
-                    // instead of gross/working-days.
-                    // rev191 — in an OPEN period absence can only be measured over
-                    // the working days that have actually elapsed; days still to
-                    // come are not absences. The available side shrinks to the
-                    // elapsed calendar days for the same reason.
-                    $absentBase = $periodOpen ? min($empWorking, $workingSoFar) : $empWorking;
-                    // rev191 — LOP here is measured in CALENDAR days: the absent
-                    // working days PLUS the offs that sat inside those absences.
-                    // (Subtracting the sandwich from $paidDays instead — as the
-                    // working basis does — was lost at the max(0.0, …) floor for
-                    // anyone fully absent, which is exactly how they kept getting
-                    // paid for the weekends.)
-                    $absentDays = max(0.0, $absentBase - $paidDays) + $sandwichDays;
-                    if ($lopBasis === 'fixed30') {
-                        $den = 30.0;
-                        // joiner: pre-joining days scale into 30-day terms
-                        $avail = round(30.0 * $calSoFar / max(1, $daysInMonth), 2) - ($dojDay > 1 ? round(($dojDay - 1) * 30.0 / max(1, $daysInMonth), 2) : 0.0);
-                    } else {
-                        $den = (float) $daysInMonth;
-                        $avail = (float) ($calSoFar - ($dojDay > 1 ? ($dojDay - 1) : 0));
-                    }
-                    $avail = max(0.0, $avail);
-                    $factor = max(0.0, min(1.0, ($avail - $absentDays) / max(1.0, $den)));
-                    // rev191 — the floor the whole thing rests on: no attendance
-                    // and no approved leave means NO pay, whatever the day maths
-                    // rounds to. An off day is never earned on its own.
-                    if ($paidDays <= 0) {
-                        $factor = 0.0;
-                    }
-                    $dispPaid = $paidDays <= 0 ? 0.0 : max(0.0, round($avail - $absentDays, 2));
-                    $dispDen = $den;
-                } else {
-                    $factor = min(1.0, $paidDays / $empWorking); // rev172 (M1) — DOJ-aware denominator; factor never exceeds full month
-                }
-            }
+            ['svcFrom' => $svcFrom, 'dojDay' => $dojDay, 'lwd' => $lwd, 'present' => $present, 'leave' => $leave, 'unpaidLeave' => $unpaidLeave, 'offWorked' => $offWorked, 'lateCut' => $lateCut, 'breakCut' => $breakCut, 'lateDays' => $lateDays, 'factor' => $factor, 'pol' => $pol, 'dispPaid' => $dispPaid, 'dispDen' => $dispDen, 'sandwichDays' => $sandwichDays, 'slipPaid' => $slipPaid, 'slipLop' => $slipLop, 'slipDen' => $slipDen] = $sc;
             $teamC = property_exists($e, 'team') ? $e->team : null;
             $salComps = $this->resolveComponents($compRows, $e->emp_code, $teamC);
             // rev180 — statutory context: state-wise PT (employee's pt_state,
@@ -1384,10 +1490,12 @@ class PayrollGenController extends Controller
                 'pt_state' => (string) ($e->pt_state ?? ''),
                 'gender' => (string) ($e->gender ?? ''),   // PT — MH female exemption
                 'month' => $month,
+                'doj' => $e->doj ?? null,   // 8 Oct 2026 — statutory deferral (first N months from joining)
                 'esi_lock' => $grossEst > (float) ($rates['esi_threshold'] ?? 21000)
                     ? AppDataController::esiPeriodLock((int) $e->id, $month, $rates)
                     : false,
             ];
+            $stx += AppDataController::ptCtx($e);   // 10 Oct 2026 — PT rules (branch / designation)
             $s = $salComps->isNotEmpty()
                 ? (AppDataController::computeSlipFromComponents($ctc * $factor, $salComps, $rates, (string) ($e->employment_stage ?? ''), $stx) ?: AppDataController::computeSlip($ctc * $factor, $rates, (string) ($e->employment_stage ?? ''), $stx))
                 : AppDataController::computeSlip($ctc * $factor, $rates, (string) ($e->employment_stage ?? ''), $stx);
@@ -1428,7 +1536,19 @@ class PayrollGenController extends Controller
             // doesn't fit in the remaining net is skipped this month (noted in
             // the calc note), so recoveries always equal whole installments.
             // Advances recover up to the remaining net. Net never goes negative.
-            $netAvail = round($s['net'] + $commission + $nightAmt + $otAmt, 2);
+            // 7 Oct 2026 — approved one-off earnings (expense reimbursement, bonus /
+            // leave encashment) due in this payroll.
+            $adhocEarn = [];
+            $adhocIds = [];
+            $adhocAmt = 0.0;
+            foreach (['expenses', 'bonus_encashment'] as $tbl) {
+                foreach ($this->adhocDue($tbl, (int) $e->id, $tid, $month) as $it) {
+                    $adhocEarn[$it['label']] = round(($adhocEarn[$it['label']] ?? 0) + $it['amount'], 2);
+                    $adhocIds[$tbl][] = ['id' => $it['id'], 'amount' => $it['amount']];
+                    $adhocAmt = round($adhocAmt + $it['amount'], 2);
+                }
+            }
+            $netAvail = round($s['net'] + $commission + $nightAmt + $otAmt + $adhocAmt, 2);
             $loanRecs = [];
             $emiApplied = 0.0;
             $emiSkipped = 0.0;
@@ -1447,8 +1567,17 @@ class PayrollGenController extends Controller
                     $emiSkipped = round($emiSkipped + $ln['emi'], 2);
                 }
             }
-            $advDue = $this->advanceRecovery((int) $e->id, $tid, $month);
-            $advApplied = round(max(0.0, min($advDue, round($netAvail - $emiApplied, 2))), 2);
+            // Salary advances: recovered advance by advance, as far as the net allows.
+            $advDue = 0.0;
+            $advApplied = 0.0;
+            foreach ($this->adhocDue('advances', (int) $e->id, $tid, $month) as $it) {
+                $advDue = round($advDue + $it['amount'], 2);
+                $take = round(max(0.0, min($it['amount'], $netAvail - $emiApplied - $advApplied)), 2);
+                if ($take > 0) {
+                    $advApplied = round($advApplied + $take, 2);
+                    $adhocIds['advances'][] = ['id' => $it['id'], 'amount' => $take];
+                }
+            }
             // rev181 — approved Clawbacks / Reversals due this month, recovered
             // from the slip AFTER loans & advances. Takes what fits (net >= 0);
             // any shortfall stays open on the clawback row (one-month-only rule).
@@ -1469,10 +1598,25 @@ class PayrollGenController extends Controller
             }
             $extraDed = round($emiApplied + $advApplied + $cbApplied, 2);
 
-            $gross = round($s['gross'] + $commission + $nightAmt + $otAmt, 2);
+            $gross = round($s['gross'] + $commission + $nightAmt + $otAmt + $adhocAmt, 2);
             $ded = round($s['total_ded'] + $extraDed, 2);
             $net = round($netAvail - $extraDed, 2);
-            $note = $this->calcNote($ctc, $s, (bool) $lop, $present, $leave, $working, $factor, $lateDays, $lateCut, $breakCut, $pol, $commission, array_column($commRows, 'label'), $dispPaid, $dispDen);
+            $note = $this->calcNote($ctc, $s, (bool) $lop, $present, $leave, $working, $factor, $lateDays, $lateCut, $breakCut, $pol, $commission, array_column($commRows, 'label'), $dispPaid, $dispDen, $sc['attLine'] ?? null);
+            if ($defItems = AppDataController::statDeferred($rates, $e->doj ?? null, $month)) {   // 8 Oct 2026 — statutory deferral
+                $note .= ' Statutory deferral: '.strtoupper(implode(', ', array_diff($defItems, ['bonus']) ?: $defItems)).' not applied (joined '.\Illuminate\Support\Carbon::parse($e->doj)->format('d-m-Y').'; applies from '.\Illuminate\Support\Carbon::parse(AppDataController::statDeferUntil($rates, $e->doj).'-01')->format('m-Y').').';
+            }
+            if ($unpaidLeave > 0) {
+                $note .= ' Unpaid leave (Loss of Pay): '.$unpaidLeave.' day(s) - not paid.';
+            }
+            if ($offWorked > 0) {
+                $note .= ' Worked '.$offWorked.' weekly-off / holiday day(s): already paid days, not counted again (claim Comp-Off or Overtime).';
+            }
+            if ($dojDay > 1) {
+                $note .= ' Joined '.$svcFrom->format('d-m-Y').': paid from that date.';
+            }
+            if ($lwd !== null && $lwd <= $periodEnd) {
+                $note .= ' Last working day '.Carbon::parse($lwd)->format('d-m-Y').' (Exit & FnF): paid up to that date.';
+            }
             if ($sandwichDays > 0) {
                 // rev180 — sandwich rule visible on the slip.
                 $note .= ' Sandwich rule: '.$sandwichDays.' off-day(s) falling between absent days counted as LOP.';
@@ -1498,6 +1642,9 @@ class PayrollGenController extends Controller
             if ($otAmt > 0) {
                 $note .= ' Overtime (approved register): Rs '.number_format($otAmt, 0).' added ('.count($otIds).' entr'.(count($otIds) === 1 ? 'y' : 'ies').').';
             }
+            foreach ($adhocEarn as $al => $aa) {
+                $note .= ' '.$al.' (approved): Rs '.number_format($aa, 0).' added.';
+            }
             if ($emiApplied > 0) {
                 $note .= ' Loan EMI recovered: Rs '.number_format($emiApplied, 0).'.';
             }
@@ -1514,6 +1661,13 @@ class PayrollGenController extends Controller
             } elseif ($cbDueTotal > 0) {
                 $note .= ' Clawback of Rs '.number_format($cbDueTotal, 0).' due but NOT recovered — no net salary left this month; it stays open on the clawback entry.';
             }
+            if ($lop && $slipPaid !== null) {
+                // 7 Oct 2026 — machine-read by AppDataController::payslipData for the
+                // payslip's "Paid Days / LOP" box (unelapsed or pre-joining /
+                // post-exit days are neither paid nor LOP).
+                $d2 = fn ($x) => rtrim(rtrim(number_format((float) $x, 2, '.', ''), '0'), '.');
+                $note .= ' Payslip days: Paid '.$d2($slipPaid).' / LOP '.$d2($slipLop).' of '.$d2($slipDen).'.';
+            }
             $tg += $gross;
             $td += $ded;
             $tn += $net;
@@ -1523,6 +1677,10 @@ class PayrollGenController extends Controller
                 'name' => $e->name,
                 'presentDays' => $lop ? $present : null,
                 'leaveDays' => $lop ? round($leave, 1) : null,
+                'unpaidLeave' => $lop ? $unpaidLeave : null,
+                'lopDays' => $lop ? $slipLop : null,
+                'paidDays' => $lop ? $slipPaid : null,                       // 8 Oct 2026 — present + paid leave + offs + holidays
+                'offDays' => $lop ? (int) ($sc['woDays'] + $sc['holDays']) : null,
                 'lateDays' => $lop ? $lateDays : null,
                 'lateCut' => $lop ? round($lateCut, 2) : null,
                 'breakCut' => $lop ? round($breakCut, 2) : null,
@@ -1533,6 +1691,8 @@ class PayrollGenController extends Controller
                 'nightDays' => $nightDays,       // rev173
                 'otAmount' => $otAmt,            // rev176 — overtime paid
                 'otIds' => $otIds,               // rev176 — OT entries to mark paid on generate
+                'adhocEarn' => $adhocEarn,       // 7 Oct 2026 — expense / bonus lines
+                'adhocIds' => $adhocIds,         // 7 Oct 2026 — table => [[id, amount]] to stamp on generate
                 'loanEmi' => $emiLoanPart,       // rev176/180 — loan-EMI part recovered on this slip
                 'advEmi' => $emiAdvPart,         // rev180 — instalment-advance part (legacy loans.type='advance')
                 'loanRecs' => $loanRecs,         // rev176 — per-loan recoveries (id + emi + type)
@@ -1577,7 +1737,7 @@ class PayrollGenController extends Controller
                 'periodOpen' => $periodOpen,
                 'workingSoFar' => $workingSoFar,
                 'notElapsed' => $notElapsed,
-                'monthLabel' => $start->format('M Y'),
+                'monthLabel' => Carbon::parse($month.'-01')->format('M Y'),   // the payroll month, not the period's first day
                 'payDate' => $this->resolvePayDate($tid, $company, $month, $endDate), // rev180 — schedule-aware
                 'lopBasis' => $lopBasis, // rev177
             ],
@@ -1620,13 +1780,10 @@ class PayrollGenController extends Controller
             if ($isHr) {
                 $scope = $base->orderBy('emp_code')->get();
             } elseif ($me) {
-                $scope = $base->where(function ($q) use ($me) {
-                    $q->where('id', $me->id)
-                        ->orWhere('reporting_manager', $me->name)
-                        ->orWhere('team_leader', $me->name);
-                    if (Schema::hasColumn('employees', 'reporting_manager_id')) {
-                        $q->orWhere('reporting_manager_id', $me->id);
-                    }
+                // 7 Oct 2026 — own + the WHOLE reporting line below (any depth) + team members led.
+                $down = array_merge([(int) $me->id], \App\Services\Hierarchy::downline((int) $me->id, $tid ? (int) $tid : null));
+                $scope = $base->where(function ($q) use ($me, $down) {
+                    $q->whereIn('id', $down)->orWhere('team_leader', $me->name);
                 })->orderBy('emp_code')->get();
             } else {
                 return response()->json(['ok' => false, 'error' => 'Your login is not linked to an employee record — ask HR to link it in User Access.'], 422);
@@ -1654,7 +1811,7 @@ class PayrollGenController extends Controller
                 return response()->json(['ok' => false, 'error' => 'No CTC set for '.$target->name.' — set it in their employee profile first.'], 422);
             }
 
-            $rates = SettingsController::rates($tid);
+            $rates = \App\Services\WorkCalendar::forCompany(SettingsController::rates($tid), $company->id);   // 7 Oct 2026
             // rev191 — Live Salary runs on the company's OWN pay cycle, exactly
             // like the payroll engine. It used to force the calendar month, so a
             // 21st–20th company saw a window here that no payslip ever matched,
@@ -1671,51 +1828,30 @@ class PayrollGenController extends Controller
             $holidays = $this->holidayDates($tid, $month, $periodEnd, $rates);
             [$working, $workingSoFar] = $this->workingSpan($start, $periodEnd, $today, $rates, $holidays);
 
-            // Attendance till TODAY (same helpers as payroll, endDate = today).
-            $present = $this->presentDays($target->emp_code, $month, $today, $tid);
-            $leave = $present > 0 ? $this->paidLeaveDays((int) $target->id, $tid, $month, $today, $holidays, $rates) : 0.0;
-            $lateCut = 0.0;
-            $breakCut = 0.0;
-            $lateDays = 0;
+            // 7 Oct 2026 — attendance till TODAY scored by the SAME scorer as payroll
+            // (service window, working days only, paid / unpaid leave, late cuts,
+            // sandwich, LOP basis), so Live Salary always matches the payslip.
             $team = property_exists($target, 'team') ? $target->team : null;
-            $polRows = $this->latePolicyRows($company, $tid);
-            $pol = $polRows->isEmpty() ? null : $this->resolvePolicy($polRows, $target->emp_code, $team);
-            // rev173 — same shift resolution as payroll (roster > employee default).
             $shiftDefs = \App\Services\ShiftResolver::shifts($tid);
-            $rosterMap = $shiftDefs ? \App\Services\ShiftResolver::rosterMap($tid, $month.'-01', $today) : [];
+            $rosterMap = $shiftDefs ? \App\Services\ShiftResolver::rosterMap($tid, $this->periodStart($month), $today) : [];
             $empShiftLv = property_exists($target, 'shift') ? $target->shift : null;
-            if ($pol && $present > 0) {
-                $stats = $this->dayStats($target->emp_code, $month, $today, $tid);
-                $dayShifts = [];
-                if ($shiftDefs) {
-                    foreach (array_keys($stats) as $sd) {
-                        $dayShifts[$sd] = \App\Services\ShiftResolver::resolve($shiftDefs, $rosterMap, (string) $target->name, $empShiftLv, $sd);
-                    }
-                }
-                $res = $this->attendanceCut($stats, $pol, $dayShifts);
-                $lateCut = $res['lateCut'];
-                $breakCut = $res['breakCut'];
-                $lateDays = $res['late'];
-            }
-            // No punches at all → pro-rate by elapsed working days (companies
-            // without biometric still get a sensible live figure).
-            $paidSoFar = $present > 0
-                ? max(0.0, min($working, $present + $leave) - $lateCut - $breakCut)
-                : (float) $workingSoFar;
-            $factor = min(1.0, $paidSoFar / $working);
-            // rev177 — LOP basis in Live Salary too (same Statutory Setting as
-            // payroll): under calendar/fixed30, weekly offs & holidays are paid
-            // days, so "earned till today" grows with calendar days elapsed.
-            $lopBasisLv = strtolower(trim((string) ($rates['lop_basis'] ?? 'working')));
-            if (in_array($lopBasisLv, ['calendar', 'fixed30'], true)) {
-                $absentLv = max(0.0, min($working, $workingSoFar) - $paidSoFar);
-                if ($lopBasisLv === 'fixed30') {
-                    $elapsed30 = 30.0 * $dayOfMonth / max(1, $daysInMonth);
-                    $factor = max(0.0, min(1.0, ($elapsed30 - $absentLv) / 30.0));
-                } else {
-                    $factor = max(0.0, min(1.0, ($dayOfMonth - $absentLv) / max(1, $daysInMonth)));
-                }
-            }
+            $lopBasisLv = self::lopBasisOf($rates);
+            $sc = $this->scoreEmployee($target, [
+                'tid' => $tid, 'month' => $month, 'start' => $start, 'periodEnd' => $periodEnd,
+                'endDate' => $today < $periodEnd ? $today : $periodEnd,
+                'daysInMonth' => $daysInMonth, 'working' => $working, 'rates' => $rates, 'holidays' => $holidays,
+                'lopBasis' => $lopBasisLv, 'sandwichOn' => ! empty($rates['sandwich_rule']),
+                'polRows' => $this->latePolicyRows($company, $tid), 'shiftDefs' => $shiftDefs, 'rosterMap' => $rosterMap,
+                'lop' => true, 'lwd' => $this->exitDates($tid)[(int) $target->id] ?? null,
+                'holRaw' => \App\Services\WorkCalendar::holidays($tid, $start->toDateString(), $periodEnd),
+            ]) ?? ['present' => 0, 'leave' => 0.0, 'lateCut' => 0.0, 'breakCut' => 0.0, 'lateDays' => 0, 'factor' => 0.0, 'slipPaid' => 0.0];
+            $present = (int) $sc['present'];
+            $leave = (float) $sc['leave'];
+            $lateCut = (float) $sc['lateCut'];
+            $breakCut = (float) $sc['breakCut'];
+            $lateDays = (int) $sc['lateDays'];
+            $factor = (float) $sc['factor'];
+            $paidSoFar = (float) ($sc['slipPaid'] ?? 0);
 
             // Components — identical resolution to payroll (employee > team > company).
             $compRows = $this->componentRows($company, $tid);
@@ -1732,10 +1868,12 @@ class PayrollGenController extends Controller
                 'pt_state' => (string) ($target->pt_state ?? ''),
                 'gender' => (string) ($target->gender ?? ''),   // PT — MH female exemption
                 'month' => $month,
+                'doj' => $target->doj ?? null,   // 8 Oct 2026 — statutory deferral
                 'esi_lock' => round($ctc / 12, 2) > (float) ($rates['esi_threshold'] ?? 21000)
                     ? AppDataController::esiPeriodLock((int) $target->id, $month, $rates)
                     : false,
             ];
+            $stxLv += AppDataController::ptCtx($target);   // 10 Oct 2026 — PT rules (branch / designation)
             $sFull = $salComps->isNotEmpty()
                 ? (AppDataController::computeSlipFromComponents($ctc, $salComps, $rates, (string) ($target->employment_stage ?? ''), $stxLv) ?: AppDataController::computeSlip($ctc, $rates, (string) ($target->employment_stage ?? ''), $stxLv))
                 : AppDataController::computeSlip($ctc, $rates, (string) ($target->employment_stage ?? ''), $stxLv);
@@ -1783,17 +1921,10 @@ class PayrollGenController extends Controller
             if ($otAmtLv > 0) {
                 $earnings[] = ['label' => 'Overtime (approved)', 'amount' => $otAmtLv];
             }
-            $monthStart = $month.'-01 00:00:00';
-            $reimb = 0.0;
-            try {
-                if (Schema::hasTable('expenses')) {
-                    $reimb = (float) DB::table('expenses')->where('employee_id', $target->id)->where('status', 'approved')
-                        ->where('created_at', '>=', $monthStart)->sum('amount');
-                }
-            } catch (\Throwable $e) {
-            }
+            $monthStart = $this->periodStart($month).' 00:00:00';
+            $reimb = round(array_sum(array_column(array_merge($this->adhocDue('expenses', (int) $target->id, $tid, $month), $this->adhocDue('bonus_encashment', (int) $target->id, $tid, $month)), 'amount')), 2);   // 7 Oct 2026 — same rule as payroll
             if ($reimb > 0) {
-                $earnings[] = ['label' => 'Expense reimbursements (approved)', 'amount' => round($reimb, 2)];
+                $earnings[] = ['label' => 'Expense reimbursement / bonus (approved, paid with salary)', 'amount' => round($reimb, 2)];
             }
             // rev176 (BUGFIX) — EMI via the shared, schema-tolerant helper. The
             // live request-module stores the amount in `emi`, the legacy loans
@@ -1806,14 +1937,7 @@ class PayrollGenController extends Controller
             if ($emi > 0) {
                 $deductions[] = ['label' => 'Loan EMI', 'amount' => round($emi, 2)];
             }
-            $adv = 0.0;
-            try {
-                if (Schema::hasTable('advances')) {
-                    $adv = (float) DB::table('advances')->where('employee_id', $target->id)->where('status', 'approved')
-                        ->where('created_at', '>=', $monthStart)->sum('amount');
-                }
-            } catch (\Throwable $e) {
-            }
+            $adv = $this->advanceRecovery((int) $target->id, $tid, $month);   // 7 Oct 2026 — same rule as payroll
             if ($adv > 0) {
                 $deductions[] = ['label' => 'Salary advance recovery (this month)', 'amount' => round($adv, 2)];
             }
@@ -1827,12 +1951,12 @@ class PayrollGenController extends Controller
             // late/absent info entries reconcile with the earned-gross figure.
             $dayDen = $lopBasisLv === 'calendar' ? max(1, $daysInMonth) : ($lopBasisLv === 'fixed30' ? 30 : $working);
             $dayValue = round(((float) $sFull['gross']) / $dayDen, 2);
-            $entries[] = ['date' => now()->format('d M'), 'sign' => '+',
+            $entries[] = ['date' => now()->format('d-m-Y'), 'sign' => '+',
                 'head' => 'Salary earned till today',
-                'detail' => round($paidSoFar, 1).' paid day(s) of '.$working.' working days — basic + allowances as per your salary structure',
+                'detail' => round($paidSoFar, 1).' paid day(s) of '.round((float) ($sc['slipDen'] ?? $working), 1).' days — basic + allowances as per your salary structure',
                 'amount' => round((float) $sNow['gross'], 2), 'status' => 'included'];
             if (($lateCut + $breakCut) > 0) {
-                $entries[] = ['date' => now()->format('d M'), 'sign' => '-',
+                $entries[] = ['date' => now()->format('d-m-Y'), 'sign' => '-',
                     'head' => 'Late penalty (late policy)',
                     'detail' => $lateDays.' late mark(s) → '.round($lateCut + $breakCut, 2).' day(s) cut',
                     'amount' => round($dayValue * ($lateCut + $breakCut), 2), 'status' => 'info'];
@@ -1840,9 +1964,9 @@ class PayrollGenController extends Controller
             if ($present > 0) {
                 $missed = max(0.0, $workingSoFar - ($present + $leave));
                 if ($missed > 0.5) {
-                    $entries[] = ['date' => now()->format('d M'), 'sign' => '-',
-                        'head' => 'Not earned — absent',
-                        'detail' => round($missed, 1).' working day(s) without attendance so far this month',
+                    $entries[] = ['date' => now()->format('d-m-Y'), 'sign' => '-',
+                        'head' => 'Loss of pay — absent / leave without pay',
+                        'detail' => round($missed, 1).' working day(s) absent or on leave without pay so far (weekly offs, holidays and paid leave are paid)',
                         'amount' => round($dayValue * $missed, 2), 'status' => 'info'];
                 }
             }
@@ -1955,7 +2079,7 @@ class PayrollGenController extends Controller
                     }
                     foreach (DB::table('expenses')->where('employee_id', $target->id)->where('status', 'approved')
                         ->where('created_at', '>=', $monthStart)->orderByDesc('id')->limit(30)->get($eSel) as $er) {
-                        $entries[] = ['date' => Carbon::parse($er->created_at)->format('d M'), 'sign' => '+',
+                        $entries[] = ['date' => Carbon::parse($er->created_at)->format('d-m-Y'), 'sign' => '+',
                             'head' => 'Expense reimbursement',
                             'detail' => implode(' · ', array_filter([$er->type ?? null, $er->reason ?? null, ! empty($er->decided_by) ? 'approved by '.$er->decided_by : null])) ?: 'approved claim',
                             'amount' => round((float) $er->amount, 2), 'status' => 'included'];
@@ -1964,12 +2088,12 @@ class PayrollGenController extends Controller
             } catch (\Throwable $e) {
             }
             if ($emi > 0) {
-                $entries[] = ['date' => now()->format('d M'), 'sign' => '-',
+                $entries[] = ['date' => now()->format('d-m-Y'), 'sign' => '-',
                     'head' => 'Loan EMI', 'detail' => 'monthly instalment on your approved loan(s)',
                     'amount' => round($emi, 2), 'status' => 'included'];
             }
             if ($adv > 0) {
-                $entries[] = ['date' => now()->format('d M'), 'sign' => '-',
+                $entries[] = ['date' => now()->format('d-m-Y'), 'sign' => '-',
                     'head' => 'Salary advance recovery', 'detail' => 'advance approved this month, recovered from salary',
                     'amount' => round($adv, 2), 'status' => 'included'];
             }
@@ -1988,9 +2112,9 @@ class PayrollGenController extends Controller
                 'employee' => ['id' => $target->id, 'code' => $target->emp_code, 'name' => $target->name,
                     'company' => $company->name ?? '', 'designation' => $target->designation ?? '', 'ctc' => $ctc],
                 'meta' => [
-                    'monthLabel' => $start->format('F Y'), 'today' => now()->format('d M Y'),
+                    'monthLabel' => $start->format('F Y'), 'today' => now()->format('d-m-Y'),
                     'daysInMonth' => $daysInMonth, 'workingDays' => $working, 'workingSoFar' => $workingSoFar,
-                    'presentDays' => $present, 'paidLeaveDays' => round($leave, 1), 'lateDays' => $lateDays,
+                    'presentDays' => $present, 'paidLeaveDays' => round($leave, 1), 'lateDays' => $lateDays, 'paidSoFar' => round($paidSoFar, 2),
                     'attendanceTracked' => $present > 0,
                     'lopBasis' => $lopBasisLv, // rev177
                     'factorPct' => round($factor * 100, 1),
@@ -2050,11 +2174,10 @@ class PayrollGenController extends Controller
             if ($isHr) {
                 $scope = $base->orderBy('emp_code')->get();
             } elseif ($me) {
-                $scope = $base->where(function ($q) use ($me) {
-                    $q->where('id', $me->id)->orWhere('reporting_manager', $me->name)->orWhere('team_leader', $me->name);
-                    if (Schema::hasColumn('employees', 'reporting_manager_id')) {
-                        $q->orWhere('reporting_manager_id', $me->id);
-                    }
+                // 7 Oct 2026 — own + the WHOLE reporting line below (any depth) + team members led.
+                $down = array_merge([(int) $me->id], \App\Services\Hierarchy::downline((int) $me->id, $tid ? (int) $tid : null));
+                $scope = $base->where(function ($q) use ($me, $down) {
+                    $q->whereIn('id', $down)->orWhere('team_leader', $me->name);
                 })->orderBy('emp_code')->get();
             } else {
                 return response()->json(['ok' => false, 'error' => 'Your login is not linked to an employee record.'], 422);
@@ -2063,19 +2186,31 @@ class PayrollGenController extends Controller
                 return response()->json(['ok' => false, 'error' => 'No employees in your view.'], 422);
             }
 
-            $rates = SettingsController::rates($tid);
-            // rev191 — same pay cycle as everything else.
-            // ponytail: this screen lists employees across companies but keeps ONE
-            // working-day span, so it uses the tenant-level cycle. Per-company
-            // spans only matter once a tenant runs two different cut-offs at once.
-            $this->runCutoff = PeriodResolver::masterDay($tid, '', 'cutoff_day');
-            $month = PeriodResolver::currentMonthFor($tid, '');
-            [$start, $daysInMonth, , $periodEnd] = $this->monthMeta($month);
+            $baseRates = SettingsController::rates($tid);
             $today = now()->toDateString();
-            $dayOfMonth = max(1, min($daysInMonth, (int) $start->diffInDays(Carbon::parse($today)) + 1));
-            $holidays = $this->holidayDates($tid, $month, $periodEnd, $rates);
-            [$working, $workingSoFar] = $this->workingSpan($start, $periodEnd, $today, $rates, $holidays);
-            $lopBasis = strtolower(trim((string) ($rates['lop_basis'] ?? 'working')));
+            // 7 Oct 2026 (Ejaz) — each company on its OWN pay cycle and weekly offs:
+            // with only company-specific cycles the tenant-level lookup fell back to
+            // the calendar month and credited days that belong to the next cycle.
+            $spans = [];
+            $spanFor = function (object $co) use (&$spans, $tid, $baseRates, $today) {
+                if (! isset($spans[$co->id])) {
+                    $this->runCutoff = PeriodResolver::masterDay($tid, (string) $co->name, 'cutoff_day');
+                    $m = PeriodResolver::currentMonthFor($tid, (string) $co->name);
+                    [$st, $dim, , $pe] = $this->monthMeta($m);
+                    $r = \App\Services\WorkCalendar::forCompany($baseRates, $co->id);
+                    $hol = $this->holidayDates($tid, $m, $pe, $r);
+                    [$w] = $this->workingSpan($st, $pe, $today, $r, $hol);
+                    $spans[$co->id] = ['cut' => $this->runCutoff, 'month' => $m, 'dim' => $dim, 'rates' => $r, 'hol' => $hol, 'w' => $w, 'st' => $st, 'pe' => $pe,
+                        'holRaw' => \App\Services\WorkCalendar::holidays($tid, $st->toDateString(), $pe),
+                        'pol' => $this->latePolicyRows($co, $tid),
+                    ];
+                }
+                $this->runCutoff = $spans[$co->id]['cut'];   // presentDays / paidLeaveDays read it
+
+                return $spans[$co->id];
+            };
+            $lopBasis = self::lopBasisOf($baseRates);
+            $exitLwd = $this->exitDates($tid);
 
             $companyCache = [];
             $compCache = [];
@@ -2105,28 +2240,34 @@ class PayrollGenController extends Controller
                 }
                 $team = property_exists($e, 'team') ? $e->team : null;
                 $salComps = $this->resolveComponents($compCache[$company->id], $e->emp_code, $team);
+                $sp = $spanFor($company);
+                [$month, $daysInMonth, $rates, $holidays, $working] = [$sp['month'], $sp['dim'], $sp['rates'], $sp['hol'], $sp['w']];
                 $stx = [
                     'tenant_id' => $tid, 'company_id' => $company->id ?? null,
                     'branch_id' => (int) ($e->branch_id ?? 0) ?: null,
                     'pt_state' => (string) ($e->pt_state ?? ''), 'gender' => (string) ($e->gender ?? ''),
                     'month' => $month, 'esi_lock' => false,
+                    'doj' => $e->doj ?? null,   // 8 Oct 2026 — statutory deferral
                 ];
+                $stx += AppDataController::ptCtx($e);   // 10 Oct 2026 — PT rules (branch / designation)
                 $stage = (string) ($e->employment_stage ?? '');
                 $sFull = $salComps->isNotEmpty()
                     ? (AppDataController::computeSlipFromComponents($ctc, $salComps, $rates, $stage, $stx) ?: AppDataController::computeSlip($ctc, $rates, $stage, $stx))
                     : AppDataController::computeSlip($ctc, $rates, $stage, $stx);
                 $fullNet = (float) ($sFull['net'] ?? 0);
 
-                $present = $this->presentDays($e->emp_code, $month, $today, $tid);
-                $leave = $present > 0 ? $this->paidLeaveDays((int) $e->id, $tid, $month, $today, $holidays, $rates) : 0.0;
-                $paidSoFar = $present > 0 ? max(0.0, min($working, $present + $leave)) : (float) $workingSoFar;
-                $factor = min(1.0, $paidSoFar / $working);
-                if (in_array($lopBasis, ['calendar', 'fixed30'], true)) {
-                    $absent = max(0.0, min($working, $workingSoFar) - $paidSoFar);
-                    $factor = $lopBasis === 'fixed30'
-                        ? max(0.0, min(1.0, (30.0 * $dayOfMonth / max(1, $daysInMonth) - $absent) / 30.0))
-                        : max(0.0, min(1.0, ($dayOfMonth - $absent) / max(1, $daysInMonth)));
-                }
+                // 7 Oct 2026 — the same scorer as payroll (see scoreEmployee).
+                $sc = $this->scoreEmployee($e, [
+                    'tid' => $tid, 'month' => $month, 'start' => $sp['st'], 'periodEnd' => $sp['pe'],
+                    'endDate' => $today < $sp['pe'] ? $today : $sp['pe'],
+                    'daysInMonth' => $daysInMonth, 'working' => $working, 'rates' => $rates, 'holidays' => $holidays,
+                    'lopBasis' => $lopBasis, 'sandwichOn' => ! empty($rates['sandwich_rule']),
+                    'polRows' => $sp['pol'], 'shiftDefs' => [], 'rosterMap' => [], 'lop' => true,
+                    'lwd' => $exitLwd[(int) $e->id] ?? null,
+                    'holRaw' => $sp['holRaw'],   // 8 Oct 2026 — branch-scoped holidays too
+                ]);
+                $present = (int) ($sc['present'] ?? 0);
+                $factor = (float) ($sc['factor'] ?? 0);
                 $earned = round($fullNet * $factor, 2);
                 $rows[] = ['id' => $e->id, 'code' => $e->emp_code, 'name' => $e->name, 'company' => $company->name ?? '—', 'fullMonthNet' => round($fullNet, 2), 'earnedNet' => $earned, 'factorPct' => (int) round($factor * 100), 'present' => $present];
                 $totFull += $fullNet;
@@ -2139,7 +2280,7 @@ class PayrollGenController extends Controller
             return response()->json([
                 'ok' => true,
                 'monthLabel' => now()->format('F Y'),
-                'today' => now()->format('d M Y'),
+                'today' => now()->format('d-m-Y'),
                 'rows' => $rows,
                 'totFull' => round($totFull, 2),
                 'totEarned' => round($totEarned, 2),
@@ -2166,6 +2307,9 @@ class PayrollGenController extends Controller
         try {
             $tid = $request->user()->tenant_id;
             $rates = SettingsController::rates($tid);
+            if ($request->input('company_id')) {
+                $rates = \App\Services\WorkCalendar::forCompany($rates, (int) $request->input('company_id'));   // 7 Oct 2026
+            }
 
             $ctc = (float) $request->input('ctc', 0);
             if ($ctc <= 0) {
@@ -2186,13 +2330,7 @@ class PayrollGenController extends Controller
             [$working, ] = $this->workingSpan($start, $endDate, $endDate, $rates, $holidays);
 
             // LOP basis — tenant setting by default, overridable per simulation.
-            $basis = strtolower(trim((string) $request->input('lop_basis', '')));
-            if (! in_array($basis, ['working', 'calendar', 'fixed30'], true)) {
-                $basis = strtolower(trim((string) ($rates['lop_basis'] ?? 'working')));
-                if (! in_array($basis, ['working', 'calendar', 'fixed30'], true)) {
-                    $basis = 'working';
-                }
-            }
+            $basis = self::lopBasisOf($rates, (string) $request->input('lop_basis', ''));
             if ($basis === 'calendar') {
                 $den = (float) $daysInMonth;
             } elseif ($basis === 'fixed30') {
@@ -2220,6 +2358,8 @@ class PayrollGenController extends Controller
                 'gender' => trim((string) $request->input('gender', '')),   // PT — MH female exemption
                 'month' => $month,
             ];
+            // 10 Oct 2026 — PT rules: branch from the picked branch, designation as typed.
+            $stxSim += AppDataController::ptCtx(['branch_id' => $stxSim['branch_id'], 'designation' => trim((string) $request->input('designation', ''))]);
 
             // Optional: apply a company's Salary Structure (company-wide rows).
             $s = null;
@@ -2352,7 +2492,7 @@ class PayrollGenController extends Controller
                     'rate' => $s->rate_type === 'percent'
                         ? rtrim(rtrim(number_format((float) $s->rate_value, 2), '0'), '.').'% of collections'
                         : ($s->rate_type === 'fixed' ? '₹'.number_format((float) $s->rate_value).' per claim' : 'open amount'),
-                    'till' => $s->valid_till ? \Carbon\Carbon::parse($s->valid_till)->format('d M') : null,
+                    'till' => $s->valid_till ? \Carbon\Carbon::parse($s->valid_till)->format('d-m-Y') : null,
                 ])->values()->all();
         } catch (\Throwable $e) {
             return [];
@@ -2417,6 +2557,8 @@ class PayrollGenController extends Controller
                 'periodEnd' => $c['meta']['periodEnd'],
                 'attendanceEnd' => $c['meta']['attendanceEnd'],
                 'workingSoFar' => $c['meta']['workingSoFar'],
+                'payDate' => $c['meta']['payDate'],
+                'lopBasis' => $c['meta']['lopBasis'],   // 8 Oct 2026 — preview note's day count
                 'hasAttendance' => $this->hasAnyAttendance($request->user()->tenant_id, $company, $month, $c['meta']['attendanceEnd']),
             ]);
         } catch (\Throwable $e) {
@@ -2515,6 +2657,15 @@ class PayrollGenController extends Controller
             }
         } catch (\Throwable $e) {
             // best-effort; a regenerate must not fail on the reversal.
+        }
+        // 7 Oct 2026 — release expense / bonus / advance items this run settled.
+        foreach (array_keys(self::ADHOC) as $tbl) {
+            try {
+                if (Schema::hasTable($tbl) && Schema::hasColumn($tbl, 'paid_run_id')) {
+                    DB::table($tbl)->where('paid_run_id', $runId)->update(['paid_run_id' => null, 'paid_amount' => null]);
+                }
+            } catch (\Throwable $e) {
+            }
         }
     }
 
@@ -2754,6 +2905,20 @@ class PayrollGenController extends Controller
                 // fail-soft: the clawback still deducts; it just won't be stamped
             }
 
+            // 7 Oct 2026 — run-keyed stamps for expense / bonus / advance items.
+            foreach (array_keys(self::ADHOC) as $tbl) {
+                try {
+                    if (Schema::hasTable($tbl) && ! Schema::hasColumn($tbl, 'paid_run_id')) {
+                        Schema::table($tbl, function (Blueprint $t) {
+                            $t->unsignedBigInteger('paid_run_id')->nullable();
+                            $t->decimal('paid_amount', 12, 2)->nullable();
+                        });
+                    }
+                } catch (\Throwable $e) {
+                    // fail-soft: the item still pays; it just won't be stamped
+                }
+            }
+
             // rev172 (H2) — write the run header + every payslip ATOMICALLY, so a
             // failure mid-way can never leave a run with a partial set of payslips.
             DB::beginTransaction();
@@ -2783,6 +2948,9 @@ class PayrollGenController extends Controller
                 if (! empty($r['otAmount'])) {
                     // rev176 — overtime as its own earning line.
                     $earnings['Overtime'] = round(($earnings['Overtime'] ?? 0) + (float) $r['otAmount'], 2);
+                }
+                foreach ((array) ($r['adhocEarn'] ?? []) as $al => $aa) {
+                    $earnings[$al] = round(($earnings[$al] ?? 0) + (float) $aa, 2);   // 7 Oct 2026 — expense / bonus
                 }
                 $deductions = ! empty($r['deductionsMap'])
                     ? $r['deductionsMap']
@@ -2968,6 +3136,23 @@ class PayrollGenController extends Controller
                 }
             } catch (\Throwable $e) {
                 \Illuminate\Support\Facades\Log::warning('Clawback recovery stamping on payroll generate failed: '.$e->getMessage());
+            }
+
+            // 7 Oct 2026 — stamp expense / bonus / advance items settled by this run.
+            try {
+                foreach ($c['rows'] as $r) {
+                    foreach ((array) ($r['adhocIds'] ?? []) as $tbl => $items) {
+                        if (! isset(self::ADHOC[$tbl]) || ! Schema::hasColumn($tbl, 'paid_run_id')) {
+                            continue;
+                        }
+                        foreach ($items as $it) {
+                            DB::table($tbl)->where('id', (int) $it['id'])->whereNull('paid_run_id')
+                                ->update(['paid_run_id' => $runId, 'paid_amount' => round((float) $it['amount'], 2)]);
+                        }
+                    }
+                }
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning('Expense / bonus / advance stamping on payroll generate failed: '.$e->getMessage());
             }
 
             return response()->json([
