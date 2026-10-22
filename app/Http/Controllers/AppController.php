@@ -5913,7 +5913,7 @@ CSS;
                 + '<td style="' + c + '">' + salStatusBadge(r.status, r.statusLabel) + '</td>'
                 + '<td style="' + c + '">' + (r.hrBy ? r.hrBy + (r.hrAt ? '<br><span style="font-size:10px;color:var(--text3)">' + r.hrAt + '</span>' : '') : dash) + '</td>'
                 + '<td style="' + c + '">' + (r.finBy ? r.finBy + (r.finAt ? '<br><span style="font-size:10px;color:var(--text3)">' + r.finAt + '</span>' : '') : dash) + '</td>'
-                + '<td style="' + c + '">' + act + (d.isFinance && (r.status === 'approved' || r.status === 'paid') ? ' <button class="btn btn-sm btn-outline" title="Bank disbursement (NEFT) file" onclick="bankFile(' + r.id + ')"><i class="fas fa-building-columns"></i> Bank File</button>' : '') + '</td>'
+                + '<td style="' + c + '">' + act + (d.isFinance && (r.status === 'approved' || r.status === 'paid') ? ' <button class="btn btn-sm btn-outline" title="Bank disbursement (NEFT) file" onclick="bankFile(' + r.id + ')"><i class="fas fa-building-columns"></i> Bank File</button>' : '') + (r.canDelete ? ' <button class="btn btn-sm btn-outline" style="color:var(--red)" title="Delete this run so it can be generated again" onclick="salDelete(' + r.id + ')"><i class="fas fa-trash"></i> Delete</button>' : '') + '</td>'
                 + '</tr>';
         }).join('');
         var awaitingHR = rows.filter(function (r) { return r.next === 'hr'; }).length;
@@ -5970,6 +5970,18 @@ CSS;
                 if (res.ok && res.j && res.j.ok) { if (typeof toast === 'function') { toast('Run ' + res.j.status.replace('_', ' ')); } salaryLoad(); }
                 else if (typeof toast === 'function') { toast((res.j && res.j.error) || 'Action failed'); }
             }).catch(function () { if (typeof toast === 'function') { toast('Action failed'); } });
+    };
+    // 22 Oct 2026 (Ejaz) — delete a generated / approved run so it can be regenerated.
+    window.salDelete = function (id, force) {
+        var r0 = ((window.__SALRUNS && window.__SALRUNS.rows) || []).filter(function (x) { return x.id === id; })[0] || {};
+        if (!force && !confirm('Delete the salary run for ' + (r0.company || '') + ' ' + (r0.cycle || '') + ' (' + (r0.statusLabel || r0.status || '') + ')?' + String.fromCharCode(10) + String.fromCharCode(10) + 'All its payslips are removed and loan EMIs, overtime, commissions, clawbacks, expenses, bonus and advances it settled are released. You can then generate this month again.')) { return; }
+        fetch(cfg.salaryRunsBase + '/' + id + '/delete', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': cfg.csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify({ force: force ? 1 : 0 }) })
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+                if (j && j.ok) { if (typeof toast === 'function') { toast(j.message || 'Run deleted'); } delete window.__salSel[id]; salaryLoad(); return; }
+                if (j && j.needsConfirm && !force) { if (confirm(j.error + String.fromCharCode(10) + String.fromCharCode(10) + 'Delete anyway?')) { window.salDelete(id, true); } return; }
+                if (typeof toast === 'function') { toast((j && j.error) || 'Delete failed'); }
+            }).catch(function () { if (typeof toast === 'function') { toast('Delete failed'); } });
     };
     window.salBulk = function (action) {
         var ids = Object.keys(window.__salSel).map(Number);

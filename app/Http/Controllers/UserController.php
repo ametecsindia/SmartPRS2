@@ -168,6 +168,20 @@ class UserController extends Controller
         }
     }
 
+    /** Demo workspace, or a workspace that is deleted / suspended / churned / an expired trial. */
+    private function releasable(int $tenantId): bool
+    {
+        if (DemoAccessController::isDemoTenant($tenantId)) {
+            return true;
+        }
+        $t = DB::table('tenants')->where('id', $tenantId)->first();
+        if (! $t || ! empty($t->deleted_at) || in_array($t->status ?? '', ['suspended', 'churned'], true)) {
+            return true;
+        }
+
+        return ($t->status ?? '') === 'trial' && ! empty($t->trial_ends_at) && strtotime($t->trial_ends_at) < time();
+    }
+
     public function save(Request $request)
     {
         try {
@@ -207,10 +221,29 @@ class UserController extends Controller
             }
 
             // Uniqueness across users (email is the login).
+            // 14 Oct 2026 — login is by email across the whole server, so this stays global;
+            // the message now says WHERE the email is, since User Access only lists this workspace.
             $dupe = DB::table('users')->whereRaw('LOWER(email) = ?', [$email])
-                ->when($id, fn ($q) => $q->where('id', '!=', $id))->exists();
+                ->when($id, fn ($q) => $q->where('id', '!=', $id))->first(['id', 'tenant_id', 'status']);
+            // 14 Oct 2026 (Ejaz) — a login parked in the demo workspace or in a dead trial /
+            // suspended / churned / deleted workspace is RELEASED so the real workspace can use
+            // the email. A live workspace's login is never taken (that would lock out its owner).
+            if ($dupe && $dupe->tenant_id !== null && (string) $dupe->tenant_id !== (string) $tid
+                && $this->releasable((int) $dupe->tenant_id)) {
+                DB::table('users')->where('id', $dupe->id)->update([
+                    'email' => 'released.'.$dupe->id.'.'.time().'.'.$email,   // frees the email, keeps the row
+                    'status' => 'disabled',
+                    'updated_at' => now(),
+                ]);
+                \App\Services\AuditTrail::log($request, 'login_email_released', 'user', $dupe->id,
+                    ['email' => $email, 'from_tenant' => $dupe->tenant_id]);
+                $dupe = null;
+            }
             if ($dupe) {
-                return response()->json(['ok' => false, 'error' => 'That email is already in use.'], 422);
+                $where = $dupe->tenant_id === null ? 'an Ametecs platform staff login (Super Admin → Staff)'
+                    : ((string) $dupe->tenant_id === (string) $tid ? 'a login in this workspace (status: '.($dupe->status ?? 'active').')'
+                    : 'a login in another live SmartPRS workspace (Super Admin → SaaS Platform → Tenants)');
+                return response()->json(['ok' => false, 'error' => 'That email is already used by '.$where.'. Use a different email, or free it there first.'], 422);
             }
 
             if ($id) {

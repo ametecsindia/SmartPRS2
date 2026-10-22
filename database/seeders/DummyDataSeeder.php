@@ -273,7 +273,11 @@ class DummyDataSeeder extends Seeder
                 'from_name' => $companyDefs[$i]['name'],
             ];
         }
-        $this->putSetting($tenantId, 'mail', $mailMap);
+        // 17 Oct 2026 (Ejaz): demo:reset was wiping the real SMTP he entered (sample hosts,
+        // blank passwords). Seed the sample only when the tenant has no mail setting yet.
+        if (! DB::table('app_settings')->where('tenant_id', $tenantId)->where('ckey', 'mail')->exists()) {
+            $this->putSetting($tenantId, 'mail', $mailMap);
+        }
 
         // ---- Client tenants for the SaaS Platform → Tenants demo -------------
         // Skipped by demo:reset on a live platform (fake clients are dev-only).

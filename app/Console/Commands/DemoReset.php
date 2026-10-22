@@ -42,6 +42,13 @@ class DemoReset extends Command
         // window has ended (their data must be erased) and no live passkey session
         // could still be mid-demo. Without the flag the reset always runs (deploy
         // script + daily backstop).
+        // 17 Oct 2026 (Ejaz): pause ALL demo resets (scheduled + manual) while he tests.
+        // Delete storage/app/demo-reset-off.txt to turn resets back on.
+        if (is_file(storage_path('app/demo-reset-off.txt'))) {
+            $this->info('demo:reset paused (storage/app/demo-reset-off.txt) — skipped.');
+
+            return self::SUCCESS;
+        }
         if ($this->option('if-due') && ! $this->resetDue()) {
             $this->info('demo:reset --if-due: nothing due — skipped.');
 

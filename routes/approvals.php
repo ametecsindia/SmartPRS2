@@ -30,3 +30,9 @@ Route::get('/app/complaints/evidence/{fid}', [App\Http\Controllers\ComplaintCont
 */
 Route::get('/app/leaves/report', [LeaveController::class, 'report'])->name('app.leaves.report');
 Route::post('/app/leaves/year', [LeaveController::class, 'setLeaveYear'])->name('app.leaves.year');
+
+/*
+| 22 Oct 2026 (Ejaz) — Delete a generated / approved salary run so it can be
+| generated again after corrections (SalaryApprovalController::deleteRun).
+*/
+Route::post('/app/salary-runs/{id}/delete', [App\Http\Controllers\SalaryApprovalController::class, 'deleteRun'])->whereNumber('id')->name('app.salaryruns.delete');

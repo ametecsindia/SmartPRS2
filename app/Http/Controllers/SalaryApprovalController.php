@@ -218,6 +218,7 @@ class SalaryApprovalController extends Controller
                     'next' => $next,            // 'hr' | 'finance' | null
                     'canApprove' => $canHR || $canFin,
                     'canReject' => ($next !== null) && ($canHR || $canFin),
+                    'canDelete' => $this->canDeleteRun($status, $hr, $fin),   // 22 Oct 2026
                 ];
             })->values();
 
@@ -846,6 +847,71 @@ class SalaryApprovalController extends Controller
         }
 
         return ['ok' => false, 'error' => 'Run #'.$run->id.' has no pending step.'];
+    }
+
+    /**
+     * 22 Oct 2026 (Ejaz) — who may DELETE a run: HR/Admin while it is not yet
+     * final (draft / rejected / HR approved); only Finance (Admin) once it is
+     * Finance approved / locked / paid.
+     */
+    private function canDeleteRun(string $status, bool $hr, bool $fin): bool
+    {
+        return in_array($status, ['approved', 'locked', 'paid'], true) ? $fin : $hr;
+    }
+
+    /**
+     * 22 Oct 2026 (Ejaz) — DELETE a generated / approved run so the month can be
+     * generated again after corrections. Reuses PayrollGenController::reverseRun()
+     * (payslips, commissions, overtime, loan EMIs, clawbacks, expenses/bonus/
+     * advances all released). If any line was already disbursed / acknowledged
+     * the first call asks for confirmation (needsConfirm); re-post with force=1.
+     */
+    public function deleteRun(Request $request, int $id)
+    {
+        try {
+            $this->ensureCols();
+            $tid = $request->user()->tenant_id;
+            $run = DB::table('payroll_runs')->where('id', $id)
+                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))->first();
+            if (! $run) {
+                return response()->json(['ok' => false, 'error' => 'Run not found'], 404);
+            }
+            $status = $run->status ?? 'draft';
+            if (! $this->canDeleteRun($status, $this->isHR($request), $this->isFinance($request))) {
+                return response()->json(['ok' => false, 'error' => 'Not authorised to delete a '.$this->statusLabel($status).' run.'], 403);
+            }
+            $paidLines = Schema::hasColumn('payslips', 'line_status')
+                ? DB::table('payslips')->where('run_id', $id)->whereIn('line_status', ['disbursed', 'acknowledged'])->count()
+                : 0;
+            if ($paidLines && ! $request->boolean('force')) {
+                return response()->json(['ok' => false, 'needsConfirm' => true,
+                    'error' => $paidLines.' salary line(s) in this run are already disbursed / acknowledged. Deleting removes those payslips too.'], 409);
+            }
+            // Audit first — the run row is gone after reverseRun().
+            try {
+                if (Schema::hasTable('activity_logs')) {
+                    $by = trim((string) ($request->user()->name ?? '')) ?: (string) $request->user()->email;
+                    DB::table('activity_logs')->insert(ApprovalService::safeRow('activity_logs', [
+                        'tenant_id' => $tid,
+                        'user_id' => optional($request->user())->id,
+                        'action' => 'payroll.delete',
+                        'entity' => 'payroll_runs',
+                        'entity_id' => $id,
+                        'detail' => json_encode(['by' => $by, 'company_id' => $run->company_id ?? null, 'month' => $run->cycle_label ?? null,
+                            'status' => $status, 'net_total' => $run->net_total ?? null, 'paid_lines' => $paidLines]),
+                        'ip' => $request->ip(),
+                        'created_at' => now(),
+                    ]));
+                }
+            } catch (\Throwable $e) {
+                // audit is best-effort
+            }
+            DB::transaction(fn () => app(PayrollGenController::class)->reverseRun($id));
+
+            return response()->json(['ok' => true, 'message' => 'Salary run deleted. You can generate this month again.']);
+        } catch (\Throwable $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()], 422);
+        }
     }
 
     /** Individual approve / reject of one run. */
