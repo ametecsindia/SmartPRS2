@@ -94,13 +94,15 @@ class LetterController extends Controller
 
         // An OFFER letter goes to a CANDIDATE (in Recruitment), not an employee.
         // Other letter types are for existing employees.
-        if (! empty($letter->candidate)) {
-            // The recruitment table self-creates on first use; an offer letter may
-            // be generated before it exists, so guard the lookup (fail-soft to null).
-            $cand = Schema::hasTable('recruitment')
-                ? DB::table('recruitment')->where('name', $letter->candidate)
-                    ->when($tid, fn ($q) => $q->where('tenant_id', $tid))->first()
-                : null;
+        // The recruitment table self-creates on first use; an offer letter may
+        // be generated before it exists, so guard the lookup (fail-soft to null).
+        $cand = (! empty($letter->candidate) && Schema::hasTable('recruitment'))
+            ? DB::table('recruitment')->where('name', $letter->candidate)
+                ->when($tid, fn ($q) => $q->where('tenant_id', $tid))->first()
+            : null;
+        // 23 Oct 2026 (Ejaz) — an offer can go to an EXISTING employee too: no Recruitment
+        // row + a linked employee → merge the employee's data (the else branch).
+        if (! empty($letter->candidate) && ($cand || empty($letter->employee_id) || empty($letter->emp_name))) {
             $personName = $letter->candidate;
             $personCode = '';
             $designation = $cand->position ?? '';
@@ -203,6 +205,7 @@ class LetterController extends Controller
             'name' => $personName,
             'file' => 'letter-'.($personCode ?: $id).'-'.$letter->letter_type.'.pdf',
             'type' => $letter->letter_type,
+            'title' => $tpl->title ?? '',
             'company' => $letter->company_name,
             'tenant_id' => $letter->tenant_id,
             'company_id' => $letter->company_id,
@@ -244,10 +247,12 @@ class LetterController extends Controller
             ]);
 
             $pdfData = $b['pdf']->output();
-            $subject = ucfirst((string) $b['type']).' Letter — '.($b['company'] ?: 'SmartPRS');
-            \Illuminate\Support\Facades\Mail::send([], [], function ($mail) use ($b, $pdfData, $subject) {
+            // Custom letters are named by their template title (e.g. "Address Proof Letter").
+            $what = ($b['type'] === 'custom' && $b['title']) ? $b['title'] : ucfirst((string) $b['type']).' Letter';
+            $subject = $what.' — '.($b['company'] ?: 'SmartPRS');
+            \Illuminate\Support\Facades\Mail::send([], [], function ($mail) use ($b, $pdfData, $subject, $what) {
                 $mail->to($b['email'], $b['name'])->subject($subject)
-                    ->html('<p>Dear '.e($b['name']).',</p><p>Please find your '.e($b['type']).' letter attached.</p><p>Regards,<br>'.e($b['company'] ?: 'HR').'</p>')
+                    ->html('<p>Dear '.e($b['name']).',</p><p>Please find your '.e($what).' attached.</p><p>Regards,<br>'.e($b['company'] ?: 'HR').'</p>')
                     ->attachData($pdfData, $b['file'], ['mime' => 'application/pdf']);
             });
 
@@ -383,12 +388,15 @@ class LetterController extends Controller
                 if (empty($letter->candidate)) {
                     return response()->json(['ok' => false, 'error' => 'This offer has no candidate.'], 422);
                 }
-                $cand = DB::table('recruitment')->where('name', $letter->candidate)
-                    ->when($tid, fn ($q) => $q->where('tenant_id', $tid))->first();
-                $to = $cand->email ?? null;
-                $toName = $letter->candidate;
+                $cand = Schema::hasTable('recruitment') ? DB::table('recruitment')->where('name', $letter->candidate)
+                    ->when($tid, fn ($q) => $q->where('tenant_id', $tid))->first() : null;
+                // 23 Oct 2026 — offer to an existing employee: use their employee email.
+                $to = $cand->email ?? (! empty($letter->employee_id)
+                    ? DB::table('employees')->where('id', $letter->employee_id)->when($tid, fn ($q) => $q->where('tenant_id', $tid))->value('email')
+                    : null);
+                $toName = preg_replace('/\s*\([^()]*\)$/', '', (string) $letter->candidate);   // drop "(EMP-CODE)"
                 if (! $to) {
-                    return response()->json(['ok' => false, 'error' => 'The candidate has no email in Recruitment.'], 422);
+                    return response()->json(['ok' => false, 'error' => 'No email on file for '.$letter->candidate.' (Recruitment / employee record).'], 422);
                 }
             }
 

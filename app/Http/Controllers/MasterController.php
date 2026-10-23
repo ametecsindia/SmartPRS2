@@ -363,8 +363,18 @@ class MasterController extends Controller
                 'table' => 'letters', 'cols' => ['candidate' => 'string', 'template' => 'string', 'template_id' => 'int', 'company_name' => 'string', 'issued_on' => 'date', 'status' => 'string', 'is_template' => 'bool'],
                 'fields' => ['candidate', 'template', 'company_name', 'issued_on', 'status'], 'label' => 'Offer Letter', 'order' => 'id',
                 'required' => ['candidate', 'company_name'], 'templateType' => 'offer', 'candidateSource' => true,
+                // 23 Oct 2026 (Ejaz) — the picker also lists existing employees; picking one links employee_id.
+                'emp_map' => ['candidate' => 'employee_id'],
                 'ref_map' => ['template' => ['col' => 'template_id', 'table' => 'letters', 'match' => 'title', 'where' => ['is_template' => 1, 'letter_type' => 'offer']]],
                 'fixed' => ['letter_type' => 'offer', 'is_template' => 0], 'defaults' => ['employee_id' => 0],
+            ],
+            // 23 Oct 2026 (Ejaz) — Custom Letter: any employee + ANY saved template (all types).
+            'letters-custom' => [
+                'table' => 'letters', 'cols' => ['employee' => 'string', 'template' => 'string', 'template_id' => 'int', 'company_name' => 'string', 'issued_on' => 'date', 'status' => 'string', 'is_template' => 'bool'],
+                'fields' => ['employee', 'template', 'company_name', 'issued_on', 'status'], 'label' => 'Custom Letter', 'order' => 'id',
+                'required' => ['employee', 'template', 'company_name'], 'emp_map' => ['employee' => 'employee_id'], 'templateType' => '*',
+                'ref_map' => ['template' => ['col' => 'template_id', 'table' => 'letters', 'match' => 'title', 'where' => ['is_template' => 1]]],
+                'fixed' => ['letter_type' => 'custom', 'is_template' => 0],
             ],
             'letters-increment' => [
                 'table' => 'letters', 'cols' => ['employee' => 'string', 'template' => 'string', 'template_id' => 'int', 'company_name' => 'string', 'issued_on' => 'date', 'status' => 'string', 'is_template' => 'bool'],
@@ -688,15 +698,21 @@ class MasterController extends Controller
             if (! empty($def['templateType']) && Schema::hasTable('letters') && Schema::hasColumn('letters', 'is_template')) {
                 $templates = DB::table('letters')
                     ->when($tid && Schema::hasColumn('letters', 'tenant_id'), fn ($x) => $x->where('tenant_id', $tid))
-                    ->where('is_template', 1)->where('letter_type', $def['templateType'])
-                    ->orderByDesc('id')->pluck('title')->filter()->values();
+                    ->where('is_template', 1)
+                    ->when($def['templateType'] !== '*', fn ($x) => $x->where('letter_type', $def['templateType']))
+                    ->orderByDesc('id')->pluck('title')->filter()->unique()->values();
             }
-            // Recruitment candidates (for the Offer Letter picker).
+            // Offer Letter picker: Recruitment candidates + existing employees (23 Oct 2026).
             $candidates = [];
-            if (! empty($def['candidateSource']) && Schema::hasTable('recruitment')) {
-                $candidates = DB::table('recruitment')
+            if (! empty($def['candidateSource'])) {
+                $rc = Schema::hasTable('recruitment') ? DB::table('recruitment')
                     ->when($tid && Schema::hasColumn('recruitment', 'tenant_id'), fn ($x) => $x->where('tenant_id', $tid))
-                    ->orderBy('name')->pluck('name')->filter()->values();
+                    ->pluck('name') : collect();
+                // Employees show as "Name (EMP-CODE)" so same-name employees stay distinct.
+                $em = DB::table('employees')->when($tid, fn ($x) => $x->where('tenant_id', $tid))
+                    ->whereNull('deleted_at')->get(['name', 'emp_code'])
+                    ->map(fn ($e) => $e->name.($e->emp_code ? ' ('.$e->emp_code.')' : ''));
+                $candidates = $rc->merge($em)->filter()->unique()->sort(SORT_NATURAL | SORT_FLAG_CASE)->values();
             }
 
             return response()->json([
@@ -1070,7 +1086,16 @@ class MasterController extends Controller
         // Resolve any employee-name fields to their FK id column (emp_map). Accept emp_code too.
         foreach ($def['emp_map'] ?? [] as $nameField => $idCol) {
             if (! empty($input[$nameField])) {
-                $eid = DB::table('employees')->when($tid, fn ($x) => $x->where('tenant_id', $tid))
+                $eid = null;
+                // 23 Oct 2026 — "Name (EMP-CODE)" from a picker: the code decides (same-name employees).
+                if (preg_match('/^(.*\S)\s*\(([^()]+)\)$/', (string) $input[$nameField], $m)) {
+                    $eid = DB::table('employees')->when($tid, fn ($x) => $x->where('tenant_id', $tid))
+                        ->where('emp_code', $m[2])->whereNull('deleted_at')->value('id');
+                    if ($eid && $nameField !== 'candidate') {
+                        $row[$nameField] = $m[1];   // employee columns keep the plain name (profile links resolve by name)
+                    }
+                }
+                $eid = $eid ?: DB::table('employees')->when($tid, fn ($x) => $x->where('tenant_id', $tid))
                     ->where(function ($q) use ($input, $nameField) {
                         $q->where('name', $input[$nameField])->orWhere('emp_code', $input[$nameField]);
                     })->whereNull('deleted_at')->value('id');

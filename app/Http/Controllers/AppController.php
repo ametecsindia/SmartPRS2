@@ -743,7 +743,7 @@ CSS;
         statutory: ['pf-esic', 'tds', 'pt', 'gratuity', 'bonus', 'tds-returns', 'min-wages', 'audit-reports', 'statutory-config'],
         performance: ['performance', 'increments', 'exits', 'awards', 'points-scores', 'points-ledger', 'points-rules', 'tests', 'test-results', 'test-reports', 'attrition'],
         field: ['escalations', 'agent-auth', 'dra-certs', 'complaints', 'compliance-alerts'],
-        kb: ['kb', 'faqs', 'training-programs', 'training-records', 'training-content', 'code-of-conduct', 'policies', 'helpdesk', 'posh', 'letters-offer', 'letters-increment', 'letters-warning', 'letters-relieving', 'letters-nda', 'letters-templates', 'notice', 'messages', 'send-message'],
+        kb: ['kb', 'faqs', 'training-programs', 'training-records', 'training-content', 'code-of-conduct', 'policies', 'helpdesk', 'posh', 'letters-offer', 'letters-increment', 'letters-warning', 'letters-relieving', 'letters-custom', 'letters-nda', 'letters-templates', 'notice', 'messages', 'send-message'],
         reports: ['reports', 'activity-logs'],
         assets: ['assets', 'asset-stock', 'asset-issue'],
         settings: ['companies', 'departments', 'designations', 'branches', 'banks', 'users', 'roles', 'settings', 'fin-year', 'my-subscription', 'branding', 'company-emails', 'wa-settings', 'wa-templates', 'sms-settings', 'sms-templates', 'approvals-inbox', 'mobile-devices', 'probation-config', 'greetings', 'greetings-log', 'sys-updates'],
@@ -1535,7 +1535,7 @@ CSS;
         'training-programs': 'fa-graduation-cap', 'training-records': 'fa-list-check', 'training-content': 'fa-book',
         'faqs': 'fa-circle-question', 'kb': 'fa-book-open', 'code-of-conduct': 'fa-scale-balanced',
         'letters-offer': 'fa-file-signature', 'letters-increment': 'fa-file-arrow-up', 'letters-warning': 'fa-triangle-exclamation',
-        'letters-relieving': 'fa-file-export', 'letters-nda': 'fa-user-shield', 'letters-templates': 'fa-file-lines',
+        'letters-relieving': 'fa-file-export', 'letters-custom': 'fa-file-pen', 'letters-nda': 'fa-user-shield', 'letters-templates': 'fa-file-lines',
         'offroll-agents': 'fa-user-shield', 'agent-auth': 'fa-id-badge', 'dra-certs': 'fa-certificate', 'compliance-alerts': 'fa-triangle-exclamation', 'min-wages': 'fa-indian-rupee-sign', 'overtime': 'fa-business-time', 'policies': 'fa-scale-balanced',
         'escalations': 'fa-headset', 'roster': 'fa-route', 'complaints': 'fa-comment-dots',
         'notice': 'fa-bullhorn', 'messages': 'fa-comments', 'send-message': 'fa-paper-plane', 'helpdesk': 'fa-headset', 'posh': 'fa-shield-heart',
@@ -3427,6 +3427,7 @@ CSS;
         var isAdmin = (role === 'Super Admin' || role === 'Admin' || role === 'HR Manager');
         // Everyone can regularise their own attendance.
         addNav(['att-manual', 'att-report', 'att-daily'], 'att-correction', 'Attendance Correction');
+        addNav(['letters-relieving', 'letters-warning'], 'letters-custom', 'Custom Letter');   // 23 Oct 2026
         if (isAdmin) {
             addNav(['att-correction', 'late-policy'], 'absence-config', 'Absence Alerts');
             // SBB — Smart Biometric Bridge, sat next to Biometric Device Setup.
@@ -3505,6 +3506,7 @@ CSS;
         try { if (typeof SCREENS !== 'undefined' && !SCREENS['transfers']) { SCREENS['transfers'] = { title: 'Employee Transfers', type: 'custom' }; } } catch (e) {}
         try { if (typeof SCREENS !== 'undefined' && !SCREENS['pay-ledger']) { SCREENS['pay-ledger'] = { title: 'Salary & Commission Ledger', type: 'custom' }; } } catch (e) {}
         try { if (typeof SCREENS !== 'undefined' && !SCREENS['mobile-devices']) { SCREENS['mobile-devices'] = { title: 'Mobile Devices', type: 'custom' }; } } catch (e) {}
+        try { if (typeof SCREENS !== 'undefined' && !SCREENS['letters-custom']) { SCREENS['letters-custom'] = { title: 'Custom Letters', type: 'custom' }; } } catch (e) {}   // 23 Oct 2026
         try { if (typeof SCREENS !== 'undefined' && !SCREENS['wa-templates']) { SCREENS['wa-templates'] = { title: 'WhatsApp Templates', type: 'custom' }; } } catch (e) {}
         // Money/HR request modules → real DB + hierarchy approval (generic engine).
         try {
@@ -3514,7 +3516,7 @@ CSS;
         // Master data → real DB-backed editors (departments / branches / banks / designations).
         try {
             var MM = { 'departments': 'Departments', 'branches': 'Branches', 'banks': 'Banks', 'designations': 'Designations', 'holidays': 'Holidays', 'leave-types': 'Leave Types', 'biometric-devices': 'Biometric Devices', 'assets': 'Assets', 'complaints': 'Complaints', 'helpdesk': 'HR Helpdesk', 'deductions': 'Deductions Ledger', 'payout-recon': 'Payout Reconciliation', 'salary-schedules': 'Salary Schedules', 'tds-returns': 'TDS Returns',
-                'teams': 'Teams', 'bgv': 'Background Verification', 'documents': 'Documents', 'offroll-agents': 'Off-roll Agents', 'geofence': 'Geofence Rules', 'geofence-list': 'Geofence Rules', 'late-policy': 'Late Policy', 'salary-setup': 'Salary Setup', 'incentive-schemes': 'Incentive Schemes', 'points-ledger': 'Points Ledger', 'points-rules': 'Points Rules', 'tests': 'Tests', 'training-programs': 'Training Programs', 'training-records': 'Training Records', 'code-of-conduct': 'Code of Conduct', 'faqs': 'FAQs', 'escalations': 'Escalations', 'agent-auth': 'Agent Authorization', 'dra-certs': 'DRA Certifications', 'min-wages': 'Minimum Wages', 'overtime': 'Overtime Register', 'policies': 'Policy Repository', 'messages': 'Messages', 'companies': 'Companies', 'letters-offer': 'Offer Letters', 'letters-increment': 'Increment Letters', 'letters-warning': 'Warning Letters', 'letters-relieving': 'Relieving Letters', 'letters-nda': 'NDA / Confidentiality', 'letters-templates': 'Letter Templates',
+                'teams': 'Teams', 'bgv': 'Background Verification', 'documents': 'Documents', 'offroll-agents': 'Off-roll Agents', 'geofence': 'Geofence Rules', 'geofence-list': 'Geofence Rules', 'late-policy': 'Late Policy', 'salary-setup': 'Salary Setup', 'incentive-schemes': 'Incentive Schemes', 'points-ledger': 'Points Ledger', 'points-rules': 'Points Rules', 'tests': 'Tests', 'training-programs': 'Training Programs', 'training-records': 'Training Records', 'code-of-conduct': 'Code of Conduct', 'faqs': 'FAQs', 'escalations': 'Escalations', 'agent-auth': 'Agent Authorization', 'dra-certs': 'DRA Certifications', 'min-wages': 'Minimum Wages', 'overtime': 'Overtime Register', 'policies': 'Policy Repository', 'messages': 'Messages', 'companies': 'Companies', 'letters-offer': 'Offer Letters', 'letters-increment': 'Increment Letters', 'letters-warning': 'Warning Letters', 'letters-relieving': 'Relieving Letters', 'letters-custom': 'Custom Letters', 'letters-nda': 'NDA / Confidentiality', 'letters-templates': 'Letter Templates',
                 'roster': 'Roster', 'onboarding-board': 'Onboarding', 'awards': 'Awards & Rewards', 'performance': 'Performance', 'notice-board': 'Notice Board', 'notice': 'Notice Board', 'feature-flags': 'Feature Flags', 'training-content': 'Training Content', 'test-results': 'Test Results', 'pay-cycle': 'Pay Cycle', 'wa-settings': 'WhatsApp Settings', 'sms-settings': 'SMS Settings', 'sms-templates': 'SMS Templates', 'att-manual': 'Manual Attendance', 'att-zkteco': 'ZKTeco Devices' };
             if (typeof SCREENS !== 'undefined') { for (var mk in MM) { if (SCREENS[mk]) { SCREENS[mk] = { title: MM[mk], type: 'custom' }; } } SCREENS['biometric-setup'] = { title: 'Biometric Device Setup', type: 'custom' }; SCREENS['shifts'] = { title: 'Working Shifts', type: 'custom' }; SCREENS['audit-reports'] = { title: 'Audit Reports', type: 'custom' }; SCREENS['posh'] = { title: 'Raise a Complaint', type: 'custom' }; }
         } catch (e) {}
@@ -11437,7 +11439,7 @@ CSS;
             { k: 'target', l: 'Target' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'channels', l: 'Channels' }, { k: 'message', l: 'Message' }, { k: 'recipients', l: 'Recipients', type: 'number' }, { k: 'sent_at', l: 'Sent At', type: 'date' }] },
         'companies': { type: 'companies', title: 'Companies', sub: 'Group companies — the signed-up company is the Master; additional companies are Subsidiaries', fields: [
             { k: 'name', l: 'Company Name' }, { k: 'is_master', l: 'Company Level', type: 'select', opts: ['1', '0'], optLabels: ['Master company', 'Subsidiary'] }, { k: 'type', l: 'Type' }, { k: 'pan', l: 'PAN' }, { k: 'gstin', l: 'GSTIN' }, { k: 'address', l: 'Address' }, { k: 'phone', l: 'Phone' }, { k: 'email', l: 'Email' }, { k: 'website', l: 'Website' }, { k: 'grievance_officer', l: 'Grievance Officer' }, { k: 'grievance_phone', l: 'Grievance Phone' }, { k: 'grievance_email', l: 'Grievance Email' }, { k: 'status', l: 'Status', type: 'select', opts: ['active', 'inactive'], optLabels: ['Active', 'Inactive'] }] },
-        'letters-offer': { type: 'letters-offer', title: 'Offer Letters', sub: 'Offer to a CANDIDATE (add them in Recruitment first) + a saved Offer template → Preview / Email', rowAction: { label: 'Preview', cfg: 'lettersBase', suffix: '/pdf' }, rowEmail: true, rowAcceptLink: true, fields: [
+        'letters-offer': { type: 'letters-offer', title: 'Offer Letters', sub: 'Offer to a Recruitment CANDIDATE or an existing EMPLOYEE + a saved Offer template → Preview / Email', rowAction: { label: 'Preview', cfg: 'lettersBase', suffix: '/pdf' }, rowEmail: true, rowAcceptLink: true, fields: [
             { k: 'candidate', l: 'Candidate', src: 'candidate' }, { k: 'template', l: 'Template', src: 'template' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'issued_on', l: 'Issued On', type: 'date' }, { k: 'status', l: 'Status', type: 'select', opts: ['draft', 'issued', 'signed'], optLabels: ['Draft', 'Issued', 'Signed'] }] },
         'letters-increment': { type: 'letters-increment', title: 'Increment Letters', sub: 'Pick an employee + a saved Increment template → Preview / Email', rowAction: { label: 'Preview', cfg: 'lettersBase', suffix: '/pdf' }, rowEmail: true, fields: [
             { k: 'employee', l: 'Employee', src: 'emp' }, { k: 'template', l: 'Template', src: 'template' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'issued_on', l: 'Issued On', type: 'date' }, { k: 'status', l: 'Status', type: 'select', opts: ['draft', 'issued', 'signed'], optLabels: ['Draft', 'Issued', 'Signed'] }] },
@@ -11445,6 +11447,9 @@ CSS;
             { k: 'employee', l: 'Employee', src: 'emp' }, { k: 'template', l: 'Template', src: 'template' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'issued_on', l: 'Issued On', type: 'date' }, { k: 'status', l: 'Status', type: 'select', opts: ['draft', 'issued', 'signed'], optLabels: ['Draft', 'Issued', 'Signed'] }] },
         'letters-relieving': { type: 'letters-relieving', title: 'Relieving Letters', sub: 'Pick an employee + a saved Relieving template → Preview / Email', rowAction: { label: 'Preview', cfg: 'lettersBase', suffix: '/pdf' }, rowEmail: true, fields: [
             { k: 'employee', l: 'Employee', src: 'emp' }, { k: 'template', l: 'Template', src: 'template' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'issued_on', l: 'Issued On', type: 'date' }, { k: 'status', l: 'Status', type: 'select', opts: ['draft', 'issued', 'signed'], optLabels: ['Draft', 'Issued', 'Signed'] }] },
+        // 23 Oct 2026 (Ejaz) — Custom Letter: any employee + ANY saved template (every type).
+        'letters-custom': { type: 'letters-custom', title: 'Custom Letters', sub: 'Pick an employee + ANY saved template (Custom or any other type) → Preview / Email', rowAction: { label: 'Preview', cfg: 'lettersBase', suffix: '/pdf' }, rowEmail: true, fields: [
+            { k: 'employee', l: 'Employee', src: 'emp', withCode: 1 }, { k: 'template', l: 'Template', src: 'template' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'issued_on', l: 'Issued On', type: 'date' }, { k: 'status', l: 'Status', type: 'select', opts: ['draft', 'issued', 'signed'], optLabels: ['Draft', 'Issued', 'Signed'] }] },
         'letters-nda': { type: 'letters-nda', title: 'NDA / Confidentiality', sub: 'Pick an agent + a saved NDA template → Preview / Email / send for e-signature. The signed status shows here and feeds Compliance.', rowAction: { label: 'Preview', cfg: 'lettersBase', suffix: '/pdf' }, rowEmail: true, rowAcceptLink: true, fields: [
             { k: 'employee', l: 'Employee', src: 'emp' }, { k: 'template', l: 'Template', src: 'template' }, { k: 'company_name', l: 'Company', src: 'company' }, { k: 'issued_on', l: 'Issued On', type: 'date' }, { k: 'status', l: 'Status', type: 'select', opts: ['draft', 'issued', 'signed'], optLabels: ['Draft', 'Issued', 'Signed'] }] },
         'letters-templates': { type: 'letters-templates', title: 'Letter Templates', sub: 'Reusable letter bodies. Pick a type to load a professional sample, then edit. Placeholders like {{employee_name}}, {{designation}}, {{ctc}}, {{date}} are filled when a letter is generated', fields: [
@@ -11622,14 +11627,15 @@ CSS;
                 ctrl = '<select id="ms_' + fl.k + '" style="' + inp + '"><option value="">— pick a saved template —</option>' + tpls.map(function (o) { return '<option' + (o === val ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select>';
             } else if (fl.src === 'candidate') {
                 var cands = (window.__MASTER[type] && window.__MASTER[type].candidates) || [];
-                ctrl = '<select id="ms_' + fl.k + '" style="' + inp + '"><option value="">— pick a candidate (Recruitment) —</option>' + cands.map(function (o) { return '<option' + (o === val ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select>';
+                ctrl = '<select id="ms_' + fl.k + '" style="' + inp + '"><option value="">— pick a candidate / employee —</option>' + cands.map(function (o) { return '<option' + (o === val ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select>';
             } else if (fl.src === 'emp') {
                 // rev 81b (Ejaz): employee fields are SEARCHABLE — type to filter,
                 // pick from the list (shows the emp code as a hint). The value
                 // stays the NAME so every existing backend resolver still works.
                 var eopts = ((typeof DB !== 'undefined' && DB.employees) || []);
+                // 23 Oct 2026 (Ejaz) — withCode: the value is "Name (EMP-CODE)" so same-name employees stay distinct (server resolves the code).
                 ctrl = '<input id="ms_' + fl.k + '" list="msdl_' + fl.k + '" value="' + String(val).replace(/"/g, '&quot;') + '" placeholder="Type to search employee…" autocomplete="off" style="' + inp + '">'
-                    + '<datalist id="msdl_' + fl.k + '">' + eopts.map(function (e2) { return '<option value="' + String(e2.name || '').replace(/"/g, '&quot;') + '">' + (e2.id || '') + '</option>'; }).join('') + '</datalist>';
+                    + '<datalist id="msdl_' + fl.k + '">' + eopts.map(function (e2) { var ev = String(e2.name || '') + (fl.withCode && e2.id ? ' (' + e2.id + ')' : ''); return '<option value="' + ev.replace(/"/g, '&quot;') + '">' + (fl.withCode ? '' : (e2.id || '')) + '</option>'; }).join('') + '</datalist>';
             } else if (fl.src) {
                 var opts = masterOptsFor(fl.src) || [];
                 ctrl = '<select id="ms_' + fl.k + '" style="' + inp + '"><option value="">Select…</option>' + opts.map(function (o) { return '<option' + (o === val ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select>';
