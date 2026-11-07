@@ -38,6 +38,9 @@ $edits = [
             ."  // 07-Nov-2026: QR Attendance nav — plan feature qr_attendance + company-level roles; the module re-checks both.\n"
             ."  { const qx = document.getElementById('nav-qronex');\n"
             ."    if (qx) qx.style.display = hasPlanFeature('qr_attendance') && ME && ['SUPER_ADMIN','COMPANY_ADMIN','HR_ADMIN','AUDITOR','COMPLIANCE_OFFICER'].includes(ME.base_role || ME.role) ? '' : 'none'; }"],
+        // The console sets every .nav's onclick to show(view) at load, replacing ours — re-attach it whenever the nav is gated.
+        ['resources/views/admin.blade.php', 'qx.onclick = openQronex', "~(\\{ const qx = document\\.getElementById\\('nav-qronex'\\);)~",
+            "$1\n    if (qx) qx.onclick = openQronex; // the console re-binds every .nav click to show(); keep ours"],
     ],
     'central' => [
         ['app/Http/Controllers/Admin/LicenceApiController.php', "'qr_attendance' => ['nullable', 'boolean']", "~(\n([ \t]*)'recording_max_users' => \['nullable', 'integer', 'min:1', 'max:100000'\],)~",
