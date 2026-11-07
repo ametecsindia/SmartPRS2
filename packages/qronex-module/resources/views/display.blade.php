@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>{{ $gate->office->name }} · {{ $gate->name }} · {{ $company }}</title>
-<script src="{{ route('qronex.asset', 'qrcode.min.js') }}"></script>
+<script src="{{ route('qronex.asset', ['f' => 'qrcode.min.js']) }}"></script>
 <style>
   :root{--navy:#0E2747;--teal:#0A8278}
   *{box-sizing:border-box}html,body{margin:0;height:100%}

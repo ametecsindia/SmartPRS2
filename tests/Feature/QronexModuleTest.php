@@ -138,7 +138,8 @@ it('renders every module screen', function () {
         $this->actingAs($admin)->get($url)->assertOk();
     }
     $this->get("/qronex/display/{$gate->id}?key={$gate->display_secret}")->assertOk()->assertSee('qrcode.min.js', false);
-    $this->get('/qronex/assets/qronex.css')->assertOk();
+    $this->get('/qronex/asset?f=qronex.css')->assertOk(); expect(strtolower($this->get('/qronex/asset?f=qronex.css')->headers->get('Content-Type')))->toStartWith('text/css');
+    $this->get('/qronex/asset?f=../../../.env')->assertNotFound();
 });
 
 it('applies the QRONEX scan rules: gate binding, geofence, expiry, one phone, remote work', function () {

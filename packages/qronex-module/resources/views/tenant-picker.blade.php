@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>QR Attendance</title>
-<link rel="stylesheet" href="{{ route('qronex.asset', 'qronex.css') }}"></head>
+<link rel="stylesheet" href="{{ route('qronex.asset', ['f' => 'qronex.css']) }}"></head>
 <body class="bg-slate-50 min-h-screen flex items-center justify-center p-4">
 <div class="card w-full max-w-md space-y-3">
   <div class="card-t">QR Attendance — choose a company</div>

@@ -27,7 +27,8 @@ Route::prefix('api/qronex/v1')->middleware('api')->group(function () {
 Route::prefix($p)->middleware('web')->group(function () {
     Route::get('display/{gate}', [DisplayController::class, 'show'])->whereNumber('gate')->name('qronex.display');
     Route::get('display/{gate}/token', [DisplayController::class, 'token'])->whereNumber('gate')->middleware('throttle:120,1')->name('qronex.display.token');
-    Route::get('assets/{file}', Admin\AssetController::class)->where('file', '[a-z0-9.-]+')->name('qronex.asset');
+    // ?f=… not /assets/x.css: servers like nginx answer *.css / *.js paths from disk and never reach Laravel.
+    Route::get('asset', Admin\AssetController::class)->name('qronex.asset');
 });
 
 // One-time sign-in link for hosts whose console uses API tokens (EPT): issue via the host's authenticated API, consume here.

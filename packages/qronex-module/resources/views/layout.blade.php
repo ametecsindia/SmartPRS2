@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0E2747">
 <title>{{ $title ?? 'QR Attendance' }} · {{ $host->name() }}</title>
-<link rel="stylesheet" href="{{ route('qronex.asset', 'qronex.css') }}">
-<script defer src="{{ route('qronex.asset', 'alpine.min.js') }}"></script>
+<link rel="stylesheet" href="{{ route('qronex.asset', ['f' => 'qronex.css']) }}">
+<script defer src="{{ route('qronex.asset', ['f' => 'alpine.min.js']) }}"></script>
 @stack('head')
 </head>
 <body class="bg-slate-50 text-slate-800 min-h-screen antialiased">
