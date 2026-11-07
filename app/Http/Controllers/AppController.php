@@ -13350,7 +13350,7 @@ HTML;
         // 30 Sep 2026 (Ejaz) — Asset Stock + Asset Issue & Returns screens. A plain
         // static file loaded right after the boot script (runs before boot()), so its
         // JS never passes through the heredoc above. ?v= busts the browser cache.
-        foreach (['smartprs-dates.js', 'smartprs-assets.js', 'smartprs-requests.js', 'smartprs-complaints.js', 'smartprs-menu-trim.js', 'smartprs-pt-slabs.js', 'smartprs-leave-report.js'] as $extraJs) {   // 1 Oct 2026 (Ejaz) - menu trims: Escalation Desk only under Main, no Banks under Administration.
+        foreach (['smartprs-dates.js', 'smartprs-assets.js', 'smartprs-requests.js', 'smartprs-complaints.js', 'smartprs-menu-trim.js', 'smartprs-pt-slabs.js', 'smartprs-leave-report.js', 'smartprs-qronex.js'] as $extraJs) {   // 1 Oct 2026 (Ejaz) - menu trims: Escalation Desk only under Main, no Banks under Administration.
               // 30 Sep 2026 — + request View / Edit dialogs
             $extraPath = public_path('js/'.$extraJs);
             if (is_file($extraPath)) {
